@@ -137,7 +137,7 @@ final class SigningInspector {
     }
 
     private func parseIdentityLine(_ line: String) -> SigningIdentity? {
-        let pattern = #"^\s*\d+\)\s+([0-9A-F]{40})\s+"(.+)"$"#
+        let pattern = #"^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+"(.+)"$"#
         guard let match = line.captureGroups(matching: pattern), match.count == 2 else {
             return nil
         }

@@ -6,6 +6,9 @@ import Sparkle
 
 @MainActor
 final class AppUpdater: ObservableObject {
+    private static let fallbackFeedURL = "https://maxhewett.github.io/ShipHook/appcast.xml"
+    private static let fallbackPublicKey = "rxaJsfCpTKtpqRubSfkJwKnztT5S8RHsdAueuT+jKck="
+
     @Published private(set) var isConfigured = false
     @Published private(set) var canCheckForUpdates = false
     @Published private(set) var feedURLString = ""
@@ -16,10 +19,12 @@ final class AppUpdater: ObservableObject {
 #endif
 
     init(bundle: Bundle = .main) {
-        let feedURL = (bundle.object(forInfoDictionaryKey: "SUFeedURL") as? String)?
+        let bundleFeedURL = (bundle.object(forInfoDictionaryKey: "SUFeedURL") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let publicKey = (bundle.object(forInfoDictionaryKey: "SUPublicEDKey") as? String)?
+        let bundlePublicKey = (bundle.object(forInfoDictionaryKey: "SUPublicEDKey") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let feedURL = bundleFeedURL.isEmpty ? Self.fallbackFeedURL : bundleFeedURL
+        let publicKey = bundlePublicKey.isEmpty ? Self.fallbackPublicKey : bundlePublicKey
         let configured = !feedURL.isEmpty && !publicKey.isEmpty
 
         feedURLString = feedURL

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var appState: AppState
@@ -307,6 +308,30 @@ struct ContentView: View {
                 return NSWorkspace.shared.icon(forFile: expandedPath)
             }
         }
+
+        let checkoutPath = (repository.localCheckoutPath as NSString).expandingTildeInPath
+        if FileManager.default.fileExists(atPath: checkoutPath) {
+            return NSWorkspace.shared.icon(forFile: checkoutPath)
+        }
+
+        if let projectPath = repository.xcode?.projectPath {
+            let expandedProjectPath = (projectPath as NSString).expandingTildeInPath
+            if FileManager.default.fileExists(atPath: expandedProjectPath) {
+                return NSWorkspace.shared.icon(forFile: expandedProjectPath)
+            }
+        }
+
+        if let workspacePath = repository.xcode?.workspacePath {
+            let expandedWorkspacePath = (workspacePath as NSString).expandingTildeInPath
+            if FileManager.default.fileExists(atPath: expandedWorkspacePath) {
+                return NSWorkspace.shared.icon(forFile: expandedWorkspacePath)
+            }
+        }
+
+        if #available(macOS 12.0, *) {
+            return NSWorkspace.shared.icon(for: .application)
+        }
+
         return NSWorkspace.shared.icon(forFileType: "app")
     }
 
