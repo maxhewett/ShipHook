@@ -1,6 +1,11 @@
+<img width="150" height="auto" alt="ShipHook" src="https://github.com/user-attachments/assets/fa580c86-0523-4f2c-a59c-383469e47f00" />
+
 # ShipHook
 
 ShipHook is a native macOS app and menu bar companion for monitoring GitHub repositories, detecting new pushes, building release archives, and publishing Sparkle appcasts and release artifacts.
+
+<img width="1232" height="884" alt="shpreview" src="https://github.com/user-attachments/assets/2c64a5ea-e7a7-4335-be06-0981b829daf6" />
+
 
 ## Current Status
 
