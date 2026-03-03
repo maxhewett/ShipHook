@@ -32,10 +32,11 @@ ShipHook is a native macOS app and menu bar companion for monitoring GitHub repo
 2. Ignore ShipHook-managed appcast commits marked with `[shiphook skip]`.
 3. Queue builds so only one repository pipeline runs at a time.
 4. Sync the local checkout to the latest GitHub branch state without detaching `HEAD`.
-5. Inspect the target project and plan the next Sparkle-safe build version.
-6. Build using `xcodebuild archive` or a custom shell command.
-7. Publish the release artifact, appcast, and optional appcast commit push.
-8. Surface live pipeline phase, status, and log output in the app.
+5. Detect beta releases from commit markers and route them to a separate beta feed.
+6. Inspect the target project and plan the next Sparkle-safe build version.
+7. Build using `xcodebuild archive` or a custom shell command.
+8. Publish the release artifact, appcast, and optional appcast commit push.
+9. Surface live pipeline phase, status, and log output in the app.
 
 ## Dashboard Features
 
@@ -49,6 +50,7 @@ ShipHook is a native macOS app and menu bar companion for monitoring GitHub repo
 - Reset for stale in-progress build state
 - Organizer-visible Xcode archive output
 - Automatic Sparkle release notes generated from the triggering commit message
+- Beta channel support triggered by commit markers
 
 ## Configuration
 
@@ -86,6 +88,7 @@ SHIPHOOK_BRANCH
 SHIPHOOK_SHA
 SHIPHOOK_SHORT_SHA
 SHIPHOOK_VERSION
+SHIPHOOK_RELEASE_CHANNEL
 SHIPHOOK_LOCAL_CHECKOUT_PATH
 SHIPHOOK_RELEASE_NOTES_PATH
 SHIPHOOK_ARTIFACT_PATH
@@ -94,6 +97,8 @@ SHIPHOOK_BUNDLED_PUBLISH_SCRIPT
 ```
 
 If `Release Notes Path Override` is empty, ShipHook generates an HTML release-notes page from the commit title and body for the SHA being published, then sets `SHIPHOOK_RELEASE_NOTES_PATH` to that generated file automatically.
+
+If the commit message contains `[beta]`, `[shiphook beta]`, `[pre-release]`, or `[prerelease]`, ShipHook sets `SHIPHOOK_RELEASE_CHANNEL=beta` and publishes to the beta channel instead of stable.
 
 ## Example Publish Command
 
@@ -104,11 +109,18 @@ bash "$SHIPHOOK_BUNDLED_PUBLISH_SCRIPT" \
   --app-name "ExampleApp" \
   --repo-owner "$SHIPHOOK_GITHUB_OWNER" \
   --repo-name "$SHIPHOOK_GITHUB_REPO" \
+  --channel "$SHIPHOOK_RELEASE_CHANNEL" \
   --release-notes "$SHIPHOOK_RELEASE_NOTES_PATH" \
   --docs-dir "$SHIPHOOK_LOCAL_CHECKOUT_PATH/docs" \
   --releases-dir "$SHIPHOOK_LOCAL_CHECKOUT_PATH/release-artifacts" \
   --working-dir "$SHIPHOOK_LOCAL_CHECKOUT_PATH"
 ```
+
+Beta builds publish to:
+
+- `docs/beta/appcast.xml`
+- `docs/beta/release-notes/...`
+- GitHub prereleases tagged like `v1.5.1-beta`
 
 ## Appcast Commit Loop Prevention
 

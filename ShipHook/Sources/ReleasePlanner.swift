@@ -48,13 +48,13 @@ enum ReleasePlannerError: LocalizedError {
 struct ReleasePlanner {
     private let commandRunner = ShellCommandRunner()
 
-    func prepareRelease(for repository: RepositoryConfiguration) throws -> ReleasePlan? {
+    func prepareRelease(for repository: RepositoryConfiguration, channel: ReleaseChannel = .stable) throws -> ReleasePlan? {
         guard repository.buildMode == .xcodeArchive, let xcode = repository.xcode else {
             return nil
         }
 
         let current = try inspectProjectVersion(xcode: xcode)
-        let latest = try fetchLatestAppcastVersion(for: repository)
+        let latest = try fetchLatestAppcastVersion(for: repository, channel: channel)
         let desiredBuild = try computeNextBuild(currentBuild: current.buildVersion, latestAppcast: latest, autoIncrement: repository.sparkle?.autoIncrementBuild ?? true)
 
         var mutated = false
@@ -65,25 +65,25 @@ struct ReleasePlanner {
 
         return ReleasePlan(
             version: AppVersion(marketingVersion: current.marketingVersion, buildVersion: desiredBuild),
-            appcastURL: resolvedAppcastURL(for: repository),
+            appcastURL: resolvedAppcastURL(for: repository, channel: channel),
             latestAppcastItem: latest,
             appliedBuildMutation: mutated,
             originalVersion: current
         )
     }
 
-    func inspectReleaseState(for repository: RepositoryConfiguration) throws -> ReleaseInspection? {
+    func inspectReleaseState(for repository: RepositoryConfiguration, channel: ReleaseChannel = .stable) throws -> ReleaseInspection? {
         guard repository.buildMode == .xcodeArchive, let xcode = repository.xcode else {
             return nil
         }
 
         let current = try inspectProjectVersion(xcode: xcode)
-        let latest = try fetchLatestAppcastVersion(for: repository)
+        let latest = try fetchLatestAppcastVersion(for: repository, channel: channel)
         let suggestedBuild = try computeNextBuild(currentBuild: current.buildVersion, latestAppcast: latest, autoIncrement: true)
         return ReleaseInspection(
             projectVersion: current,
             latestAppcastItem: latest,
-            appcastURL: resolvedAppcastURL(for: repository),
+            appcastURL: resolvedAppcastURL(for: repository, channel: channel),
             suggestedNextBuild: suggestedBuild
         )
     }
@@ -118,8 +118,8 @@ struct ReleasePlanner {
         return AppVersion(marketingVersion: marketingVersion, buildVersion: buildVersion)
     }
 
-    private func fetchLatestAppcastVersion(for repository: RepositoryConfiguration) throws -> AppcastVersion? {
-        guard let urlString = resolvedAppcastURL(for: repository), let url = URL(string: urlString) else {
+    private func fetchLatestAppcastVersion(for repository: RepositoryConfiguration, channel: ReleaseChannel) throws -> AppcastVersion? {
+        guard let urlString = resolvedAppcastURL(for: repository, channel: channel), let url = URL(string: urlString) else {
             return nil
         }
 
@@ -176,8 +176,11 @@ struct ReleasePlanner {
         )
     }
 
-    private func resolvedAppcastURL(for repository: RepositoryConfiguration) -> String? {
+    private func resolvedAppcastURL(for repository: RepositoryConfiguration, channel: ReleaseChannel) -> String? {
         if let explicit = repository.sparkle?.appcastURL, !explicit.isEmpty {
+            if channel == .beta {
+                return betaAppcastURL(from: explicit)
+            }
             return explicit
         }
 
@@ -185,7 +188,30 @@ struct ReleasePlanner {
             return nil
         }
 
+        if channel == .beta {
+            return "https://\(repository.owner).github.io/\(repository.repo)/beta/appcast.xml"
+        }
         return "https://\(repository.owner).github.io/\(repository.repo)/appcast.xml"
+    }
+
+    private func betaAppcastURL(from urlString: String) -> String {
+        guard let url = URL(string: urlString) else {
+            return urlString
+        }
+
+        let path = url.path
+        let betaPath: String
+        if path.hasSuffix("/appcast.xml") {
+            betaPath = String(path.dropLast("/appcast.xml".count)) + "/beta/appcast.xml"
+        } else if path.hasSuffix("appcast.xml") {
+            betaPath = String(path.dropLast("appcast.xml".count)) + "beta/appcast.xml"
+        } else {
+            betaPath = path.hasSuffix("/") ? path + "beta/appcast.xml" : path + "/beta/appcast.xml"
+        }
+
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.path = betaPath
+        return components?.url?.absoluteString ?? urlString
     }
 }
 

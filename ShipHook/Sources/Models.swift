@@ -143,7 +143,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
             buildMode: .xcodeArchive,
             xcode: .default,
             shell: .default,
-            publishCommand: "bash \"$SHIPHOOK_BUNDLED_PUBLISH_SCRIPT\" --version \"$SHIPHOOK_VERSION\" --artifact \"$SHIPHOOK_ARTIFACT_PATH\" --app-name \"YourApp\" --repo-owner \"$SHIPHOOK_GITHUB_OWNER\" --repo-name \"$SHIPHOOK_GITHUB_REPO\" --docs-dir \"$SHIPHOOK_LOCAL_CHECKOUT_PATH/docs\" --releases-dir \"$SHIPHOOK_LOCAL_CHECKOUT_PATH/release-artifacts\" --working-dir \"$SHIPHOOK_LOCAL_CHECKOUT_PATH\"",
+            publishCommand: "bash \"$SHIPHOOK_BUNDLED_PUBLISH_SCRIPT\" --version \"$SHIPHOOK_VERSION\" --artifact \"$SHIPHOOK_ARTIFACT_PATH\" --app-name \"YourApp\" --repo-owner \"$SHIPHOOK_GITHUB_OWNER\" --repo-name \"$SHIPHOOK_GITHUB_REPO\" --channel \"$SHIPHOOK_RELEASE_CHANNEL\" --docs-dir \"$SHIPHOOK_LOCAL_CHECKOUT_PATH/docs\" --releases-dir \"$SHIPHOOK_LOCAL_CHECKOUT_PATH/release-artifacts\" --working-dir \"$SHIPHOOK_LOCAL_CHECKOUT_PATH\"",
             releaseNotesPath: nil,
             githubTokenEnvVar: nil,
             environment: [:],
@@ -297,6 +297,11 @@ struct GitHubBranchSnapshot: Equatable {
     var committedAt: Date?
     var message: String
     var htmlURL: URL?
+}
+
+enum ReleaseChannel: String {
+    case stable
+    case beta
 }
 
 enum RepositoryActivity: String {

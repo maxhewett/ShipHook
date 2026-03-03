@@ -19,6 +19,7 @@ Optional:
   --releases-dir <path>           Archive output directory (default: ./release-artifacts)
   --tag-prefix <value>            Git tag prefix (default: v)
   --release-title <value>         GitHub release title (default: "<app-name> <version>")
+  --channel <stable|beta>         Release channel (default: stable)
   --download-url-base <url>       Override asset base URL
   --pages-base-url <url>          Override GitHub Pages base URL
   --working-dir <path>            Repository root for git/gh operations (default: cwd)
@@ -40,6 +41,7 @@ DOCS_DIR=""
 RELEASES_DIR=""
 TAG_PREFIX="v"
 RELEASE_TITLE=""
+CHANNEL="stable"
 DOWNLOAD_URL_BASE=""
 PAGES_BASE_URL=""
 WORKING_DIR="$(pwd)"
@@ -87,6 +89,10 @@ while [[ $# -gt 0 ]]; do
       RELEASE_TITLE="$2"
       shift 2
       ;;
+    --channel)
+      CHANNEL="$2"
+      shift 2
+      ;;
     --download-url-base)
       DOWNLOAD_URL_BASE="$2"
       shift 2
@@ -120,6 +126,11 @@ if [[ -z "$VERSION" || -z "$ARTIFACT" ]]; then
   exit 1
 fi
 
+if [[ "$CHANNEL" != "stable" && "$CHANNEL" != "beta" ]]; then
+  echo "Unsupported channel: $CHANNEL" >&2
+  exit 1
+fi
+
 resolve_path() {
   local input="$1"
   if [[ -z "$input" ]]; then
@@ -138,7 +149,11 @@ DOCS_DIR="${DOCS_DIR:-$WORKING_DIR/docs}"
 RELEASES_DIR="${RELEASES_DIR:-$WORKING_DIR/release-artifacts}"
 DOCS_DIR="$(resolve_path "$DOCS_DIR")"
 RELEASES_DIR="$(resolve_path "$RELEASES_DIR")"
-APPCAST_PATH="$DOCS_DIR/appcast.xml"
+APPCAST_DIR="$DOCS_DIR"
+if [[ "$CHANNEL" == "beta" ]]; then
+  APPCAST_DIR="$DOCS_DIR/beta"
+fi
+APPCAST_PATH="$APPCAST_DIR/appcast.xml"
 
 if [[ ! -e "$ARTIFACT" ]]; then
   echo "Artifact not found: $ARTIFACT" >&2
@@ -189,17 +204,33 @@ if [[ -z "$REPO_OWNER" || -z "$REPO_NAME" ]]; then
 fi
 
 APP_NAME="${APP_NAME:-$REPO_NAME}"
-TAG="${TAG_PREFIX}${VERSION}"
+TAG_SUFFIX=""
+if [[ "$CHANNEL" == "beta" ]]; then
+  TAG_SUFFIX="-beta"
+fi
+TAG="${TAG_PREFIX}${VERSION}${TAG_SUFFIX}"
 DOWNLOAD_URL_BASE="${DOWNLOAD_URL_BASE:-https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${TAG}}"
 PAGES_BASE_URL="${PAGES_BASE_URL:-https://${REPO_OWNER}.github.io/${REPO_NAME}}"
-RELEASE_TITLE="${RELEASE_TITLE:-${APP_NAME} ${VERSION}}"
+CHANNEL_PAGES_BASE_URL="$PAGES_BASE_URL"
+if [[ "$CHANNEL" == "beta" ]]; then
+  CHANNEL_PAGES_BASE_URL="${PAGES_BASE_URL}/beta"
+fi
+if [[ "$CHANNEL" == "beta" ]]; then
+  RELEASE_TITLE="${RELEASE_TITLE:-${APP_NAME} ${VERSION} Beta}"
+else
+  RELEASE_TITLE="${RELEASE_TITLE:-${APP_NAME} ${VERSION}}"
+fi
 RELEASE_NOTES_URL=""
 
-mkdir -p "$DOCS_DIR" "$RELEASES_DIR"
+mkdir -p "$APPCAST_DIR" "$RELEASES_DIR"
 
 make_archive_if_needed() {
   local input_path="$1"
-  local output_path="$RELEASES_DIR/${APP_NAME}-${VERSION}.zip"
+  local suffix=""
+  if [[ "$CHANNEL" == "beta" ]]; then
+    suffix="-beta"
+  fi
+  local output_path="$RELEASES_DIR/${APP_NAME}-${VERSION}${suffix}.zip"
 
   if [[ -d "$input_path" && "$input_path" == *.app ]]; then
     echo "Packaging exported app into $(basename "$output_path")..." >&2
@@ -245,10 +276,10 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 cp "$ARCHIVE_PATH" "$TMP_DIR/"
 
 if [[ -n "$RELEASE_NOTES_PATH" ]]; then
-  mkdir -p "$DOCS_DIR/release-notes"
+  mkdir -p "$APPCAST_DIR/release-notes"
   RELEASE_NOTES_BASENAME="${VERSION}.html"
-  cp "$RELEASE_NOTES_PATH" "$DOCS_DIR/release-notes/$RELEASE_NOTES_BASENAME"
-  RELEASE_NOTES_URL="${PAGES_BASE_URL}/release-notes/${RELEASE_NOTES_BASENAME}"
+  cp "$RELEASE_NOTES_PATH" "$APPCAST_DIR/release-notes/$RELEASE_NOTES_BASENAME"
+  RELEASE_NOTES_URL="${CHANNEL_PAGES_BASE_URL}/release-notes/${RELEASE_NOTES_BASENAME}"
 fi
 
 CMD=("$GENERATE_APPCAST" "$TMP_DIR")
@@ -296,7 +327,11 @@ publish_release_if_possible() {
     echo "Uploading asset to existing GitHub Release ${TAG}..."
   else
     echo "Creating GitHub Release ${TAG}..."
-    gh release create "$TAG" --repo "${REPO_OWNER}/${REPO_NAME}" --title "$RELEASE_TITLE" "${notes_args[@]}"
+    local prerelease_args=()
+    if [[ "$CHANNEL" == "beta" ]]; then
+      prerelease_args=(--prerelease)
+    fi
+    gh release create "$TAG" --repo "${REPO_OWNER}/${REPO_NAME}" --title "$RELEASE_TITLE" "${notes_args[@]}" "${prerelease_args[@]}"
   fi
 
   echo "Uploading ${ASSET_NAME} to GitHub Release ${TAG}..."
@@ -323,7 +358,7 @@ publish_appcast_commit_if_possible() {
 
   local files_to_add=("$APPCAST_PATH")
   if [[ -n "$RELEASE_NOTES_PATH" && -n "$RELEASE_NOTES_URL" ]]; then
-    files_to_add+=("$DOCS_DIR/release-notes/${VERSION}.html")
+    files_to_add+=("$APPCAST_DIR/release-notes/${VERSION}.html")
   fi
 
   git -C "$WORKING_DIR" add -- "${files_to_add[@]}"
@@ -340,7 +375,11 @@ publish_appcast_commit_if_possible() {
     return 0
   fi
 
-  local commit_message="chore(shiphook): update appcast for ${APP_NAME} ${VERSION} [shiphook skip]"
+  local channel_prefix=""
+  if [[ "$CHANNEL" == "beta" ]]; then
+    channel_prefix="beta "
+  fi
+  local commit_message="chore(shiphook): update ${channel_prefix}appcast for ${APP_NAME} ${VERSION} [shiphook skip]"
   git -C "$WORKING_DIR" commit -m "$commit_message"
   git -C "$WORKING_DIR" push origin "$current_branch"
 }
@@ -350,6 +389,7 @@ publish_appcast_commit_if_possible
 echo "Updated appcast: $APPCAST_PATH"
 echo "Archive: $ARCHIVE_PATH"
 echo "Release asset URL: $DOWNLOAD_URL"
+echo "Release channel: $CHANNEL"
 if [[ -n "$RELEASE_NOTES_URL" ]]; then
   echo "Release notes URL: $RELEASE_NOTES_URL"
 fi

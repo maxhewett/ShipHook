@@ -65,7 +65,8 @@ struct PipelineRunner {
         try syncRepository(repository, checkoutPath: checkoutPath, sha: snapshot.sha, onStageChange: onStageChange, onOutput: appendOutput)
 
         onStageChange?(.planningRelease)
-        let releasePlan = try releasePlanner.prepareRelease(for: repository)
+        let releaseChannel = releaseChannel(for: snapshot)
+        let releasePlan = try releasePlanner.prepareRelease(for: repository, channel: releaseChannel)
         defer {
             try? releasePlanner.restoreProjectVersionIfNeeded(releasePlan, xcode: repository.xcode)
         }
@@ -90,6 +91,7 @@ struct PipelineRunner {
             "SHIPHOOK_SHORT_SHA": String(snapshot.sha.prefix(7)),
             "SHIPHOOK_VERSION": version,
             "SHIPHOOK_BUILD_VERSION": buildVersion,
+            "SHIPHOOK_RELEASE_CHANNEL": releaseChannel.rawValue,
             "SHIPHOOK_LOCAL_CHECKOUT_PATH": checkoutPath,
             "SHIPHOOK_RELEASE_NOTES_PATH": releaseNotesPath,
             "SHIPHOOK_BUNDLED_PUBLISH_SCRIPT": bundledPublishScript,
@@ -98,6 +100,9 @@ struct PipelineRunner {
 
         if let releasePlan, releasePlan.appliedBuildMutation {
             combinedLog += "Updated CURRENT_PROJECT_VERSION to \(releasePlan.version.buildVersion) before archive.\n"
+        }
+        if releaseChannel == .beta {
+            combinedLog += "Detected beta release channel from commit message.\n"
         }
 
         let artifactPath: String
@@ -630,4 +635,10 @@ private extension String {
     var nilIfEmpty: String? {
         isEmpty ? nil : self
     }
+}
+
+private func releaseChannel(for snapshot: GitHubBranchSnapshot) -> ReleaseChannel {
+    let lowercasedMessage = snapshot.message.lowercased()
+    let betaMarkers = ["[beta]", "[shiphook beta]", "[pre-release]", "[prerelease]"]
+    return betaMarkers.contains(where: { lowercasedMessage.contains($0) }) ? .beta : .stable
 }
