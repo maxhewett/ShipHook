@@ -16,3 +16,4 @@ release-artifacts/
 # Local app config
 *.log
 .build-release
+.shiphook
