@@ -17,3 +17,4 @@ docs/release-notes/
 
 # Local app config
 *.log
+.build-release

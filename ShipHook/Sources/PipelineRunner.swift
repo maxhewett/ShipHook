@@ -5,19 +5,57 @@ struct PipelineOutcome {
     var version: String
     var artifactPath: String
     var log: String
+    var logPath: String
+}
+
+enum PipelineStage {
+    case syncing(String)
+    case planningRelease
+    case archiving
+    case publishing
 }
 
 struct PipelineRunner {
     private let commandRunner = ShellCommandRunner()
+    private let releasePlanner = ReleasePlanner()
+    private let signingInspector = SigningInspector()
 
-    func run(repository: RepositoryConfiguration, snapshot: GitHubBranchSnapshot) throws -> PipelineOutcome {
+    func run(
+        repository: RepositoryConfiguration,
+        snapshot: GitHubBranchSnapshot,
+        onStageChange: ((PipelineStage) -> Void)? = nil,
+        onOutput: ((String) -> Void)? = nil
+    ) throws -> PipelineOutcome {
         let workspaceRoot = FileManager.default.currentDirectoryPath
+        let fileManager = FileManager.default
         let checkoutPath = repository.localCheckoutPath.expandingTildeInPath
         let workingDirectory = (repository.workingDirectory ?? checkoutPath).expandingTildeInPath
-        let version = makeVersion(for: repository, snapshot: snapshot)
         let bundledPublishScript = Bundle.main.url(forResource: "publish_sparkle_release", withExtension: "sh")?.path ?? ""
+        let logsDirectory = "\(checkoutPath)/.shiphook/logs"
+        let logPath = "\(logsDirectory)/\(repository.id)-latest.log"
+
+        try fileManager.createDirectory(atPath: logsDirectory, withIntermediateDirectories: true, attributes: nil)
+        try Data().write(to: URL(fileURLWithPath: logPath))
 
         var combinedLog = ""
+        let appendOutput: (String) -> Void = { chunk in
+            combinedLog.append(chunk)
+            if let data = chunk.data(using: .utf8),
+               let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: logPath)) {
+                try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+                try? handle.close()
+            }
+            onOutput?(chunk)
+        }
+
+        onStageChange?(.syncing("Fetching latest branch state"))
+        try syncRepository(repository, checkoutPath: checkoutPath, sha: snapshot.sha, onStageChange: onStageChange, onOutput: appendOutput)
+
+        onStageChange?(.planningRelease)
+        let releasePlan = try releasePlanner.prepareRelease(for: repository)
+        let version = releasePlan?.version.marketingVersion ?? makeVersion(for: repository, snapshot: snapshot)
+        let buildVersion = releasePlan?.version.buildVersion ?? ""
 
         let baseEnvironment = repository.environment.merging([
             "SHIPHOOK_WORKSPACE_ROOT": workspaceRoot,
@@ -29,70 +67,108 @@ struct PipelineRunner {
             "SHIPHOOK_SHA": snapshot.sha,
             "SHIPHOOK_SHORT_SHA": String(snapshot.sha.prefix(7)),
             "SHIPHOOK_VERSION": version,
+            "SHIPHOOK_BUILD_VERSION": buildVersion,
             "SHIPHOOK_LOCAL_CHECKOUT_PATH": checkoutPath,
             "SHIPHOOK_RELEASE_NOTES_PATH": repository.releaseNotesPath?.expandingTildeInPath ?? "",
             "SHIPHOOK_BUNDLED_PUBLISH_SCRIPT": bundledPublishScript,
+            "SHIPHOOK_APPCAST_URL": releasePlan?.appcastURL ?? "",
         ]) { _, rhs in rhs }
 
-        combinedLog += try syncRepository(repository, checkoutPath: checkoutPath, sha: snapshot.sha)
+        if let releasePlan, releasePlan.appliedBuildMutation {
+            combinedLog += "Updated CURRENT_PROJECT_VERSION to \(releasePlan.version.buildVersion) before archive.\n"
+        }
 
         let artifactPath: String
         switch repository.buildMode {
         case .xcodeArchive:
+            try signingInspector.validateReleaseSigning(repository.signing)
             guard let xcode = repository.xcode else {
                 throw NSError(domain: "ShipHook", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing xcode build configuration for \(repository.name)."])
             }
-            let outcome = try runXcodeBuild(xcode, workingDirectory: workingDirectory, environment: baseEnvironment)
+            onStageChange?(.archiving)
+            let outcome = try runXcodeBuild(repository: repository, xcode, workingDirectory: workingDirectory, environment: baseEnvironment, onOutput: appendOutput)
             artifactPath = outcome.artifactPath
-            combinedLog += outcome.log
         case .shell:
             guard let shell = repository.shell else {
                 throw NSError(domain: "ShipHook", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing shell build configuration for \(repository.name)."])
             }
-            let result = try commandRunner.run(shell.command, currentDirectory: workingDirectory, environment: baseEnvironment)
-            combinedLog += result.output
+            onStageChange?(.archiving)
+            _ = try commandRunner.run(shell.command, currentDirectory: workingDirectory, environment: baseEnvironment, onOutput: appendOutput)
             artifactPath = shell.artifactPath.expandingTildeInPath
         }
 
         var publishEnvironment = baseEnvironment
         publishEnvironment["SHIPHOOK_ARTIFACT_PATH"] = artifactPath
-        let publishResult = try commandRunner.run(repository.publishCommand, currentDirectory: workingDirectory, environment: publishEnvironment)
-        combinedLog += publishResult.output
+        onStageChange?(.publishing)
+        _ = try commandRunner.run(repository.publishCommand, currentDirectory: workingDirectory, environment: publishEnvironment, onOutput: appendOutput)
 
         return PipelineOutcome(
             builtSHA: snapshot.sha,
             version: version,
             artifactPath: artifactPath,
-            log: combinedLog
+            log: combinedLog,
+            logPath: logPath
         )
     }
 
-    private func syncRepository(_ repository: RepositoryConfiguration, checkoutPath: String, sha: String) throws -> String {
+    private func syncRepository(
+        _ repository: RepositoryConfiguration,
+        checkoutPath: String,
+        sha: String,
+        onStageChange: ((PipelineStage) -> Void)?,
+        onOutput: ((String) -> Void)?
+    ) throws {
         let commands = [
-            "git -C '\(checkoutPath)' fetch origin '\(repository.branch)' --tags",
-            "git -C '\(checkoutPath)' checkout '\(repository.branch)'",
-            "git -C '\(checkoutPath)' pull --ff-only origin '\(repository.branch)'",
-            "git -C '\(checkoutPath)' checkout '\(sha)'",
+            ("Fetching origin/\(repository.branch)", "git -C '\(checkoutPath)' fetch origin '\(repository.branch)' --tags"),
+            ("Checking out branch \(repository.branch)", "git -C '\(checkoutPath)' checkout '\(repository.branch)'"),
+            ("Fast-forwarding branch \(repository.branch)", "git -C '\(checkoutPath)' pull --ff-only origin '\(repository.branch)'"),
+            ("Verifying local HEAD", "git -C '\(checkoutPath)' rev-parse HEAD"),
         ]
 
-        return try commands.reduce(into: "") { partialResult, command in
-            let result = try commandRunner.run(command, currentDirectory: checkoutPath, environment: [:])
-            partialResult += result.output
+        try commands.forEach { item in
+            onStageChange?(.syncing(item.0))
+            _ = try commandRunner.run(item.1, currentDirectory: checkoutPath, environment: [:], onOutput: onOutput)
+        }
+
+        let currentHead = try commandRunner
+            .run("git -C '\(checkoutPath)' rev-parse HEAD", currentDirectory: checkoutPath, environment: [:])
+            .output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard currentHead == sha else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "Repository HEAD \(currentHead) does not match GitHub snapshot \(sha) after sync."]
+            )
         }
     }
 
     private func runXcodeBuild(
+        repository: RepositoryConfiguration,
         _ xcode: XcodeBuildConfiguration,
         workingDirectory: String,
-        environment: [String: String]
+        environment: [String: String],
+        onOutput: ((String) -> Void)?
     ) throws -> (artifactPath: String, log: String) {
+        let fileManager = FileManager.default
         let archivePath = xcode.archivePath.expandingTildeInPath
-        let exportPath = xcode.exportPath.expandingTildeInPath
-        let exportOptions = xcode.exportOptionsPlistPath.expandingTildeInPath
         let artifactPath = xcode.artifactPath.expandingTildeInPath
+        let derivedDataPath = "\(repository.localCheckoutPath.expandingTildeInPath)/.shiphook/derived-data/\(repository.id)"
+
+        try fileManager.createDirectory(
+            at: URL(fileURLWithPath: archivePath).deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try fileManager.createDirectory(
+            at: URL(fileURLWithPath: derivedDataPath),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
 
         let targetFlag: String
-        if let workspacePath = xcode.workspacePath?.expandingTildeInPath, !workspacePath.isEmpty {
+        if let workspacePath = xcode.sanitizedWorkspacePath?.expandingTildeInPath, !workspacePath.isEmpty {
             targetFlag = "-workspace '\(workspacePath)'"
         } else if let projectPath = xcode.projectPath?.expandingTildeInPath, !projectPath.isEmpty {
             targetFlag = "-project '\(projectPath)'"
@@ -101,16 +177,29 @@ struct PipelineRunner {
         }
 
         let archiveCommand = """
-        xcodebuild \(targetFlag) -scheme '\(xcode.scheme)' -configuration '\(xcode.configuration)' archive -archivePath '\(archivePath)'
+        xcodebuild \(targetFlag) -scheme '\(xcode.scheme)' -configuration '\(xcode.configuration)' -derivedDataPath '\(derivedDataPath)' archive -archivePath '\(archivePath)'\(signingOverrides(for: repository))
         """
 
-        let exportCommand = """
-        xcodebuild -exportArchive -archivePath '\(archivePath)' -exportPath '\(exportPath)' -exportOptionsPlist '\(exportOptions)'
-        """
+        let archiveResult = try commandRunner.run(archiveCommand, currentDirectory: workingDirectory, environment: environment, onOutput: onOutput)
+        return (artifactPath, archiveResult.output)
+    }
 
-        let archiveResult = try commandRunner.run(archiveCommand, currentDirectory: workingDirectory, environment: environment)
-        let exportResult = try commandRunner.run(exportCommand, currentDirectory: workingDirectory, environment: environment)
-        return (artifactPath, archiveResult.output + exportResult.output)
+    private func signingOverrides(for repository: RepositoryConfiguration) -> String {
+        guard let signing = repository.signing else {
+            return ""
+        }
+
+        var parts: [String] = []
+        parts.append(" CODE_SIGN_STYLE=\(signing.codeSignStyle.rawValue.capitalized)")
+        if let team = signing.developmentTeam, !team.isEmpty {
+            parts.append(" DEVELOPMENT_TEAM='\(team)'")
+        }
+        if signing.codeSignStyle == .manual,
+           let identity = signing.codeSignIdentity,
+           !identity.isEmpty {
+            parts.append(" CODE_SIGN_IDENTITY='\(identity)'")
+        }
+        return parts.joined()
     }
 
     private func makeVersion(for repository: RepositoryConfiguration, snapshot: GitHubBranchSnapshot) -> String {

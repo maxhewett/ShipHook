@@ -1,0 +1,148 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "display-p3:0.75830,0.87305,0.95068,1.00000",
+      "display-p3:0.63037,0.59668,0.88916,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
+      }
+    }
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "hook.png",
+          "name" : "hook",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -89.765625,
+              23.515625
+            ]
+          }
+        },
+        {
+          "image-name" : "rocket.png",
+          "name" : "rocket",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              3.234375,
+              129.609375
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    },
+    {
+      "layers" : [
+        {
+          "blend-mode" : "soft-light",
+          "fill-specializations" : [
+            {
+              "value" : {
+                "linear-gradient" : [
+                  "display-p3:0.98850,0.96261,1.00000,1.00000",
+                  "display-p3:0.96417,0.96783,0.95875,0.14472"
+                ],
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.5,
+                    "y" : 0
+                  },
+                  "stop" : {
+                    "x" : 0.5,
+                    "y" : 0.7
+                  }
+                }
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "linear-gradient" : [
+                  "display-p3:0.98850,0.96261,1.00000,1.00000",
+                  "display-p3:0.96417,0.96783,0.95875,0.00000"
+                ],
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.5,
+                    "y" : 0
+                  },
+                  "stop" : {
+                    "x" : 0.5,
+                    "y" : 0.7
+                  }
+                }
+              }
+            }
+          ],
+          "image-name" : "gear2.png",
+          "name" : "gear2",
+          "opacity" : 0.4
+        },
+        {
+          "blend-mode" : "soft-light",
+          "fill" : {
+            "linear-gradient" : [
+              "display-p3:0.98850,0.96261,1.00000,1.00000",
+              "display-p3:0.96417,0.96783,0.95875,0.14472"
+            ],
+            "orientation" : {
+              "start" : {
+                "x" : 0.5,
+                "y" : 0
+              },
+              "stop" : {
+                "x" : 0.5,
+                "y" : 0.7
+              }
+            }
+          },
+          "hidden" : true,
+          "image-name" : "gear 2.png",
+          "name" : "gear 2",
+          "opacity" : 0.4,
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              16.234375,
+              33.015625
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

@@ -22,6 +22,7 @@ Optional:
   --download-url-base <url>       Override asset base URL
   --pages-base-url <url>          Override GitHub Pages base URL
   --working-dir <path>            Repository root for git/gh operations (default: cwd)
+  --skip-appcast-commit           Update appcast locally but do not git commit/push it
 
 Notes:
   - Sparkle's generate_appcast must be available, or SPARKLE_GENERATE_APPCAST must be set.
@@ -42,6 +43,7 @@ RELEASE_TITLE=""
 DOWNLOAD_URL_BASE=""
 PAGES_BASE_URL=""
 WORKING_DIR="$(pwd)"
+SKIP_APPCAST_COMMIT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -96,6 +98,10 @@ while [[ $# -gt 0 ]]; do
     --working-dir)
       WORKING_DIR="$2"
       shift 2
+      ;;
+    --skip-appcast-commit)
+      SKIP_APPCAST_COMMIT=1
+      shift
       ;;
     --help|-h)
       usage
@@ -298,6 +304,48 @@ publish_release_if_possible() {
 }
 
 publish_release_if_possible
+
+publish_appcast_commit_if_possible() {
+  if [[ "$SKIP_APPCAST_COMMIT" -eq 1 ]]; then
+    echo "Skipping appcast git commit/push by request."
+    return 0
+  fi
+
+  if ! command -v git >/dev/null 2>&1; then
+    echo "Skipping appcast git commit/push: git is not installed."
+    return 0
+  fi
+
+  if ! git -C "$WORKING_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Skipping appcast git commit/push: working directory is not a git repository."
+    return 0
+  fi
+
+  local files_to_add=("$APPCAST_PATH")
+  if [[ -n "$RELEASE_NOTES_PATH" && -n "$RELEASE_NOTES_URL" ]]; then
+    files_to_add+=("$DOCS_DIR/release-notes/${VERSION}.html")
+  fi
+
+  git -C "$WORKING_DIR" add -- "${files_to_add[@]}"
+
+  if git -C "$WORKING_DIR" diff --cached --quiet; then
+    echo "No appcast documentation changes to commit."
+    return 0
+  fi
+
+  local current_branch
+  current_branch="$(git -C "$WORKING_DIR" rev-parse --abbrev-ref HEAD)"
+  if [[ -z "$current_branch" || "$current_branch" == "HEAD" ]]; then
+    echo "Skipping appcast git push: repository is not on a branch."
+    return 0
+  fi
+
+  local commit_message="chore(shiphook): update appcast for ${APP_NAME} ${VERSION} [shiphook skip]"
+  git -C "$WORKING_DIR" commit -m "$commit_message"
+  git -C "$WORKING_DIR" push origin "$current_branch"
+}
+
+publish_appcast_commit_if_possible
 
 echo "Updated appcast: $APPCAST_PATH"
 echo "Archive: $ARCHIVE_PATH"

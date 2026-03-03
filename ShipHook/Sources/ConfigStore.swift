@@ -26,7 +26,20 @@ struct ConfigStore {
     mutating func loadConfiguration() throws -> AppConfiguration {
         try ensureConfigExists()
         let data = try Data(contentsOf: configURL)
-        return try JSONDecoder().decode(AppConfiguration.self, from: data)
+        var configuration = try JSONDecoder().decode(AppConfiguration.self, from: data)
+        if configuration.containsOnlyPlaceholderRepository {
+            configuration.repositories = []
+            try saveConfiguration(configuration)
+        }
+        return configuration
+    }
+
+    mutating func saveConfiguration(_ configuration: AppConfiguration) throws {
+        try fileManager.createDirectory(at: appSupportDirectory, withIntermediateDirectories: true, attributes: nil)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(configuration)
+        try data.write(to: configURL, options: .atomic)
     }
 
     mutating func ensureConfigExists() throws {

@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		5015DEA22F56D27A00618C6D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5015DEA12F56D27A00618C6D /* Assets.xcassets */; };
+		50CD98602F56EE1000F9E715 /* ShipHook.icon in Resources */ = {isa = PBXBuildFile; fileRef = 50CD985F2F56EE1000F9E715 /* ShipHook.icon */; };
+		7A0000000000000000000001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 7A0000000000000000000002 /* Sparkle */; };
 		A00000000000000000000001 /* ShipHookApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000011 /* ShipHookApp.swift */; };
 		A00000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000012 /* ContentView.swift */; };
 		A00000000000000000000003 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000013 /* AppState.swift */; };
@@ -17,9 +20,15 @@
 		A00000000000000000000008 /* ShellCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000018 /* ShellCommand.swift */; };
 		A00000000000000000000009 /* SampleConfig.json in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000019 /* SampleConfig.json */; };
 		A0000000000000000000002A /* publish_sparkle_release.sh in Resources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000002B /* publish_sparkle_release.sh */; };
+		A0000000000000000000002C /* ProjectInspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000002D /* ProjectInspector.swift */; };
+		A0000000000000000000002E /* ReleasePlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000002F /* ReleasePlanner.swift */; };
+		A00000000000000000000030 /* SigningInspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000031 /* SigningInspector.swift */; };
+		A00000000000000000000032 /* AppUpdater.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000033 /* AppUpdater.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		5015DEA12F56D27A00618C6D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		50CD985F2F56EE1000F9E715 /* ShipHook.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = ShipHook.icon; sourceTree = "<group>"; };
 		A0000000000000000000000A /* ShipHook.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ShipHook.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A00000000000000000000011 /* ShipHookApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShipHookApp.swift; sourceTree = "<group>"; };
 		A00000000000000000000012 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -31,6 +40,10 @@
 		A00000000000000000000018 /* ShellCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellCommand.swift; sourceTree = "<group>"; };
 		A00000000000000000000019 /* SampleConfig.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = SampleConfig.json; sourceTree = "<group>"; };
 		A0000000000000000000002B /* publish_sparkle_release.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = publish_sparkle_release.sh; sourceTree = "<group>"; };
+		A0000000000000000000002D /* ProjectInspector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectInspector.swift; sourceTree = "<group>"; };
+		A0000000000000000000002F /* ReleasePlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReleasePlanner.swift; sourceTree = "<group>"; };
+		A00000000000000000000031 /* SigningInspector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SigningInspector.swift; sourceTree = "<group>"; };
+		A00000000000000000000033 /* AppUpdater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdater.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -38,20 +51,22 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				7A0000000000000000000001 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-			A0000000000000000000001B = {
-				isa = PBXGroup;
-				children = (
-					A0000000000000000000001C /* ShipHook */,
-					A0000000000000000000002B /* publish_sparkle_release.sh */,
-					A0000000000000000000001D /* Products */,
-				);
-				sourceTree = "<group>";
+		A0000000000000000000001B = {
+			isa = PBXGroup;
+			children = (
+				50CD985F2F56EE1000F9E715 /* ShipHook.icon */,
+				A0000000000000000000001C /* ShipHook */,
+				A0000000000000000000002B /* publish_sparkle_release.sh */,
+				A0000000000000000000001D /* Products */,
+			);
+			sourceTree = "<group>";
 		};
 		A0000000000000000000001C /* ShipHook */ = {
 			isa = PBXGroup;
@@ -80,7 +95,11 @@
 				A00000000000000000000015 /* GitHubAPI.swift */,
 				A00000000000000000000016 /* Models.swift */,
 				A00000000000000000000017 /* PipelineRunner.swift */,
+				A0000000000000000000002D /* ProjectInspector.swift */,
+				A0000000000000000000002F /* ReleasePlanner.swift */,
 				A00000000000000000000018 /* ShellCommand.swift */,
+				A00000000000000000000031 /* SigningInspector.swift */,
+				A00000000000000000000033 /* AppUpdater.swift */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -88,6 +107,7 @@
 		A0000000000000000000001F /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				5015DEA12F56D27A00618C6D /* Assets.xcassets */,
 				A00000000000000000000019 /* SampleConfig.json */,
 			);
 			path = Resources;
@@ -109,6 +129,9 @@
 			dependencies = (
 			);
 			name = ShipHook;
+			packageProductDependencies = (
+				7A0000000000000000000002 /* Sparkle */,
+			);
 			productName = ShipHook;
 			productReference = A0000000000000000000000A /* ShipHook.app */;
 			productType = "com.apple.product-type.application";
@@ -137,6 +160,9 @@
 				Base,
 			);
 			mainGroup = A0000000000000000000001B;
+			packageReferences = (
+				7A0000000000000000000003 /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
 			productRefGroup = A0000000000000000000001D /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -152,7 +178,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				A00000000000000000000009 /* SampleConfig.json in Resources */,
+				50CD98602F56EE1000F9E715 /* ShipHook.icon in Resources */,
 				A0000000000000000000002A /* publish_sparkle_release.sh in Resources */,
+				5015DEA22F56D27A00618C6D /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -169,7 +197,11 @@
 				A00000000000000000000005 /* GitHubAPI.swift in Sources */,
 				A00000000000000000000006 /* Models.swift in Sources */,
 				A00000000000000000000007 /* PipelineRunner.swift in Sources */,
+				A0000000000000000000002C /* ProjectInspector.swift in Sources */,
+				A0000000000000000000002E /* ReleasePlanner.swift in Sources */,
 				A00000000000000000000008 /* ShellCommand.swift in Sources */,
+				A00000000000000000000030 /* SigningInspector.swift in Sources */,
+				A00000000000000000000032 /* AppUpdater.swift in Sources */,
 				A00000000000000000000001 /* ShipHookApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -181,6 +213,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = ShipHook;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -188,7 +222,11 @@
 				ENABLE_APP_SANDBOX = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = ShipHook;
-				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_LSUIElement = NO;
+				INFOPLIST_KEY_SUEnableAutomaticChecks = YES;
+				INFOPLIST_KEY_SUFeedURL = "https://maxhewett.github.io/ShipHook/appcast.xml";
+				INFOPLIST_KEY_SUPublicEDKey = "rxaJsfCpTKtpqRubSfkJwKnztT5S8RHsdAueuT+jKck=";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -207,6 +245,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = ShipHook;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -214,7 +254,11 @@
 				ENABLE_APP_SANDBOX = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = ShipHook;
-				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_LSUIElement = NO;
+				INFOPLIST_KEY_SUEnableAutomaticChecks = YES;
+				INFOPLIST_KEY_SUFeedURL = "https://maxhewett.github.io/ShipHook/appcast.xml";
+				INFOPLIST_KEY_SUPublicEDKey = "rxaJsfCpTKtpqRubSfkJwKnztT5S8RHsdAueuT+jKck=";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -265,6 +309,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		7A0000000000000000000003 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.8.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		7A0000000000000000000002 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 7A0000000000000000000003 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A00000000000000000000023 /* Project object */;
 }

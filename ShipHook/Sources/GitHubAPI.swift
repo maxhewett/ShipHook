@@ -23,7 +23,13 @@ struct GitHubAPI {
         branch: String,
         token: String?
     ) async throws -> GitHubBranchSnapshot {
-        let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/branches/\(branch)")!
+        let encodedBranch = branch.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)?
+            .replacingOccurrences(of: "/", with: "%2F")
+        guard let encodedBranch else {
+            throw GitHubAPIError.invalidResponse
+        }
+
+        let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/branches/\(encodedBranch)")!
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("ShipHook", forHTTPHeaderField: "User-Agent")
