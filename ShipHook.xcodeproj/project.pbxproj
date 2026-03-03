@@ -1,0 +1,270 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A00000000000000000000001 /* ShipHookApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000011 /* ShipHookApp.swift */; };
+		A00000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000012 /* ContentView.swift */; };
+		A00000000000000000000003 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000013 /* AppState.swift */; };
+		A00000000000000000000004 /* ConfigStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000014 /* ConfigStore.swift */; };
+		A00000000000000000000005 /* GitHubAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000015 /* GitHubAPI.swift */; };
+		A00000000000000000000006 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000016 /* Models.swift */; };
+		A00000000000000000000007 /* PipelineRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000017 /* PipelineRunner.swift */; };
+		A00000000000000000000008 /* ShellCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000018 /* ShellCommand.swift */; };
+		A00000000000000000000009 /* SampleConfig.json in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000019 /* SampleConfig.json */; };
+		A0000000000000000000002A /* publish_sparkle_release.sh in Resources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000002B /* publish_sparkle_release.sh */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A0000000000000000000000A /* ShipHook.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ShipHook.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A00000000000000000000011 /* ShipHookApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShipHookApp.swift; sourceTree = "<group>"; };
+		A00000000000000000000012 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A00000000000000000000013 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		A00000000000000000000014 /* ConfigStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigStore.swift; sourceTree = "<group>"; };
+		A00000000000000000000015 /* GitHubAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubAPI.swift; sourceTree = "<group>"; };
+		A00000000000000000000016 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		A00000000000000000000017 /* PipelineRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PipelineRunner.swift; sourceTree = "<group>"; };
+		A00000000000000000000018 /* ShellCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellCommand.swift; sourceTree = "<group>"; };
+		A00000000000000000000019 /* SampleConfig.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = SampleConfig.json; sourceTree = "<group>"; };
+		A0000000000000000000002B /* publish_sparkle_release.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = publish_sparkle_release.sh; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A0000000000000000000001A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+			A0000000000000000000001B = {
+				isa = PBXGroup;
+				children = (
+					A0000000000000000000001C /* ShipHook */,
+					A0000000000000000000002B /* publish_sparkle_release.sh */,
+					A0000000000000000000001D /* Products */,
+				);
+				sourceTree = "<group>";
+		};
+		A0000000000000000000001C /* ShipHook */ = {
+			isa = PBXGroup;
+			children = (
+				A0000000000000000000001E /* Sources */,
+				A0000000000000000000001F /* Resources */,
+			);
+			path = ShipHook;
+			sourceTree = "<group>";
+		};
+		A0000000000000000000001D /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A0000000000000000000000A /* ShipHook.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A0000000000000000000001E /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				A00000000000000000000011 /* ShipHookApp.swift */,
+				A00000000000000000000012 /* ContentView.swift */,
+				A00000000000000000000013 /* AppState.swift */,
+				A00000000000000000000014 /* ConfigStore.swift */,
+				A00000000000000000000015 /* GitHubAPI.swift */,
+				A00000000000000000000016 /* Models.swift */,
+				A00000000000000000000017 /* PipelineRunner.swift */,
+				A00000000000000000000018 /* ShellCommand.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		A0000000000000000000001F /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				A00000000000000000000019 /* SampleConfig.json */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A00000000000000000000020 /* ShipHook */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A00000000000000000000028 /* Build configuration list for PBXNativeTarget "ShipHook" */;
+			buildPhases = (
+				A00000000000000000000021 /* Sources */,
+				A0000000000000000000001A /* Frameworks */,
+				A00000000000000000000022 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ShipHook;
+			productName = ShipHook;
+			productReference = A0000000000000000000000A /* ShipHook.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A00000000000000000000023 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					A00000000000000000000020 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = A00000000000000000000024 /* Build configuration list for PBXProject "ShipHook" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A0000000000000000000001B;
+			productRefGroup = A0000000000000000000001D /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A00000000000000000000020 /* ShipHook */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A00000000000000000000022 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00000000000000000000009 /* SampleConfig.json in Resources */,
+				A0000000000000000000002A /* publish_sparkle_release.sh in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A00000000000000000000021 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00000000000000000000003 /* AppState.swift in Sources */,
+				A00000000000000000000004 /* ConfigStore.swift in Sources */,
+				A00000000000000000000002 /* ContentView.swift in Sources */,
+				A00000000000000000000005 /* GitHubAPI.swift in Sources */,
+				A00000000000000000000006 /* Models.swift in Sources */,
+				A00000000000000000000007 /* PipelineRunner.swift in Sources */,
+				A00000000000000000000008 /* ShellCommand.swift in Sources */,
+				A00000000000000000000001 /* ShipHookApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A00000000000000000000025 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_APP_SANDBOX = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = ShipHook;
+				INFOPLIST_KEY_LSUIElement = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.ShipHook;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		A00000000000000000000026 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_APP_SANDBOX = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = ShipHook;
+				INFOPLIST_KEY_LSUIElement = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.ShipHook;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		A00000000000000000000027 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+			};
+			name = Debug;
+		};
+		A00000000000000000000029 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A00000000000000000000024 /* Build configuration list for PBXProject "ShipHook" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A00000000000000000000027 /* Debug */,
+				A00000000000000000000029 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A00000000000000000000028 /* Build configuration list for PBXNativeTarget "ShipHook" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A00000000000000000000025 /* Debug */,
+				A00000000000000000000026 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A00000000000000000000023 /* Project object */;
+}

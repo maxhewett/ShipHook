@@ -1,0 +1,40 @@
+{
+  "source": "/Users/max/Developer/ShipHook/ShipHook/Sources/ContentView.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "ShipHook",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 9
+        }
+      },
+      {
+        "comment": "",
+        "key": "Check Now",
+        "location": {
+          "startingColumn": 24,
+          "startingLine": 12
+        }
+      },
+      {
+        "comment": "",
+        "key": "Reveal Config",
+        "location": {
+          "startingColumn": 24,
+          "startingLine": 15
+        }
+      },
+      {
+        "comment": "",
+        "key": "%@/%@ @ %@",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 40
+        }
+      }
+    ]
+  },
+  "version": 1
+}
