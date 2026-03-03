@@ -68,6 +68,12 @@ struct PipelineRunner {
         let releasePlan = try releasePlanner.prepareRelease(for: repository)
         let version = releasePlan?.version.marketingVersion ?? makeVersion(for: repository, snapshot: snapshot)
         let buildVersion = releasePlan?.version.buildVersion ?? ""
+        let releaseNotesPath = try resolvedReleaseNotesPath(
+            for: repository,
+            snapshot: snapshot,
+            checkoutPath: checkoutPath,
+            version: version
+        )
 
         let baseEnvironment = repository.environment.merging([
             "SHIPHOOK_WORKSPACE_ROOT": workspaceRoot,
@@ -81,7 +87,7 @@ struct PipelineRunner {
             "SHIPHOOK_VERSION": version,
             "SHIPHOOK_BUILD_VERSION": buildVersion,
             "SHIPHOOK_LOCAL_CHECKOUT_PATH": checkoutPath,
-            "SHIPHOOK_RELEASE_NOTES_PATH": repository.releaseNotesPath?.expandingTildeInPath ?? "",
+            "SHIPHOOK_RELEASE_NOTES_PATH": releaseNotesPath,
             "SHIPHOOK_BUNDLED_PUBLISH_SCRIPT": bundledPublishScript,
             "SHIPHOOK_APPCAST_URL": releasePlan?.appcastURL ?? "",
         ]) { _, rhs in rhs }
@@ -210,6 +216,135 @@ struct PipelineRunner {
 
         let archiveResult = try commandRunner.run(archiveCommand, currentDirectory: workingDirectory, environment: environment, onOutput: onOutput)
         return (artifactPath, archiveResult.output)
+    }
+
+    private func resolvedReleaseNotesPath(
+        for repository: RepositoryConfiguration,
+        snapshot: GitHubBranchSnapshot,
+        checkoutPath: String,
+        version: String
+    ) throws -> String {
+        if let configuredPath = repository.releaseNotesPath?.expandingTildeInPath,
+           !configuredPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return configuredPath
+        }
+
+        let releaseNotesDirectory = "\(checkoutPath)/.shiphook/release-notes"
+        let releaseNotesPath = "\(releaseNotesDirectory)/\(repository.id)-\(sanitizedFilenameComponent(version)).html"
+        let title = snapshot.message
+            .split(whereSeparator: \.isNewline)
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty ?? "Release \(version)"
+
+        let html = makeReleaseNotesHTML(
+            title: title,
+            version: version,
+            message: snapshot.message,
+            shortSHA: String(snapshot.sha.prefix(7)),
+            commitURL: snapshot.htmlURL
+        )
+
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: releaseNotesDirectory),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try html.write(to: URL(fileURLWithPath: releaseNotesPath), atomically: true, encoding: .utf8)
+        return releaseNotesPath
+    }
+
+    private func makeReleaseNotesHTML(
+        title: String,
+        version: String,
+        message: String,
+        shortSHA: String,
+        commitURL: URL?
+    ) -> String {
+        let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let paragraphs = trimmedMessage
+            .components(separatedBy: CharacterSet.newlines)
+            .split(whereSeparator: { $0.allSatisfy(\.isWhitespace) })
+            .map { block in
+                block
+                    .map { line in line.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .map(\.htmlEscaped)
+                    .joined(separator: "<br>")
+            }
+            .filter { !$0.isEmpty }
+
+        let bodyHTML = paragraphs.isEmpty
+            ? "<p>No release notes were provided for this build.</p>"
+            : paragraphs.map { "<p>\($0)</p>" }.joined(separator: "\n")
+
+        let commitLine: String
+        if let commitURL {
+            commitLine = #"<p><strong>Commit:</strong> <a href="\#(commitURL.absoluteString.htmlEscaped)">\#(shortSHA.htmlEscaped)</a></p>"#
+        } else {
+            commitLine = "<p><strong>Commit:</strong> \(shortSHA.htmlEscaped)</p>"
+        }
+
+        return """
+        <!doctype html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>\(title.htmlEscaped) - Release Notes</title>
+          <style>
+            :root { color-scheme: light dark; }
+            body {
+              margin: 0;
+              padding: 32px 20px 48px;
+              font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+              background: #f4f6f8;
+              color: #0f1720;
+            }
+            main {
+              max-width: 760px;
+              margin: 0 auto;
+              padding: 28px;
+              border-radius: 22px;
+              background: rgba(255, 255, 255, 0.86);
+              box-shadow: 0 20px 60px rgba(15, 23, 32, 0.10);
+            }
+            h1 { margin: 0 0 6px; font-size: 30px; line-height: 1.15; }
+            .meta { margin: 0 0 24px; color: #52606d; font-size: 14px; }
+            p { margin: 0 0 16px; }
+            a { color: #0a67a3; text-decoration: none; }
+            a:hover { text-decoration: underline; }
+            @media (prefers-color-scheme: dark) {
+              body { background: #0b1015; color: #edf2f7; }
+              main {
+                background: rgba(15, 23, 32, 0.88);
+                box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+              }
+              .meta { color: #9fb0c2; }
+              a { color: #73c3ff; }
+            }
+          </style>
+        </head>
+        <body>
+          <main>
+            <h1>\(title.htmlEscaped)</h1>
+            <p class="meta">Version \(version.htmlEscaped)</p>
+            \(bodyHTML)
+            \(commitLine)
+          </main>
+        </body>
+        </html>
+        """
+    }
+
+    private func sanitizedFilenameComponent(_ string: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
+        let scalars = string.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
+        let sanitized = String(scalars)
+            .replacingOccurrences(of: "--", with: "-")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return sanitized.isEmpty ? "release" : sanitized
     }
 
     private func normalizeCodeSigningIfNeeded(
@@ -402,5 +537,16 @@ struct PipelineRunner {
 private extension String {
     var expandingTildeInPath: String {
         (self as NSString).expandingTildeInPath
+    }
+
+    var htmlEscaped: String {
+        replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
     }
 }

@@ -7,7 +7,6 @@ struct ContentView: View {
     @State private var selectedRepositoryID: String?
     @State private var showingAddRepositoryWizard = false
     @State private var repositoryPendingDeletion: RepositoryConfiguration?
-    @State private var showGlobalSettings = true
 
     var body: some View {
         NavigationSplitView {
@@ -53,11 +52,15 @@ struct ContentView: View {
             if selectedRepositoryID == nil {
                 selectedRepositoryID = appState.configuration.repositories.first?.id
             }
+            clearFieldFocus()
         }
         .onChange(of: appState.configuration.repositories) { _, repositories in
             if selectedRepositoryID == nil || !repositories.map(\.id).contains(selectedRepositoryID ?? "") {
                 selectedRepositoryID = repositories.first?.id
             }
+        }
+        .onChange(of: selectedRepositoryID) { _, _ in
+            clearFieldFocus()
         }
     }
 
@@ -72,8 +75,11 @@ struct ContentView: View {
                         repositoryRow(repo)
                     }
                 }
-                .padding(.vertical, 2)
+                .padding(.horizontal, 14)
+                .padding(.top, 12)
+                .padding(.bottom, 10)
             }
+            .scrollClipDisabled()
 
             Button {
                 showingAddRepositoryWizard = true
@@ -112,7 +118,6 @@ struct ContentView: View {
                             repositoryPendingDeletion = repository
                         }
                     )
-                    globalSettingsPanel
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 20)
@@ -140,6 +145,9 @@ struct ContentView: View {
     private func repositoryRow(_ repo: RepositoryConfiguration) -> some View {
         let state = appState.repoStates[repo.id] ?? .initial(id: repo.id)
         let isSelected = selectedRepositoryID == repo.id
+        let statusColor = color(for: state.activity)
+        let statusSymbol = repositoryStatusSymbol(for: state.activity)
+        let latestVersion = appState.displayedVersion(for: repo)
 
         return Button {
             selectedRepositoryID = repo.id
@@ -160,6 +168,13 @@ struct ContentView: View {
                             .font(.headline)
                             .foregroundStyle(.primary)
                             .lineLimit(1)
+                        if let latestVersion, !latestVersion.isEmpty {
+                            Text("v\(latestVersion)")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(.thinMaterial, in: Capsule())
+                        }
                         if state.activity == .building {
                             Text(phaseBadgeLabel(for: state.buildPhase))
                                 .font(.caption2.weight(.semibold))
@@ -174,10 +189,35 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
 
-                    Text(state.summary)
-                        .font(.caption)
-                        .foregroundStyle(color(for: state.activity))
-                        .lineLimit(2)
+                    HStack(alignment: .top, spacing: 8) {
+                        if state.activity == .building {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(statusColor)
+                                .padding(.top, 1)
+                        } else {
+                            Image(systemName: statusSymbol)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(statusColor)
+                                .frame(width: 14, alignment: .center)
+                                .padding(.top, 1)
+                        }
+                        Text(state.summary)
+                            .lineLimit(2)
+                            .foregroundStyle(statusColor)
+                    }
+                    .font(.caption)
+
+                    if state.activity == .building {
+                        let progress = phaseProgress(for: state.buildPhase)
+                        VStack(alignment: .leading, spacing: 4) {
+                            ProgressView(value: progress.current, total: progress.total)
+                                .tint(statusColor)
+                            Text("Step \(Int(progress.current)) of \(Int(progress.total)) - \(progress.label)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
 
                 Spacer(minLength: 0)
@@ -191,7 +231,7 @@ struct ContentView: View {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .strokeBorder(isSelected ? .white.opacity(0.34) : .white.opacity(0.08), lineWidth: 1)
             }
-            .shadow(color: isSelected ? .black.opacity(0.12) : .clear, radius: 16, y: 8)
+            .shadow(color: isSelected ? .black.opacity(0.12) : .clear, radius: 16, x: 0, y: 8)
         }
         .buttonStyle(.plain)
     }
@@ -218,9 +258,6 @@ struct ContentView: View {
                 headerActionButton("Check Now", systemImage: "arrow.clockwise") {
                     appState.triggerManualPoll()
                 }
-                headerActionButton("Reload", systemImage: "arrow.trianglehead.2.clockwise.rotate.90") {
-                    appState.loadConfiguration()
-                }
             }
 
             if let error = appState.lastGlobalError {
@@ -238,45 +275,6 @@ struct ContentView: View {
                 .fill(.white.opacity(0.08))
                 .frame(height: 1)
         }
-    }
-
-    private var globalSettingsPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            DisclosureGroup(isExpanded: $showGlobalSettings) {
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack(alignment: .top, spacing: 14) {
-                        compactField(
-                            title: "Poll Interval",
-                            symbol: "timer",
-                            text: Binding(
-                                get: { String(Int(appState.configuration.pollIntervalSeconds)) },
-                                set: {
-                                    guard let seconds = Double($0) else { return }
-                                    appState.configuration.pollIntervalSeconds = seconds
-                                }
-                            ),
-                            prompt: "300"
-                        )
-
-                        compactField(
-                            title: "GitHub Token Variable",
-                            symbol: "key.horizontal",
-                            text: optionalStringBinding($appState.configuration.githubTokenEnvVar),
-                            prompt: "GITHUB_TOKEN"
-                        )
-                    }
-
-                    Text("GitHub token is optional for public repositories, recommended for rate limits, and required for private repositories. ShipHook reads the token from the environment variable named above.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.top, 10)
-            } label: {
-                Label("Global Settings", systemImage: "slider.horizontal.3")
-                    .font(.title3.bold())
-            }
-        }
-        .glassSection()
     }
 
     private func headerActionButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
@@ -361,9 +359,28 @@ struct ContentView: View {
         case .archiving:
             return "Archiving"
         case .notarizing:
-            return "Notarizing"
+            return ShipHookLocale.notarising
         case .publishing:
             return "Publishing"
+        }
+    }
+
+    private func phaseProgress(for phase: RepositoryBuildPhase) -> (current: Double, total: Double, label: String) {
+        switch phase {
+        case .idle:
+            return (0, 5, "Idle")
+        case .queued:
+            return (0, 5, "Queued")
+        case .syncing:
+            return (1, 5, "Syncing")
+        case .planningRelease:
+            return (2, 5, "Planning")
+        case .archiving:
+            return (3, 5, "Archiving")
+        case .notarizing:
+            return (4, 5, ShipHookLocale.notarising)
+        case .publishing:
+            return (5, 5, "Publishing")
         }
     }
 
@@ -401,6 +418,12 @@ struct ContentView: View {
         }
         appState.saveConfiguration()
         repositoryPendingDeletion = nil
+    }
+
+    private func clearFieldFocus() {
+        DispatchQueue.main.async {
+            NSApp.keyWindow?.makeFirstResponder(nil)
+        }
     }
 }
 
@@ -587,7 +610,7 @@ private struct AddRepositoryWizard: View {
 
     private var signingPanel: some View {
         SigningOverridesEditor(
-            title: "Step 5: Signing Overrides",
+            title: "Step 5: Signing",
             signing: signingConfigurationBinding,
             identities: appState.availableSigningIdentities,
             notarizationProfiles: appState.availableNotarizationProfiles,
@@ -765,136 +788,140 @@ private struct SigningOverridesEditor: View {
                     .foregroundStyle(.secondary)
             }
 
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label("Detected Signing Identity", systemImage: "checkmark.shield")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Picker("Detected Signing Identity", selection: selectedIdentityNameBinding) {
-                        Text("None Selected").tag("")
-                        ForEach(identities) { identity in
-                            let suffix = identity.isRecommendedForSparkle ? " Recommended" : ""
-                            Text("\(identity.displayName)\(suffix)").tag(identity.commonName)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                }
-
-                Spacer()
-
-                Button("Refresh") {
-                    onRefreshIdentities()
-                }
-                .buttonStyle(.bordered)
-            }
-
-            HStack {
-                Label(
-                    identities.isEmpty
-                        ? "No local signing identities detected"
-                        : "Detected \(identities.count) local signing identit\(identities.count == 1 ? "y" : "ies")",
-                    systemImage: identities.isEmpty ? "xmark.seal" : "checkmark.seal"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                Spacer()
-            }
-
-            if identities.isEmpty {
-                Text("No valid local code-signing identities were found on this Mac. You do not need to upload a `.p12` into ShipHook itself, but you do need the signing certificate and private key installed in this Mac's keychain before manual signing can work.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            if let configuredIdentity = signing.codeSignIdentity, !configuredIdentity.isEmpty,
-               configuredIdentity.hasPrefix("Apple Development:") || configuredIdentity.hasPrefix("Mac Development:") {
-                Text("`\(configuredIdentity)` is a development certificate. That is not suitable for Sparkle release archives. Use a `Developer ID Application` identity instead.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-
-            if let identityLoadError {
-                Text(identityLoadError)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-
-            DisclosureGroup(isExpanded: $showDiagnostics) {
-                VStack(alignment: .leading, spacing: 8) {
-                    if let diagnostics {
-                        Text(diagnostics.summary)
-                        ForEach(diagnostics.details, id: \.self) { detail in
-                            Text(detail)
-                                .font(.caption)
+            if signing.codeSignStyle == .manual {
+                Group {
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("Signing Identity", systemImage: "checkmark.shield")
+                                .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
+                            Picker("Signing Identity", selection: selectedIdentityNameBinding) {
+                                Text("None Selected").tag("")
+                                ForEach(identities) { identity in
+                                    let suffix = identity.isRecommendedForSparkle ? " Recommended" : ""
+                                    Text("\(identity.displayName)\(suffix)").tag(identity.commonName)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
                         }
-                    } else {
-                        Text("No signing diagnostics available yet.")
+
+                        Spacer()
+
+                        Button("Refresh") {
+                            onRefreshIdentities()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
+                    HStack {
+                        Label(
+                            identities.isEmpty
+                                ? "No local signing identities detected"
+                                : "\(identities.count) local signing identit\(identities.count == 1 ? "y" : "ies") available",
+                            systemImage: identities.isEmpty ? "xmark.seal" : "checkmark.seal"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+
+                    if identities.isEmpty {
+                        Text("No valid local code-signing identities were found on this Mac. You do not need to upload a `.p12` into ShipHook itself, but you do need the signing certificate and private key installed in this Mac's keychain before manual signing can work.")
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                }
-                .padding(.top, 8)
-            } label: {
-                Label("Signing Diagnostics", systemImage: "stethoscope")
-                    .font(.headline)
-            }
 
-            HStack(alignment: .top, spacing: 14) {
-                labeledField("Development Team", symbol: "person.3", text: developmentTeamBinding)
-                labeledField("Code Sign Identity", symbol: "key", text: codeSignIdentityBinding)
-            }
+                    if let configuredIdentity = signing.codeSignIdentity, !configuredIdentity.isEmpty,
+                       configuredIdentity.hasPrefix("Apple Development:") || configuredIdentity.hasPrefix("Mac Development:") {
+                        Text("`\(configuredIdentity)` is a development certificate. That is not suitable for Sparkle release archives. Use a `Developer ID Application` identity instead.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
 
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label("Detected Notary Profile", systemImage: "checkmark.seal")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Picker("Detected Notary Profile", selection: selectedNotaryProfileBinding) {
-                        Text("None Selected").tag("")
-                        ForEach(notarizationProfiles, id: \.self) { profile in
-                            Text(profile).tag(profile)
+                    if let identityLoadError {
+                        Text(identityLoadError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    HStack(alignment: .top, spacing: 14) {
+                        labeledField("Development Team", symbol: "person.3", text: developmentTeamBinding)
+                        labeledField("Code Sign Identity", symbol: "key", text: codeSignIdentityBinding)
+                    }
+
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("Notary Profile", systemImage: "checkmark.seal")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Picker("Notary Profile", selection: selectedNotaryProfileBinding) {
+                                Text("None Selected").tag("")
+                                ForEach(notarizationProfiles, id: \.self) { profile in
+                                    Text(profile).tag(profile)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                        }
+
+                        Spacer()
+                    }
+
+                    if notarizationProfiles.isEmpty {
+                        Text("No local notary profiles are known to ShipHook yet. Use the setup action below to store one in your keychain on this Mac.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack(spacing: 10) {
+                    Button {
+                        showingNotaryProfileSheet = true
+                    } label: {
+                        Label("Set Up Notary Profile", systemImage: "key.fill")
+                            .labelStyle(.titleAndIcon)
+                    }
+                        .buttonStyle(GlassActionButtonStyle())
+
+                        if let profile = signing.notarizationProfile, !profile.isEmpty {
+                            Text("Using local keychain profile `\(profile)`")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                }
 
-                Spacer()
-            }
+                    if let notaryStatusMessage {
+                        Text(notaryStatusMessage)
+                            .font(.caption)
+                            .foregroundStyle(notaryStatusIsError ? .red : .green)
+                    }
 
-            if notarizationProfiles.isEmpty {
-                Text("No local notary profiles are known to ShipHook yet. Use the setup action below to store one in your keychain on this Mac.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+                    DisclosureGroup(isExpanded: $showDiagnostics) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            if let diagnostics {
+                                Text(diagnostics.summary)
+                                ForEach(diagnostics.details, id: \.self) { detail in
+                                    Text(detail)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                            } else {
+                                Text("No signing diagnostics available yet.")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.top, 8)
+                    } label: {
+                        Label("Signing Diagnostics", systemImage: "stethoscope")
+                            .font(.headline)
+                    }
 
-            HStack(spacing: 10) {
-                Button {
-                    showingNotaryProfileSheet = true
-                } label: {
-                    Label("Set Up Notary Profile", systemImage: "key.badge.exclamationmark")
-                        .labelStyle(.titleAndIcon)
-                }
-                .buttonStyle(GlassActionButtonStyle())
-
-                if let profile = signing.notarizationProfile, !profile.isEmpty {
-                    Text("Using local keychain profile `\(profile)`")
+                    Text("If the certificate is already installed on this Mac, pick it from the menu and ShipHook will fill the fields. The notary profile is just the local keychain profile name that `notarytool` uses on this Mac, not an Apple-side identifier.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
-
-            if let notaryStatusMessage {
-                Text(notaryStatusMessage)
-                    .font(.caption)
-                    .foregroundStyle(notaryStatusIsError ? .red : .green)
-            }
-
-            Text("If the certificate is already installed on this Mac, pick it from the menu and ShipHook will fill the fields. The notary profile is just the local keychain profile name that `notarytool` uses on this Mac, not an Apple-side identifier.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
         .glassSection()
         .sheet(isPresented: $showingNotaryProfileSheet) {
@@ -1081,6 +1108,7 @@ private struct RepositoryEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             statusPanel
+            buildHistoryPanel
             repositoryPanel
             buildSummaryPanel
             sparklePanel
@@ -1096,26 +1124,61 @@ private struct RepositoryEditor: View {
     }
 
     private var statusPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let progress = phaseProgress(for: runtimeState.buildPhase)
+        let latestBuild = appState.latestBuildRecord(for: repository.id)
+        let displayedVersion = appState.displayedVersion(for: repository)
+        return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label("Status", systemImage: "bolt.horizontal.circle")
                     .font(.title3.bold())
                 Spacer()
-                Text(runtimeState.activity.rawValue.capitalized)
-                    .font(.subheadline.weight(.semibold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(statusColor.opacity(0.18), in: Capsule())
-                    .foregroundStyle(statusColor)
+                HStack(spacing: 8) {
+                    if runtimeState.activity == .building {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(statusColor)
+                    } else {
+                        Image(systemName: repositoryStatusSymbol(for: runtimeState.activity))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(statusColor)
+                    }
+
+                    Text(runtimeState.activity.rawValue.capitalized)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(statusColor)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(statusColor.opacity(0.18), in: Capsule())
             }
 
             Text(runtimeState.summary)
                 .foregroundStyle(primaryStatusTint)
 
-            if runtimeState.activity == .building {
-                Label("Current phase: \(buildPhaseLabel)", systemImage: "arrow.triangle.2.circlepath")
+            if let latestBuild {
+                Label("Current version: \(latestBuild.version)", systemImage: "tag")
                     .font(.caption)
-                    .foregroundStyle(statusColor)
+                    .foregroundStyle(.secondary)
+            } else if let displayedVersion {
+                Label("Published version: \(displayedVersion)", systemImage: "tag")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if runtimeState.activity == .building {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(statusColor)
+                        Text("Step \(Int(progress.current)) of \(Int(progress.total)) - \(progress.label)")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(statusColor)
+                    }
+
+                    ProgressView(value: progress.current, total: progress.total)
+                        .tint(statusColor)
+                }
             }
 
             if let error = runtimeState.lastError {
@@ -1165,6 +1228,65 @@ private struct RepositoryEditor: View {
         .glassSection()
     }
 
+    private var buildHistoryPanel: some View {
+        let history = appState.history(for: repository.id)
+        let latestBuild = history.first
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("Build History", systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90")
+                    .font(.title3.bold())
+                Spacer()
+                if let latestBuild {
+                    Text("Current v\(latestBuild.version)")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(.thinMaterial, in: Capsule())
+                }
+            }
+
+            if history.isEmpty {
+                Text("No completed builds yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(history.prefix(6))) { record in
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: record.id == latestBuild?.id ? "checkmark.circle.fill" : "clock.fill")
+                                .foregroundStyle(record.id == latestBuild?.id ? .green : .secondary)
+                                .frame(width: 16)
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 8) {
+                                    Text("v\(record.version)")
+                                        .font(.subheadline.weight(.semibold))
+                                    if record.id == latestBuild?.id {
+                                        Text("Current")
+                                            .font(.caption2.weight(.semibold))
+                                            .padding(.horizontal, 7)
+                                            .padding(.vertical, 3)
+                                            .background(.thinMaterial, in: Capsule())
+                                    }
+                                }
+
+                                Text("Commit \(record.sha.prefix(7))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                Text(record.builtAt.formatted(date: .abbreviated, time: .shortened))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .glassSection()
+    }
+
     private var repositoryPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             DisclosureGroup(isExpanded: $showRepositoryDetails) {
@@ -1203,7 +1325,10 @@ private struct RepositoryEditor: View {
                                 labeledField("Working Directory", symbol: "terminal", text: optionalStringBinding($repository.workingDirectory))
                                 labeledField("Token Env Var", symbol: "key.horizontal", text: optionalStringBinding($repository.githubTokenEnvVar))
                             }
-                            labeledField("Release Notes Path", symbol: "note.text", text: optionalStringBinding($repository.releaseNotesPath))
+                            labeledField("Release Notes Path Override", symbol: "note.text", text: optionalStringBinding($repository.releaseNotesPath))
+                            Text("Leave this empty to generate Sparkle release notes from the commit title and description being built.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         .padding(.top, 10)
                     }
@@ -1275,7 +1400,7 @@ private struct RepositoryEditor: View {
 
     private var signingPanel: some View {
         SigningOverridesEditor(
-            title: "Signing Overrides",
+            title: "Signing",
             signing: signingBinding,
             identities: appState.availableSigningIdentities,
             notarizationProfiles: appState.availableNotarizationProfiles,
@@ -1431,9 +1556,28 @@ private struct RepositoryEditor: View {
         case .archiving:
             return "Archiving"
         case .notarizing:
-            return "Notarizing"
+            return ShipHookLocale.notarising
         case .publishing:
             return "Publishing"
+        }
+    }
+
+    private func phaseProgress(for phase: RepositoryBuildPhase) -> (current: Double, total: Double, label: String) {
+        switch phase {
+        case .idle:
+            return (0, 5, "Idle")
+        case .queued:
+            return (0, 5, "Queued")
+        case .syncing:
+            return (1, 5, "Syncing")
+        case .planningRelease:
+            return (2, 5, "Planning")
+        case .archiving:
+            return (3, 5, "Archiving")
+        case .notarizing:
+            return (4, 5, ShipHookLocale.notarising)
+        case .publishing:
+            return (5, 5, "Publishing")
         }
     }
 
@@ -1488,7 +1632,22 @@ private struct RepositoryEditor: View {
     }
 }
 
-private extension View {
+private func repositoryStatusSymbol(for activity: RepositoryActivity) -> String {
+    switch activity {
+    case .idle:
+        return "pause.circle.fill"
+    case .polling:
+        return "arrow.clockwise.circle.fill"
+    case .building:
+        return "gearshape.2.fill"
+    case .succeeded:
+        return "checkmark.circle.fill"
+    case .failed:
+        return "xmark.octagon.fill"
+    }
+}
+
+extension View {
     func glassSection() -> some View {
         self
             .padding(16)
@@ -1501,7 +1660,7 @@ private extension View {
     }
 }
 
-private struct GlassActionButtonStyle: ButtonStyle {
+struct GlassActionButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.headline)
@@ -1529,24 +1688,31 @@ private struct GlassSegmentedControl<Selection: Hashable>: View {
             ForEach(Array(options.enumerated()), id: \.offset) { _, option in
                 let isSelected = option.0 == selection
 
-                Text(option.1)
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(isSelected ? AnyShapeStyle(.regularMaterial) : AnyShapeStyle(.thinMaterial.opacity(0.32)))
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(isSelected ? .white.opacity(0.26) : .white.opacity(0.08))
+                HStack(spacing: 6) {
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption.weight(.bold))
                     }
-                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .onTapGesture {
-                        withAnimation(.snappy(duration: 0.18)) {
-                            selection = option.0
-                        }
+                    Text(option.1)
+                        .font(.subheadline.weight(.semibold))
+                }
+                .foregroundStyle(isSelected ? .primary : .secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 9)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(isSelected ? AnyShapeStyle(.thickMaterial) : AnyShapeStyle(.thinMaterial.opacity(0.22)))
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(isSelected ? .white.opacity(0.34) : .white.opacity(0.08))
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .onTapGesture {
+                    withAnimation(.snappy(duration: 0.18)) {
+                        selection = option.0
                     }
+                }
             }
         }
         .padding(6)

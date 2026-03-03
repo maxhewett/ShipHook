@@ -7,10 +7,12 @@ struct ShipHookApp: App {
     @StateObject private var updater = AppUpdater()
 
     var body: some Scene {
-        MenuBarExtra("ShipHook", systemImage: "shippingbox") {
+        MenuBarExtra {
             MenuBarContentView()
                 .environmentObject(appState)
                 .environmentObject(updater)
+        } label: {
+            MenuBarStatusIcon()
         }
 
         Window("ShipHook", id: "main") {
@@ -21,6 +23,12 @@ struct ShipHookApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
         .defaultPosition(.center)
+
+        Settings {
+            SettingsView()
+                .environmentObject(appState)
+                .environmentObject(updater)
+        }
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates...") {
@@ -36,6 +44,7 @@ private struct MenuBarContentView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var updater: AppUpdater
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -63,14 +72,15 @@ private struct MenuBarContentView: View {
                 NSApp.activate(ignoringOtherApps: true)
             }
 
+            Button("Settings...") {
+                openSettings()
+                NSApp.activate(ignoringOtherApps: true)
+            }
+
             Button("Check for Updates...") {
                 updater.checkForUpdates()
             }
             .disabled(!updater.canCheckForUpdates)
-
-            Button("Reveal Config") {
-                appState.openConfigInFinder()
-            }
 
             Divider()
 
@@ -79,5 +89,47 @@ private struct MenuBarContentView: View {
             }
         }
         .padding(12)
+    }
+}
+
+private struct MenuBarStatusIcon: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        let image = MenuBarIconProvider.statusItemImage(for: colorScheme)
+        Image(nsImage: image)
+            .resizable()
+            .renderingMode(.original)
+            .interpolation(.high)
+            .frame(width: 16, height: 16)
+            .help("ShipHook")
+            .accessibilityLabel("ShipHook")
+    }
+}
+
+private enum MenuBarIconProvider {
+    private static let darkName = "shiphoookglyphwhite"
+    private static let lightName = "shiphoookglyphblack"
+
+    static func statusItemImage(for colorScheme: ColorScheme) -> NSImage {
+        let name = colorScheme == .dark ? darkName : lightName
+        if let url = Bundle.main.url(forResource: name, withExtension: "png"),
+           let image = NSImage(contentsOf: url) {
+            image.isTemplate = false
+            image.size = NSSize(width: 16, height: 16)
+            return image
+        }
+
+        if #available(macOS 12.0, *) {
+            let image = NSWorkspace.shared.icon(for: .application)
+            image.isTemplate = true
+            image.size = NSSize(width: 16, height: 16)
+            return image
+        }
+
+        let image = NSWorkspace.shared.icon(forFileType: "app")
+        image.isTemplate = true
+        image.size = NSSize(width: 16, height: 16)
+        return image
     }
 }

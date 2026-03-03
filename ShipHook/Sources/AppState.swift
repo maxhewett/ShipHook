@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ServiceManagement
 import SwiftUI
 
 @MainActor
@@ -18,8 +19,13 @@ final class AppState: ObservableObject {
     @Published private(set) var lastSigningIdentityError: String?
     @Published private(set) var signingDiagnostics: SigningDiagnostics?
     @Published private(set) var hasUnsavedChanges = false
+    @Published private(set) var buildHistory: [BuildRecord] = []
+    @Published private(set) var latestPublishedVersions: [String: AppcastVersion] = [:]
+    @Published private(set) var launchesAtLogin = false
+    @Published private(set) var launchAtLoginStatusMessage: String?
 
     private var configStore = ConfigStore()
+    private let buildHistoryStore = BuildHistoryStore()
     private let githubAPI = GitHubAPI()
     private let pipelineRunner = PipelineRunner()
     private let projectInspector = ProjectInspector()
@@ -37,8 +43,11 @@ final class AppState: ObservableObject {
 
     init() {
         loadConfiguration()
+        loadBuildHistory()
         refreshSigningIdentities()
         refreshNotarizationProfiles()
+        refreshLaunchAtLoginStatus()
+        refreshPublishedVersions()
         startPollingLoop()
     }
 
@@ -55,6 +64,7 @@ final class AppState: ObservableObject {
             synchronizeRuntimeState()
             refreshDirtyState()
             refreshNotarizationProfiles()
+            refreshPublishedVersions()
             lastGlobalError = nil
         } catch {
             lastGlobalError = error.localizedDescription
@@ -85,6 +95,7 @@ final class AppState: ObservableObject {
             synchronizeRuntimeState()
             refreshDirtyState()
             refreshNotarizationProfiles()
+            refreshPublishedVersions()
             lastGlobalError = nil
         } catch {
             lastGlobalError = error.localizedDescription
@@ -122,7 +133,6 @@ final class AppState: ObservableObject {
         let checkoutFolderName = URL(fileURLWithPath: (localCheckoutPath as NSString).expandingTildeInPath).lastPathComponent
         let repo = !(inspection.repo ?? "").isEmpty ? inspection.repo! : (fallbackRepo.isEmpty ? checkoutFolderName : fallbackRepo)
         let branch = !(inspection.branch ?? "").isEmpty ? inspection.branch! : fallbackBranch
-        let checkoutPath = (localCheckoutPath as NSString).expandingTildeInPath
         let safeName = (scheme.isEmpty ? repo : scheme).replacingOccurrences(of: " ", with: "-")
         let archivePath = defaultArchivePath(appName: safeName)
         let appName = scheme.isEmpty ? repo : scheme
@@ -262,6 +272,74 @@ final class AppState: ObservableObject {
 
     func openConfigInFinder() {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: configPath)])
+    }
+
+    func refreshLaunchAtLoginStatus() {
+        if #available(macOS 13.0, *) {
+            let status = SMAppService.mainApp.status
+            launchesAtLogin = status == .enabled
+            switch status {
+            case .enabled:
+                launchAtLoginStatusMessage = "ShipHook will open automatically when you log in."
+            case .requiresApproval:
+                launchAtLoginStatusMessage = "Login launch is waiting for approval in System Settings."
+            case .notFound:
+                launchAtLoginStatusMessage = "Install ShipHook in Applications before enabling launch at login."
+            case .notRegistered:
+                launchAtLoginStatusMessage = "Launch at login is turned off."
+            @unknown default:
+                launchAtLoginStatusMessage = nil
+            }
+        } else {
+            launchesAtLogin = false
+            launchAtLoginStatusMessage = "Launch at login requires a newer version of macOS."
+        }
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) throws {
+        guard #available(macOS 13.0, *) else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 501,
+                userInfo: [NSLocalizedDescriptionKey: "Launch at login requires a newer version of macOS."]
+            )
+        }
+
+        if enabled {
+            try SMAppService.mainApp.register()
+        } else {
+            try SMAppService.mainApp.unregister()
+        }
+
+        refreshLaunchAtLoginStatus()
+    }
+
+    func history(for repositoryID: String) -> [BuildRecord] {
+        buildHistory
+            .filter { $0.repositoryID == repositoryID }
+            .sorted { $0.builtAt > $1.builtAt }
+    }
+
+    func latestBuildRecord(for repositoryID: String) -> BuildRecord? {
+        history(for: repositoryID).first
+    }
+
+    func displayedVersion(for repository: RepositoryConfiguration) -> String? {
+        if let localVersion = latestBuildRecord(for: repository.id)?.version, !localVersion.isEmpty {
+            return localVersion
+        }
+
+        guard let published = latestPublishedVersions[repository.id] else {
+            return nil
+        }
+
+        if let marketingVersion = published.marketingVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !marketingVersion.isEmpty {
+            return marketingVersion
+        }
+
+        let buildVersion = published.buildVersion.trimmingCharacters(in: .whitespacesAndNewlines)
+        return buildVersion.isEmpty ? nil : buildVersion
     }
 
     func resetBuildState(for repositoryID: String) {
@@ -455,10 +533,19 @@ final class AppState: ObservableObject {
 
         switch result {
         case let .success(outcome):
+            let historyRecord = BuildRecord(
+                id: UUID().uuidString,
+                repositoryID: repository.id,
+                repositoryName: repository.name,
+                version: outcome.version,
+                sha: outcome.builtSHA,
+                builtAt: Date()
+            )
+            appendBuildRecord(historyRecord)
             updateState(for: repository.id) {
                 $0.activity = .succeeded
                 $0.lastBuiltSHA = outcome.builtSHA
-                $0.lastSuccessDate = Date()
+                $0.lastSuccessDate = historyRecord.builtAt
                 $0.buildStartedAt = nil
                 $0.buildPhase = .idle
                 $0.lastLog = outcome.log
@@ -497,7 +584,7 @@ final class AppState: ObservableObject {
                 $0.summary = "Archiving app for \(String(sha.prefix(7)))"
             case .notarizing:
                 $0.buildPhase = .notarizing
-                $0.summary = "Notarizing app for \(String(sha.prefix(7)))"
+                $0.summary = "\(ShipHookLocale.notarising) app for \(String(sha.prefix(7)))"
             case .publishing:
                 $0.buildPhase = .publishing
                 $0.summary = "Publishing update for \(String(sha.prefix(7)))"
@@ -539,6 +626,45 @@ final class AppState: ObservableObject {
         var state = repoStates[repositoryID] ?? .initial(id: repositoryID)
         mutate(&state)
         repoStates[repositoryID] = state
+    }
+
+    private func loadBuildHistory() {
+        do {
+            buildHistory = try buildHistoryStore.loadHistory().sorted { $0.builtAt > $1.builtAt }
+        } catch {
+            buildHistory = []
+            lastGlobalError = error.localizedDescription
+        }
+    }
+
+    private func appendBuildRecord(_ record: BuildRecord) {
+        buildHistory.insert(record, at: 0)
+        do {
+            try buildHistoryStore.saveHistory(buildHistory)
+        } catch {
+            lastGlobalError = error.localizedDescription
+        }
+    }
+
+    private func refreshPublishedVersions() {
+        let repositories = configuration.repositories
+        Task.detached(priority: .utility) { [releasePlanner] in
+            var versions: [String: AppcastVersion] = [:]
+
+            for repository in repositories {
+                guard let inspection = try? releasePlanner.inspectReleaseState(for: repository),
+                      let latest = inspection.latestAppcastItem else {
+                    continue
+                }
+                versions[repository.id] = latest
+            }
+
+            let resolvedVersions = versions
+
+            await MainActor.run {
+                self.latestPublishedVersions = resolvedVersions
+            }
+        }
     }
 
     private func synchronizeRuntimeState() {

@@ -205,6 +205,7 @@ private final class AppcastParser: NSObject, XMLParserDelegate {
     private var currentTitle = ""
     private var currentBuildVersion = ""
     private var currentShortVersion = ""
+    private var currentElementText = ""
     private var latestItem: AppcastVersion?
 
     func parse(data: Data) -> AppcastVersion? {
@@ -215,7 +216,8 @@ private final class AppcastParser: NSObject, XMLParserDelegate {
     }
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
-        currentElement = elementName
+        currentElement = qName ?? elementName
+        currentElementText = ""
         if elementName == "item" {
             currentTitle = ""
             currentBuildVersion = attributeDict["sparkle:version"] ?? ""
@@ -232,12 +234,28 @@ private final class AppcastParser: NSObject, XMLParserDelegate {
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        if currentElement == "title" {
-            currentTitle += string
-        }
+        currentElementText += string
     }
 
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        let resolvedElement = qName ?? elementName
+        let trimmedText = currentElementText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch resolvedElement {
+        case "title":
+            currentTitle += trimmedText
+        case "sparkle:version":
+            if !trimmedText.isEmpty {
+                currentBuildVersion = trimmedText
+            }
+        case "sparkle:shortVersionString":
+            if !trimmedText.isEmpty {
+                currentShortVersion = trimmedText
+            }
+        default:
+            break
+        }
+
         if elementName == "item", latestItem == nil, !currentBuildVersion.isEmpty {
             latestItem = AppcastVersion(
                 marketingVersion: currentShortVersion.isEmpty ? currentTitle.trimmingCharacters(in: .whitespacesAndNewlines) : currentShortVersion,
@@ -245,5 +263,6 @@ private final class AppcastParser: NSObject, XMLParserDelegate {
             )
         }
         currentElement = ""
+        currentElementText = ""
     }
 }

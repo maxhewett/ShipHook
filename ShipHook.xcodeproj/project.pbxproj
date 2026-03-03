@@ -9,6 +9,11 @@
 /* Begin PBXBuildFile section */
 		5015DEA22F56D27A00618C6D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5015DEA12F56D27A00618C6D /* Assets.xcassets */; };
 		50CD98602F56EE1000F9E715 /* ShipHook.icon in Resources */ = {isa = PBXBuildFile; fileRef = 50CD985F2F56EE1000F9E715 /* ShipHook.icon */; };
+		60A000000000000000000001 /* BuildHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60A000000000000000000002 /* BuildHistoryStore.swift */; };
+		60A000000000000000000003 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60A000000000000000000004 /* SettingsView.swift */; };
+		60A000000000000000000005 /* ShipHookLocale.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60A000000000000000000006 /* ShipHookLocale.swift */; };
+		60A000000000000000000007 /* shiphoookglyphblack.png in Resources */ = {isa = PBXBuildFile; fileRef = 60A000000000000000000008 /* shiphoookglyphblack.png */; };
+		60A000000000000000000009 /* shiphoookglyphwhite.png in Resources */ = {isa = PBXBuildFile; fileRef = 60A00000000000000000000A /* shiphoookglyphwhite.png */; };
 		7A0000000000000000000001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 7A0000000000000000000002 /* Sparkle */; };
 		A00000000000000000000001 /* ShipHookApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000011 /* ShipHookApp.swift */; };
 		A00000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000012 /* ContentView.swift */; };
@@ -29,6 +34,11 @@
 /* Begin PBXFileReference section */
 		5015DEA12F56D27A00618C6D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		50CD985F2F56EE1000F9E715 /* ShipHook.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = ShipHook.icon; sourceTree = "<group>"; };
+		60A000000000000000000002 /* BuildHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildHistoryStore.swift; sourceTree = "<group>"; };
+		60A000000000000000000004 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		60A000000000000000000006 /* ShipHookLocale.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShipHookLocale.swift; sourceTree = "<group>"; };
+		60A000000000000000000008 /* shiphoookglyphblack.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = shiphoookglyphblack.png; sourceTree = "<group>"; };
+		60A00000000000000000000A /* shiphoookglyphwhite.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = shiphoookglyphwhite.png; sourceTree = "<group>"; };
 		A0000000000000000000000A /* ShipHook.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ShipHook.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A00000000000000000000011 /* ShipHookApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShipHookApp.swift; sourceTree = "<group>"; };
 		A00000000000000000000012 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -91,13 +101,16 @@
 				A00000000000000000000011 /* ShipHookApp.swift */,
 				A00000000000000000000012 /* ContentView.swift */,
 				A00000000000000000000013 /* AppState.swift */,
+				60A000000000000000000002 /* BuildHistoryStore.swift */,
 				A00000000000000000000014 /* ConfigStore.swift */,
 				A00000000000000000000015 /* GitHubAPI.swift */,
 				A00000000000000000000016 /* Models.swift */,
 				A00000000000000000000017 /* PipelineRunner.swift */,
 				A0000000000000000000002D /* ProjectInspector.swift */,
 				A0000000000000000000002F /* ReleasePlanner.swift */,
+				60A000000000000000000004 /* SettingsView.swift */,
 				A00000000000000000000018 /* ShellCommand.swift */,
+				60A000000000000000000006 /* ShipHookLocale.swift */,
 				A00000000000000000000031 /* SigningInspector.swift */,
 				A00000000000000000000033 /* AppUpdater.swift */,
 			);
@@ -109,6 +122,8 @@
 			children = (
 				5015DEA12F56D27A00618C6D /* Assets.xcassets */,
 				A00000000000000000000019 /* SampleConfig.json */,
+				60A000000000000000000008 /* shiphoookglyphblack.png */,
+				60A00000000000000000000A /* shiphoookglyphwhite.png */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -181,6 +196,8 @@
 				50CD98602F56EE1000F9E715 /* ShipHook.icon in Resources */,
 				A0000000000000000000002A /* publish_sparkle_release.sh in Resources */,
 				5015DEA22F56D27A00618C6D /* Assets.xcassets in Resources */,
+				60A000000000000000000007 /* shiphoookglyphblack.png in Resources */,
+				60A000000000000000000009 /* shiphoookglyphwhite.png in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -192,6 +209,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A00000000000000000000003 /* AppState.swift in Sources */,
+				60A000000000000000000001 /* BuildHistoryStore.swift in Sources */,
 				A00000000000000000000004 /* ConfigStore.swift in Sources */,
 				A00000000000000000000002 /* ContentView.swift in Sources */,
 				A00000000000000000000005 /* GitHubAPI.swift in Sources */,
@@ -199,7 +217,9 @@
 				A00000000000000000000007 /* PipelineRunner.swift in Sources */,
 				A0000000000000000000002C /* ProjectInspector.swift in Sources */,
 				A0000000000000000000002E /* ReleasePlanner.swift in Sources */,
+				60A000000000000000000003 /* SettingsView.swift in Sources */,
 				A00000000000000000000008 /* ShellCommand.swift in Sources */,
+				60A000000000000000000005 /* ShipHookLocale.swift in Sources */,
 				A00000000000000000000030 /* SigningInspector.swift in Sources */,
 				A00000000000000000000032 /* AppUpdater.swift in Sources */,
 				A00000000000000000000001 /* ShipHookApp.swift in Sources */,
@@ -217,7 +237,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 106;
+				CURRENT_PROJECT_VERSION = 107;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = NO;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -227,7 +247,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.0.6;
+				MARKETING_VERSION = 1.0.7;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.ShipHook;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
@@ -245,7 +265,7 @@
 				CODE_SIGNING_ALLOWED = YES;
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 106;
+				CURRENT_PROJECT_VERSION = 107;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -256,7 +276,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.0.6;
+				MARKETING_VERSION = 1.0.7;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.ShipHook;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;

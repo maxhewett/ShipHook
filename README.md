@@ -48,6 +48,7 @@ ShipHook is a native macOS app and menu bar companion for monitoring GitHub repo
 - Live log tailing from `.shiphook/logs/<repo-id>-latest.log`
 - Reset for stale in-progress build state
 - Organizer-visible Xcode archive output
+- Automatic Sparkle release notes generated from the triggering commit message
 
 ## Configuration
 
@@ -63,7 +64,7 @@ Each repository supports:
 
 - GitHub owner, repo, branch
 - local checkout path
-- optional working directory and release notes path
+- optional working directory and release notes path override
 - `xcodeArchive` build mode
 - `shell` build mode
 - per-repo environment values
@@ -91,6 +92,8 @@ SHIPHOOK_ARTIFACT_PATH
 SHIPHOOK_APPCAST_URL
 SHIPHOOK_BUNDLED_PUBLISH_SCRIPT
 ```
+
+If `Release Notes Path Override` is empty, ShipHook generates an HTML release-notes page from the commit title and body for the SHA being published, then sets `SHIPHOOK_RELEASE_NOTES_PATH` to that generated file automatically.
 
 ## Example Publish Command
 

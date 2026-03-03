@@ -348,3 +348,12 @@ struct RepositoryRuntimeState: Identifiable {
         )
     }
 }
+
+struct BuildRecord: Codable, Hashable, Identifiable {
+    var id: String
+    var repositoryID: String
+    var repositoryName: String
+    var version: String
+    var sha: String
+    var builtAt: Date
+}
