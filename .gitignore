@@ -1,0 +1,19 @@
+.DS_Store
+
+# Xcode build output
+.build-xcode/
+build/
+DerivedData/
+
+# Xcode user state
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# Local release output
+release-artifacts/
+docs/appcast.xml
+docs/release-notes/
+
+# Local app config
+*.log
