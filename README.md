@@ -138,12 +138,6 @@ You can trigger it from:
 
 ShipHook currently ships with these Sparkle Info.plist-style build settings:
 
-```text
-SUFeedURL=https://maxhewett.github.io/ShipHook/appcast.xml
-SUPublicEDKey=rxaJsfCpTKtpqRubSfkJwKnztT5S8RHsdAueuT+jKck=
-SUEnableAutomaticChecks=YES
-```
-
 Important:
 
 - ShipHook's own release feed must exist and be signed correctly for Sparkle to work
