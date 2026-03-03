@@ -8,6 +8,17 @@ struct PipelineOutcome {
     var logPath: String
 }
 
+enum NotarizationError: LocalizedError {
+    case invalidSubmission(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .invalidSubmission(message):
+            return message
+        }
+    }
+}
+
 enum PipelineStage {
     case syncing(String)
     case planningRelease
@@ -99,6 +110,12 @@ struct PipelineRunner {
         }
 
         let expectedTeamID = repository.signing?.developmentTeam
+        try normalizeCodeSigningIfNeeded(
+            artifactPath: artifactPath,
+            repository: repository,
+            checkoutPath: checkoutPath,
+            onOutput: appendOutput
+        )
         try signingInspector.verifyBuiltApp(at: artifactPath, expectedTeamID: expectedTeamID)
         try notarizeAndStapleAppIfNeeded(
             artifactPath: artifactPath,
@@ -195,6 +212,31 @@ struct PipelineRunner {
         return (artifactPath, archiveResult.output)
     }
 
+    private func normalizeCodeSigningIfNeeded(
+        artifactPath: String,
+        repository: RepositoryConfiguration,
+        checkoutPath: String,
+        onOutput: ((String) -> Void)?
+    ) throws {
+        guard
+            let signing = repository.signing,
+            signing.codeSignStyle == .manual,
+            let identity = signing.codeSignIdentity,
+            !identity.isEmpty
+        else {
+            return
+        }
+
+        _ = try commandRunner.run(
+            """
+            /usr/bin/codesign --force --deep --sign '\(identity)' --timestamp --options runtime --preserve-metadata=identifier,entitlements,requirements,flags '\(artifactPath)'
+            """,
+            currentDirectory: checkoutPath,
+            environment: [:],
+            onOutput: onOutput
+        )
+    }
+
     private func notarizeAndStapleAppIfNeeded(
         artifactPath: String,
         repository: RepositoryConfiguration,
@@ -227,10 +269,16 @@ struct PipelineRunner {
             environment: [:],
             onOutput: onOutput
         )
-        _ = try commandRunner.run(
-            "xcrun notarytool submit '\(uploadPath)' --keychain-profile '\(profile)' --wait",
+        let submitResult = try commandRunner.run(
+            "xcrun notarytool submit '\(uploadPath)' --keychain-profile '\(profile)' --wait --output-format json",
             currentDirectory: checkoutPath,
             environment: [:],
+            onOutput: onOutput
+        )
+        try validateNotarizationSubmission(
+            submitResult.output,
+            profile: profile,
+            checkoutPath: checkoutPath,
             onOutput: onOutput
         )
         _ = try commandRunner.run(
@@ -245,6 +293,72 @@ struct PipelineRunner {
             environment: [:],
             onOutput: onOutput
         )
+    }
+
+    private func validateNotarizationSubmission(
+        _ output: String,
+        profile: String,
+        checkoutPath: String,
+        onOutput: ((String) -> Void)?
+    ) throws {
+        guard
+            let data = output.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return
+        }
+
+        let status = (json["status"] as? String) ?? ""
+        if status.caseInsensitiveCompare("Accepted") == .orderedSame {
+            return
+        }
+
+        let submissionID = (json["id"] as? String) ?? ""
+        var message = "Apple notarization failed with status \(status.isEmpty ? "Unknown" : status)."
+
+        if !submissionID.isEmpty {
+            let logResult = try? commandRunner.run(
+                "xcrun notarytool log '\(submissionID)' --keychain-profile '\(profile)' --output-format json",
+                currentDirectory: checkoutPath,
+                environment: [:],
+                onOutput: onOutput
+            )
+            if let logOutput = logResult?.output,
+               let logMessage = summarizeNotaryLog(logOutput),
+               !logMessage.isEmpty {
+                message += "\n\(logMessage)"
+            } else {
+                message += "\nSubmission ID: \(submissionID)"
+            }
+        }
+
+        throw NotarizationError.invalidSubmission(message)
+    }
+
+    private func summarizeNotaryLog(_ output: String) -> String? {
+        guard
+            let data = output.data(using: .utf8),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return output.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        var lines: [String] = []
+        if let status = json["status"] as? String, !status.isEmpty {
+            lines.append("Notary status: \(status)")
+        }
+        if let issues = json["issues"] as? [[String: Any]], !issues.isEmpty {
+            for issue in issues.prefix(6) {
+                let path = (issue["path"] as? String) ?? "unknown path"
+                let message = (issue["message"] as? String) ?? "Unknown notarization issue"
+                lines.append("\(path): \(message)")
+            }
+        }
+
+        if lines.isEmpty {
+            return output.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func signingOverrides(for repository: RepositoryConfiguration) -> String {
