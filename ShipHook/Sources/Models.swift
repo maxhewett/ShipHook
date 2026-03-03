@@ -1,6 +1,6 @@
 import Foundation
 
-struct AppConfiguration: Codable {
+struct AppConfiguration: Codable, Hashable {
     var pollIntervalSeconds: TimeInterval
     var githubTokenEnvVar: String?
     var repositories: [RepositoryConfiguration]

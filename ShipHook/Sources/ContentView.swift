@@ -16,6 +16,22 @@ struct ContentView: View {
             detailContent
         }
         .frame(minWidth: 1120, minHeight: 720)
+        .overlay(alignment: .bottomTrailing) {
+            if appState.hasUnsavedChanges {
+                Button {
+                    appState.saveConfiguration()
+                } label: {
+                    Label("Save Changes", systemImage: "square.and.arrow.down.fill")
+                        .labelStyle(.titleAndIcon)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(GlassActionButtonStyle())
+                .padding(.trailing, 24)
+                .padding(.bottom, 24)
+                .shadow(color: .black.opacity(0.18), radius: 18, y: 10)
+            }
+        }
         .sheet(isPresented: $showingAddRepositoryWizard) {
             AddRepositoryWizard { repository in
                 selectedRepositoryID = appState.addRepository(repository)
@@ -201,9 +217,6 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 headerActionButton("Check Now", systemImage: "arrow.clockwise") {
                     appState.triggerManualPoll()
-                }
-                headerActionButton("Save", systemImage: "square.and.arrow.down") {
-                    appState.saveConfiguration()
                 }
                 headerActionButton("Reload", systemImage: "arrow.trianglehead.2.clockwise.rotate.90") {
                     appState.loadConfiguration()
@@ -577,6 +590,7 @@ private struct AddRepositoryWizard: View {
             title: "Step 5: Signing Overrides",
             signing: signingConfigurationBinding,
             identities: appState.availableSigningIdentities,
+            notarizationProfiles: appState.availableNotarizationProfiles,
             identityLoadError: appState.lastSigningIdentityError,
             diagnostics: appState.signingDiagnostics,
             onRefreshIdentities: appState.refreshSigningIdentities
@@ -719,6 +733,7 @@ private struct SigningOverridesEditor: View {
     let title: String
     @Binding var signing: SigningConfiguration
     let identities: [SigningIdentity]
+    let notarizationProfiles: [String]
     let identityLoadError: String?
     let diagnostics: SigningDiagnostics?
     let onRefreshIdentities: () -> Void
@@ -831,7 +846,29 @@ private struct SigningOverridesEditor: View {
                 labeledField("Code Sign Identity", symbol: "key", text: codeSignIdentityBinding)
             }
 
-            labeledField("Notarytool Profile", symbol: "checkmark.seal", text: notarizationProfileBinding)
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Detected Notary Profile", systemImage: "checkmark.seal")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Picker("Detected Notary Profile", selection: selectedNotaryProfileBinding) {
+                        Text("None Selected").tag("")
+                        ForEach(notarizationProfiles, id: \.self) { profile in
+                            Text(profile).tag(profile)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                }
+
+                Spacer()
+            }
+
+            if notarizationProfiles.isEmpty {
+                Text("No local notary profiles are known to ShipHook yet. Use the setup action below to store one in your keychain on this Mac.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             HStack(spacing: 10) {
                 Button {
@@ -843,7 +880,7 @@ private struct SigningOverridesEditor: View {
                 .buttonStyle(GlassActionButtonStyle())
 
                 if let profile = signing.notarizationProfile, !profile.isEmpty {
-                    Text("Using profile `\(profile)`")
+                    Text("Using local keychain profile `\(profile)`")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -855,7 +892,7 @@ private struct SigningOverridesEditor: View {
                     .foregroundStyle(notaryStatusIsError ? .red : .green)
             }
 
-            Text("If the certificate is already installed on this Mac, pick it from the menu and ShipHook will fill the fields. For Sparkle release publishing, ShipHook also expects an `xcrun notarytool` keychain profile name so it can notarize and staple before publish.")
+            Text("If the certificate is already installed on this Mac, pick it from the menu and ShipHook will fill the fields. The notary profile is just the local keychain profile name that `notarytool` uses on this Mac, not an Apple-side identifier.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -927,6 +964,15 @@ private struct SigningOverridesEditor: View {
         )
     }
 
+    private var selectedNotaryProfileBinding: Binding<String> {
+        Binding(
+            get: { signing.notarizationProfile ?? "" },
+            set: { newValue in
+                signing.notarizationProfile = newValue.isEmpty ? nil : newValue
+            }
+        )
+    }
+
     private func labeledField(_ title: String, symbol: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Label(title, systemImage: symbol)
@@ -962,7 +1008,7 @@ private struct NotaryProfileSheet: View {
                     .foregroundStyle(.secondary)
 
                 VStack(alignment: .leading, spacing: 12) {
-                    TextField("Profile Name", text: $profileName)
+                    TextField("Local Profile Name", text: $profileName)
                         .textFieldStyle(.roundedBorder)
                     TextField("Apple ID", text: $appleID)
                         .textFieldStyle(.roundedBorder)
@@ -972,7 +1018,7 @@ private struct NotaryProfileSheet: View {
                         .textFieldStyle(.roundedBorder)
                 }
 
-                Text("Use an Apple app-specific password here, not your Apple ID account password.")
+                Text("`Local Profile Name` is only the label saved in this Mac's keychain for `notarytool`. Use an Apple app-specific password here, not your Apple ID account password.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -1232,6 +1278,7 @@ private struct RepositoryEditor: View {
             title: "Signing Overrides",
             signing: signingBinding,
             identities: appState.availableSigningIdentities,
+            notarizationProfiles: appState.availableNotarizationProfiles,
             identityLoadError: appState.lastSigningIdentityError,
             diagnostics: appState.signingDiagnostics,
             onRefreshIdentities: appState.refreshSigningIdentities

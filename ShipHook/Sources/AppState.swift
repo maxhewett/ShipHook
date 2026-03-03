@@ -4,13 +4,20 @@ import SwiftUI
 
 @MainActor
 final class AppState: ObservableObject {
-    @Published var configuration: AppConfiguration = .default
+    @Published var configuration: AppConfiguration = .default {
+        didSet {
+            refreshDirtyState()
+            refreshNotarizationProfiles()
+        }
+    }
     @Published private(set) var repoStates: [String: RepositoryRuntimeState] = [:]
     @Published private(set) var configPath: String = ""
     @Published private(set) var lastGlobalError: String?
     @Published private(set) var availableSigningIdentities: [SigningIdentity] = []
+    @Published private(set) var availableNotarizationProfiles: [String] = []
     @Published private(set) var lastSigningIdentityError: String?
     @Published private(set) var signingDiagnostics: SigningDiagnostics?
+    @Published private(set) var hasUnsavedChanges = false
 
     private var configStore = ConfigStore()
     private let githubAPI = GitHubAPI()
@@ -25,10 +32,13 @@ final class AppState: ObservableObject {
     private var queuedBuildOrder: [String] = []
     private var activeBuildRepositoryID: String?
     private let ignoredCommitMarkers = ["[shiphook skip]", "[skip shiphook]"]
+    private let notarizationProfilesDefaultsKey = "ShipHookKnownNotarizationProfiles"
+    private var lastSavedConfiguration: AppConfiguration = .default
 
     init() {
         loadConfiguration()
         refreshSigningIdentities()
+        refreshNotarizationProfiles()
         startPollingLoop()
     }
 
@@ -41,7 +51,10 @@ final class AppState: ObservableObject {
             configuration = try configStore.loadConfiguration()
             normalizeConfiguration()
             configPath = configStore.configURL.path
+            lastSavedConfiguration = configuration
             synchronizeRuntimeState()
+            refreshDirtyState()
+            refreshNotarizationProfiles()
             lastGlobalError = nil
         } catch {
             lastGlobalError = error.localizedDescription
@@ -68,7 +81,10 @@ final class AppState: ObservableObject {
                 return repository
             }
             try configStore.saveConfiguration(configuration)
+            lastSavedConfiguration = configuration
             synchronizeRuntimeState()
+            refreshDirtyState()
+            refreshNotarizationProfiles()
             lastGlobalError = nil
         } catch {
             lastGlobalError = error.localizedDescription
@@ -235,6 +251,7 @@ final class AppState: ObservableObject {
                 "SHIPHOOK_NOTARY_PASSWORD": trimmedPassword,
             ]
         )
+        registerNotarizationProfile(trimmedProfileName)
     }
 
     func triggerManualPoll() {
@@ -272,6 +289,33 @@ final class AppState: ObservableObject {
             }
             return repository
         }
+    }
+
+    private func refreshDirtyState() {
+        hasUnsavedChanges = configuration != lastSavedConfiguration
+    }
+
+    private func refreshNotarizationProfiles() {
+        let storedProfiles = UserDefaults.standard.stringArray(forKey: notarizationProfilesDefaultsKey) ?? []
+        let configuredProfiles = configuration.repositories.compactMap { repository in
+            repository.signing?.notarizationProfile?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let profiles = Set(
+            (storedProfiles + configuredProfiles)
+                .filter { !$0.isEmpty }
+        )
+        availableNotarizationProfiles = profiles.sorted()
+    }
+
+    private func registerNotarizationProfile(_ profileName: String) {
+        let trimmedProfileName = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedProfileName.isEmpty else {
+            return
+        }
+        var profiles = Set(UserDefaults.standard.stringArray(forKey: notarizationProfilesDefaultsKey) ?? [])
+        profiles.insert(trimmedProfileName)
+        UserDefaults.standard.set(Array(profiles).sorted(), forKey: notarizationProfilesDefaultsKey)
+        refreshNotarizationProfiles()
     }
 
     private func startPollingLoop() {
