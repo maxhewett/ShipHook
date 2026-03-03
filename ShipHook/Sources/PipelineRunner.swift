@@ -66,6 +66,10 @@ struct PipelineRunner {
 
         onStageChange?(.planningRelease)
         let releasePlan = try releasePlanner.prepareRelease(for: repository)
+        defer {
+            try? releasePlanner.restoreProjectVersionIfNeeded(releasePlan, xcode: repository.xcode)
+        }
+
         let version = releasePlan?.version.marketingVersion ?? makeVersion(for: repository, snapshot: snapshot)
         let buildVersion = releasePlan?.version.buildVersion ?? ""
         let releaseNotesPath = try resolvedReleaseNotesPath(
@@ -152,6 +156,8 @@ struct PipelineRunner {
         onStageChange: ((PipelineStage) -> Void)?,
         onOutput: ((String) -> Void)?
     ) throws {
+        try cleanShipHookVersionMutationIfNeeded(repository, checkoutPath: checkoutPath, onOutput: onOutput)
+
         let commands = [
             ("Fetching origin/\(repository.branch)", "git -C '\(checkoutPath)' fetch origin '\(repository.branch)' --tags"),
             ("Checking out branch \(repository.branch)", "git -C '\(checkoutPath)' checkout '\(repository.branch)'"),
@@ -216,6 +222,68 @@ struct PipelineRunner {
 
         let archiveResult = try commandRunner.run(archiveCommand, currentDirectory: workingDirectory, environment: environment, onOutput: onOutput)
         return (artifactPath, archiveResult.output)
+    }
+
+    private func cleanShipHookVersionMutationIfNeeded(
+        _ repository: RepositoryConfiguration,
+        checkoutPath: String,
+        onOutput: ((String) -> Void)?
+    ) throws {
+        guard repository.buildMode == .xcodeArchive, let xcode = repository.xcode else {
+            return
+        }
+
+        let statusOutput = try commandRunner
+            .run("git -C '\(checkoutPath)' status --porcelain", currentDirectory: checkoutPath, environment: [:])
+            .output
+
+        let changedPaths = statusOutput
+            .split(separator: "\n")
+            .compactMap { line -> String? in
+                guard line.count >= 4 else { return nil }
+                return String(line.dropFirst(3))
+            }
+
+        guard changedPaths.count == 1,
+              let changedPath = changedPaths.first,
+              let projectPath = xcode.projectPath?.expandingTildeInPath else {
+            return
+        }
+
+        let pbxprojPath = "\(projectPath)/project.pbxproj"
+        let relativePBXProjPath = makeRelativePath(pbxprojPath, from: checkoutPath)
+        guard changedPath == relativePBXProjPath else {
+            return
+        }
+
+        let diffOutput = try commandRunner
+            .run("git -C '\(checkoutPath)' diff -- '\(pbxprojPath)'", currentDirectory: checkoutPath, environment: [:])
+            .output
+
+        let onlyVersionSettingsChanged = diffOutput
+            .split(separator: "\n")
+            .allSatisfy { line in
+                let text = String(line)
+                guard text.hasPrefix("+") || text.hasPrefix("-") else {
+                    return true
+                }
+                if text.hasPrefix("+++") || text.hasPrefix("---") {
+                    return true
+                }
+                return text.contains("MARKETING_VERSION = ") || text.contains("CURRENT_PROJECT_VERSION = ")
+            }
+
+        guard onlyVersionSettingsChanged else {
+            return
+        }
+
+        onOutput?("Restoring ShipHook-managed version bump before syncing repository.\n")
+        _ = try commandRunner.run(
+            "git -C '\(checkoutPath)' restore '\(pbxprojPath)'",
+            currentDirectory: checkoutPath,
+            environment: [:],
+            onOutput: onOutput
+        )
     }
 
     private func resolvedReleaseNotesPath(
@@ -345,6 +413,19 @@ struct PipelineRunner {
             .replacingOccurrences(of: "--", with: "-")
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         return sanitized.isEmpty ? "release" : sanitized
+    }
+
+    private func makeRelativePath(_ path: String, from root: String) -> String {
+        let rootURL = URL(fileURLWithPath: root, isDirectory: true)
+        let pathURL = URL(fileURLWithPath: path)
+        let rootComponents = rootURL.standardizedFileURL.pathComponents
+        let pathComponents = pathURL.standardizedFileURL.pathComponents
+
+        guard pathComponents.starts(with: rootComponents) else {
+            return pathURL.path
+        }
+
+        return pathComponents.dropFirst(rootComponents.count).joined(separator: "/")
     }
 
     private func normalizeCodeSigningIfNeeded(

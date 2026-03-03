@@ -15,6 +15,7 @@ struct ReleasePlan {
     var appcastURL: String?
     var latestAppcastItem: AppcastVersion?
     var appliedBuildMutation: Bool
+    var originalVersion: AppVersion
 }
 
 struct ReleaseInspection {
@@ -66,7 +67,8 @@ struct ReleasePlanner {
             version: AppVersion(marketingVersion: current.marketingVersion, buildVersion: desiredBuild),
             appcastURL: resolvedAppcastURL(for: repository),
             latestAppcastItem: latest,
-            appliedBuildMutation: mutated
+            appliedBuildMutation: mutated,
+            originalVersion: current
         )
     }
 
@@ -160,6 +162,18 @@ struct ReleasePlanner {
         perl -0pi -e 's/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = \(marketingVersion);/g; s/CURRENT_PROJECT_VERSION = [^;]+;/CURRENT_PROJECT_VERSION = \(buildVersion);/g' '\(pbxprojPath)'
         """
         _ = try commandRunner.run(command, currentDirectory: URL(fileURLWithPath: pbxprojPath).deletingLastPathComponent().path, environment: [:])
+    }
+
+    func restoreProjectVersionIfNeeded(_ plan: ReleasePlan?, xcode: XcodeBuildConfiguration?) throws {
+        guard let plan, plan.appliedBuildMutation, let xcode else {
+            return
+        }
+
+        try updateProjectVersion(
+            xcode: xcode,
+            marketingVersion: plan.originalVersion.marketingVersion,
+            buildVersion: plan.originalVersion.buildVersion
+        )
     }
 
     private func resolvedAppcastURL(for repository: RepositoryConfiguration) -> String? {
