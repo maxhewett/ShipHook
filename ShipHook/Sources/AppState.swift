@@ -18,6 +18,7 @@ final class AppState: ObservableObject {
     private let projectInspector = ProjectInspector()
     private let releasePlanner = ReleasePlanner()
     private let signingInspector = SigningInspector()
+    private let commandRunner = ShellCommandRunner()
     private var pollingTask: Task<Void, Never>?
     private var inFlightBuilds: Set<String> = []
     private var queuedBuilds: [String: (repository: RepositoryConfiguration, snapshot: GitHubBranchSnapshot)] = [:]
@@ -195,6 +196,45 @@ final class AppState: ObservableObject {
             lastSigningIdentityError = error.localizedDescription
             signingDiagnostics = nil
         }
+    }
+
+    func storeNotarizationProfile(
+        profileName: String,
+        appleID: String,
+        teamID: String,
+        appSpecificPassword: String
+    ) throws {
+        let trimmedProfileName = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedAppleID = appleID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedTeamID = teamID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPassword = appSpecificPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmedProfileName.isEmpty,
+              !trimmedAppleID.isEmpty,
+              !trimmedTeamID.isEmpty,
+              !trimmedPassword.isEmpty else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 401,
+                userInfo: [NSLocalizedDescriptionKey: "Profile name, Apple ID, Team ID, and app-specific password are all required."]
+            )
+        }
+
+        _ = try commandRunner.run(
+            """
+            xcrun notarytool store-credentials "$SHIPHOOK_NOTARY_PROFILE" \
+              --apple-id "$SHIPHOOK_NOTARY_APPLE_ID" \
+              --team-id "$SHIPHOOK_NOTARY_TEAM_ID" \
+              --password "$SHIPHOOK_NOTARY_PASSWORD"
+            """,
+            currentDirectory: NSHomeDirectory(),
+            environment: [
+                "SHIPHOOK_NOTARY_PROFILE": trimmedProfileName,
+                "SHIPHOOK_NOTARY_APPLE_ID": trimmedAppleID,
+                "SHIPHOOK_NOTARY_TEAM_ID": trimmedTeamID,
+                "SHIPHOOK_NOTARY_PASSWORD": trimmedPassword,
+            ]
+        )
     }
 
     func triggerManualPoll() {
@@ -411,6 +451,9 @@ final class AppState: ObservableObject {
             case .archiving:
                 $0.buildPhase = .archiving
                 $0.summary = "Archiving app for \(String(sha.prefix(7)))"
+            case .notarizing:
+                $0.buildPhase = .notarizing
+                $0.summary = "Notarizing app for \(String(sha.prefix(7)))"
             case .publishing:
                 $0.buildPhase = .publishing
                 $0.summary = "Publishing update for \(String(sha.prefix(7)))"

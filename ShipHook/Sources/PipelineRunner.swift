@@ -12,6 +12,7 @@ enum PipelineStage {
     case syncing(String)
     case planningRelease
     case archiving
+    case notarizing
     case publishing
 }
 
@@ -96,6 +97,16 @@ struct PipelineRunner {
             _ = try commandRunner.run(shell.command, currentDirectory: workingDirectory, environment: baseEnvironment, onOutput: appendOutput)
             artifactPath = shell.artifactPath.expandingTildeInPath
         }
+
+        let expectedTeamID = repository.signing?.developmentTeam
+        try signingInspector.verifyBuiltApp(at: artifactPath, expectedTeamID: expectedTeamID)
+        try notarizeAndStapleAppIfNeeded(
+            artifactPath: artifactPath,
+            repository: repository,
+            checkoutPath: checkoutPath,
+            onStageChange: onStageChange,
+            onOutput: appendOutput
+        )
 
         var publishEnvironment = baseEnvironment
         publishEnvironment["SHIPHOOK_ARTIFACT_PATH"] = artifactPath
@@ -182,6 +193,58 @@ struct PipelineRunner {
 
         let archiveResult = try commandRunner.run(archiveCommand, currentDirectory: workingDirectory, environment: environment, onOutput: onOutput)
         return (artifactPath, archiveResult.output)
+    }
+
+    private func notarizeAndStapleAppIfNeeded(
+        artifactPath: String,
+        repository: RepositoryConfiguration,
+        checkoutPath: String,
+        onStageChange: ((PipelineStage) -> Void)?,
+        onOutput: ((String) -> Void)?
+    ) throws {
+        guard let profile = repository.signing?.notarizationProfile, !profile.isEmpty else {
+            return
+        }
+
+        let fileManager = FileManager.default
+        let notarizationDirectory = "\(checkoutPath)/.shiphook/notarization"
+        let appName = URL(fileURLWithPath: artifactPath).deletingPathExtension().lastPathComponent
+        let uploadPath = "\(notarizationDirectory)/\(appName)-notary.zip"
+
+        try fileManager.createDirectory(
+            at: URL(fileURLWithPath: notarizationDirectory),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        if fileManager.fileExists(atPath: uploadPath) {
+            try fileManager.removeItem(atPath: uploadPath)
+        }
+
+        onStageChange?(.notarizing)
+        _ = try commandRunner.run(
+            "ditto -c -k --sequesterRsrc --keepParent '\(artifactPath)' '\(uploadPath)'",
+            currentDirectory: checkoutPath,
+            environment: [:],
+            onOutput: onOutput
+        )
+        _ = try commandRunner.run(
+            "xcrun notarytool submit '\(uploadPath)' --keychain-profile '\(profile)' --wait",
+            currentDirectory: checkoutPath,
+            environment: [:],
+            onOutput: onOutput
+        )
+        _ = try commandRunner.run(
+            "xcrun stapler staple '\(artifactPath)'",
+            currentDirectory: checkoutPath,
+            environment: [:],
+            onOutput: onOutput
+        )
+        _ = try commandRunner.run(
+            "xcrun stapler validate '\(artifactPath)'",
+            currentDirectory: checkoutPath,
+            environment: [:],
+            onOutput: onOutput
+        )
     }
 
     private func signingOverrides(for repository: RepositoryConfiguration) -> String {

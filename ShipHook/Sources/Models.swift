@@ -174,6 +174,7 @@ struct SigningConfiguration: Codable, Hashable {
     var developmentTeam: String?
     var codeSignIdentity: String?
     var codeSignStyle: CodeSignStyle
+    var notarizationProfile: String?
 
     enum CodeSignStyle: String, Codable {
         case automatic
@@ -183,7 +184,8 @@ struct SigningConfiguration: Codable, Hashable {
     static let `default` = SigningConfiguration(
         developmentTeam: nil,
         codeSignIdentity: nil,
-        codeSignStyle: .automatic
+        codeSignStyle: .automatic,
+        notarizationProfile: nil
     )
 }
 
@@ -311,6 +313,7 @@ enum RepositoryBuildPhase: String {
     case syncing
     case planningRelease
     case archiving
+    case notarizing
     case publishing
 }
 

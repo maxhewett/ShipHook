@@ -347,6 +347,8 @@ struct ContentView: View {
             return "Planning"
         case .archiving:
             return "Archiving"
+        case .notarizing:
+            return "Notarizing"
         case .publishing:
             return "Publishing"
         }
@@ -407,6 +409,7 @@ private struct AddRepositoryWizard: View {
     @State private var developmentTeam = ""
     @State private var codeSignIdentity = ""
     @State private var codeSignStyle: SigningConfiguration.CodeSignStyle = .automatic
+    @State private var notarizationProfile = ""
     @State private var statusMessage = "Point ShipHook at a local checkout. It will inspect the repo, detect Xcode settings, and generate build/archive/publish defaults."
     @State private var errorMessage: String?
     @State private var isInspecting = false
@@ -650,7 +653,8 @@ private struct AddRepositoryWizard: View {
             repository.signing = SigningConfiguration(
                 developmentTeam: developmentTeam.isEmpty ? nil : developmentTeam,
                 codeSignIdentity: codeSignIdentity.isEmpty ? nil : codeSignIdentity,
-                codeSignStyle: codeSignStyle
+                codeSignStyle: codeSignStyle,
+                notarizationProfile: notarizationProfile.isEmpty ? nil : notarizationProfile
             )
             onCreate(repository)
             dismiss()
@@ -685,13 +689,15 @@ private struct AddRepositoryWizard: View {
                 SigningConfiguration(
                     developmentTeam: developmentTeam.isEmpty ? nil : developmentTeam,
                     codeSignIdentity: codeSignIdentity.isEmpty ? nil : codeSignIdentity,
-                    codeSignStyle: codeSignStyle
+                    codeSignStyle: codeSignStyle,
+                    notarizationProfile: notarizationProfile.isEmpty ? nil : notarizationProfile
                 )
             },
             set: { newValue in
                 developmentTeam = newValue.developmentTeam ?? ""
                 codeSignIdentity = newValue.codeSignIdentity ?? ""
                 codeSignStyle = newValue.codeSignStyle
+                notarizationProfile = newValue.notarizationProfile ?? ""
             }
         )
     }
@@ -709,6 +715,7 @@ private struct AddRepositoryWizard: View {
 }
 
 private struct SigningOverridesEditor: View {
+    @EnvironmentObject private var appState: AppState
     let title: String
     @Binding var signing: SigningConfiguration
     let identities: [SigningIdentity]
@@ -716,6 +723,9 @@ private struct SigningOverridesEditor: View {
     let diagnostics: SigningDiagnostics?
     let onRefreshIdentities: () -> Void
     @State private var showDiagnostics = false
+    @State private var showingNotaryProfileSheet = false
+    @State private var notaryStatusMessage: String?
+    @State private var notaryStatusIsError = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -821,11 +831,60 @@ private struct SigningOverridesEditor: View {
                 labeledField("Code Sign Identity", symbol: "key", text: codeSignIdentityBinding)
             }
 
-            Text("If the certificate is already installed on this Mac, pick it from the menu and ShipHook will fill the fields.")
+            labeledField("Notarytool Profile", symbol: "checkmark.seal", text: notarizationProfileBinding)
+
+            HStack(spacing: 10) {
+                Button {
+                    showingNotaryProfileSheet = true
+                } label: {
+                    Label("Set Up Notary Profile", systemImage: "key.badge.exclamationmark")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(GlassActionButtonStyle())
+
+                if let profile = signing.notarizationProfile, !profile.isEmpty {
+                    Text("Using profile `\(profile)`")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let notaryStatusMessage {
+                Text(notaryStatusMessage)
+                    .font(.caption)
+                    .foregroundStyle(notaryStatusIsError ? .red : .green)
+            }
+
+            Text("If the certificate is already installed on this Mac, pick it from the menu and ShipHook will fill the fields. For Sparkle release publishing, ShipHook also expects an `xcrun notarytool` keychain profile name so it can notarize and staple before publish.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .glassSection()
+        .sheet(isPresented: $showingNotaryProfileSheet) {
+            NotaryProfileSheet(
+                initialProfileName: signing.notarizationProfile ?? "",
+                initialTeamID: signing.developmentTeam ?? "",
+                onSave: { profileName, appleID, teamID, appSpecificPassword in
+                    do {
+                        try appState.storeNotarizationProfile(
+                            profileName: profileName,
+                            appleID: appleID,
+                            teamID: teamID,
+                            appSpecificPassword: appSpecificPassword
+                        )
+                        signing.notarizationProfile = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if signing.developmentTeam?.isEmpty != false {
+                            signing.developmentTeam = teamID.trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
+                        notaryStatusIsError = false
+                        notaryStatusMessage = "Stored notary profile `\(profileName)` in the keychain."
+                    } catch {
+                        notaryStatusIsError = true
+                        notaryStatusMessage = error.localizedDescription
+                    }
+                }
+            )
+        }
     }
 
     private var selectedIdentityNameBinding: Binding<String> {
@@ -861,6 +920,13 @@ private struct SigningOverridesEditor: View {
         )
     }
 
+    private var notarizationProfileBinding: Binding<String> {
+        Binding(
+            get: { signing.notarizationProfile ?? "" },
+            set: { signing.notarizationProfile = $0.isEmpty ? nil : $0 }
+        )
+    }
+
     private func labeledField(_ title: String, symbol: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Label(title, systemImage: symbol)
@@ -870,6 +936,87 @@ private struct SigningOverridesEditor: View {
                 .textFieldStyle(.roundedBorder)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct NotaryProfileSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let initialProfileName: String
+    let initialTeamID: String
+    let onSave: (String, String, String, String) -> Void
+
+    @State private var profileName = ""
+    @State private var appleID = ""
+    @State private var teamID = ""
+    @State private var appSpecificPassword = ""
+    @State private var errorMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Set Up Notary Profile")
+                    .font(.largeTitle.bold())
+
+                Text("ShipHook will store a `notarytool` keychain profile on this Mac so release builds can be notarized and stapled automatically.")
+                    .foregroundStyle(.secondary)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    TextField("Profile Name", text: $profileName)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Apple ID", text: $appleID)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Team ID", text: $teamID)
+                        .textFieldStyle(.roundedBorder)
+                    SecureField("App-Specific Password", text: $appSpecificPassword)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                Text("Use an Apple app-specific password here, not your Apple ID account password.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
+                Spacer()
+            }
+            .padding(24)
+            .frame(minWidth: 460, minHeight: 320)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save Profile") {
+                        let trimmedProfileName = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let trimmedAppleID = appleID.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let trimmedTeamID = teamID.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let trimmedPassword = appSpecificPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                        guard !trimmedProfileName.isEmpty,
+                              !trimmedAppleID.isEmpty,
+                              !trimmedTeamID.isEmpty,
+                              !trimmedPassword.isEmpty else {
+                            errorMessage = "All fields are required."
+                            return
+                        }
+
+                        onSave(trimmedProfileName, trimmedAppleID, trimmedTeamID, trimmedPassword)
+                        dismiss()
+                    }
+                }
+            }
+            .onAppear {
+                profileName = initialProfileName
+                teamID = initialTeamID
+            }
+        }
     }
 }
 
@@ -1236,6 +1383,8 @@ private struct RepositoryEditor: View {
             return "Planning Release"
         case .archiving:
             return "Archiving"
+        case .notarizing:
+            return "Notarizing"
         case .publishing:
             return "Publishing"
         }
