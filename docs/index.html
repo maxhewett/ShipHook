@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ShipHook Updates</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f5f7fb;
+        --card: #ffffff;
+        --text: #14213d;
+        --muted: #5c677d;
+        --accent: #0b6e4f;
+      }
+      body {
+        margin: 0;
+        font-family: ui-rounded, "SF Pro Display", "Helvetica Neue", sans-serif;
+        background: linear-gradient(180deg, #eef3fb 0%, var(--bg) 100%);
+        color: var(--text);
+      }
+      main {
+        max-width: 760px;
+        margin: 48px auto;
+        padding: 0 20px;
+      }
+      .card {
+        background: var(--card);
+        border-radius: 20px;
+        padding: 28px;
+        box-shadow: 0 20px 50px rgba(20, 33, 61, 0.08);
+      }
+      h1 {
+        margin: 0 0 10px;
+        font-size: 2rem;
+      }
+      p {
+        margin: 0 0 14px;
+        line-height: 1.55;
+        color: var(--muted);
+      }
+      a {
+        color: var(--accent);
+      }
+      code {
+        background: #eef2f6;
+        border-radius: 6px;
+        padding: 2px 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="card">
+        <h1>ShipHook Updates</h1>
+        <p>This site hosts the Sparkle appcast feed for ShipHook.</p>
+        <p>Feed URL: <a href="./appcast.xml"><code>appcast.xml</code></a></p>
+      </div>
+    </main>
+  </body>
+</html>
