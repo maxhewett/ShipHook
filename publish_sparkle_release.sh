@@ -327,11 +327,11 @@ publish_release_if_possible() {
     echo "Uploading asset to existing GitHub Release ${TAG}..."
   else
     echo "Creating GitHub Release ${TAG}..."
-    local prerelease_args=()
     if [[ "$CHANNEL" == "beta" ]]; then
-      prerelease_args=(--prerelease)
+      gh release create "$TAG" --repo "${REPO_OWNER}/${REPO_NAME}" --title "$RELEASE_TITLE" "${notes_args[@]}" --prerelease
+    else
+      gh release create "$TAG" --repo "${REPO_OWNER}/${REPO_NAME}" --title "$RELEASE_TITLE" "${notes_args[@]}"
     fi
-    gh release create "$TAG" --repo "${REPO_OWNER}/${REPO_NAME}" --title "$RELEASE_TITLE" "${notes_args[@]}" "${prerelease_args[@]}"
   fi
 
   echo "Uploading ${ASSET_NAME} to GitHub Release ${TAG}..."

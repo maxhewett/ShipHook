@@ -171,6 +171,13 @@ struct PipelineRunner {
         publishEnvironment["SHIPHOOK_ARTIFACT_PATH"] = artifactPath
         onStageChange?(.publishing)
         _ = try commandRunner.run(repository.publishCommand, currentDirectory: workingDirectory, environment: publishEnvironment, onOutput: appendOutput)
+        try verifyPublishedAppcast(
+            repository: repository,
+            checkoutPath: checkoutPath,
+            releaseChannel: releaseChannel,
+            expectedMarketingVersion: version,
+            expectedBuildVersion: buildVersion
+        )
         postDiscordWebhookIfNeeded(
             repository: repository,
             snapshot: snapshot,
@@ -191,6 +198,59 @@ struct PipelineRunner {
             skippedPublish: false,
             summary: "Published \(version) from \(snapshot.sha.prefix(7))"
         )
+    }
+
+    private func verifyPublishedAppcast(
+        repository: RepositoryConfiguration,
+        checkoutPath: String,
+        releaseChannel: ReleaseChannel,
+        expectedMarketingVersion: String,
+        expectedBuildVersion: String
+    ) throws {
+        let docsDirectory = "\(checkoutPath)/docs"
+        let appcastPath: String
+        switch releaseChannel {
+        case .stable:
+            appcastPath = "\(docsDirectory)/appcast.xml"
+        case .beta:
+            appcastPath = "\(docsDirectory)/beta/appcast.xml"
+        }
+
+        guard FileManager.default.fileExists(atPath: appcastPath) else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 810,
+                userInfo: [NSLocalizedDescriptionKey: "Publish command completed, but expected appcast was not written to \(appcastPath)."]
+            )
+        }
+
+        let appcast = try String(contentsOfFile: appcastPath, encoding: .utf8)
+        let expectedShortVersion = "<sparkle:shortVersionString>\(expectedMarketingVersion)</sparkle:shortVersionString>"
+        guard appcast.contains(expectedShortVersion) else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 811,
+                userInfo: [NSLocalizedDescriptionKey: "Publish command completed, but \(URL(fileURLWithPath: appcastPath).lastPathComponent) does not contain version \(expectedMarketingVersion)."]
+            )
+        }
+
+        if !expectedBuildVersion.isEmpty {
+            let expectedBuild = "<sparkle:version>\(expectedBuildVersion)</sparkle:version>"
+            guard appcast.contains(expectedBuild) else {
+                throw NSError(
+                    domain: "ShipHook",
+                    code: 812,
+                    userInfo: [NSLocalizedDescriptionKey: "Publish command completed, but \(URL(fileURLWithPath: appcastPath).lastPathComponent) does not contain build \(expectedBuildVersion)."]
+                )
+            }
+        }
+
+        if let notifications = repository.notifications,
+           (notifications.postOnSuccess || notifications.postOnFailure),
+           let webhookURL = notifications.discordWebhookURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !webhookURL.isEmpty {
+            _ = webhookURL
+        }
     }
 
     private func syncRepository(
