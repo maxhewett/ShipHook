@@ -2,21 +2,10 @@
 
 # ShipHook
 
-ShipHook is a native macOS app and menu bar companion for monitoring GitHub repositories, detecting new pushes, building release archives, and publishing Sparkle appcasts and release artifacts.
+ShipHook is a macOS app used to automate signing & deployment of other macOS apps. ShipHook monitors GitHub repositories and then builds, signs & notarises apps. Once notarised, ShipHook utilises the Sparkle framework to push app updates via appcast.xml hosted on GitHub pages. The main use case for ShipHook is to replace the manual step of signing & building apps when multiple collaborators are working on a macOS app. This allows everyone to test, build, and collaborate via git, but only automate the last step when a build is ready for deployment.
 
 <img width="1232" height="884" alt="shpreview" src="https://github.com/user-attachments/assets/2c64a5ea-e7a7-4335-be06-0981b829daf6" />
 
-
-## Current Status
-
-- Native macOS app in [`ShipHook.xcodeproj`](/Users/max/Developer/ShipHook/ShipHook.xcodeproj)
-- Multi-repo dashboard with guided repo setup
-- GitHub polling with per-repo queueing and live logs
-- Xcode archive and custom shell build pipelines
-- Sparkle release planning against the latest appcast item
-- Signing diagnostics and signing override support
-- Generic Sparkle/appcast publisher in [`publish_sparkle_release.sh`](/Users/max/Developer/ShipHook/publish_sparkle_release.sh)
-- Sparkle self-update entry point for ShipHook itself
 
 ## Project Layout
 
@@ -173,7 +162,7 @@ xcodebuild -project /Users/max/Developer/ShipHook/ShipHook.xcodeproj \
 
 ## Sparkle Integration Snippet
 
-ShipHook now uses the same Sparkle pattern you would use in a normal SwiftUI app:
+ShipHook uses the same Sparkle pattern you would use in a normal SwiftUI app:
 
 ```swift
 import Sparkle
@@ -195,9 +184,3 @@ final class AppUpdater: ObservableObject {
     }
 }
 ```
-
-## Notes
-
-- ShipHook archives target apps into Xcode's standard archives location so they appear in Organizer.
-- Repo-local derived data is still used for build isolation and reliability.
-- The app currently still emits a non-blocking warning for `NSWorkspace.icon(forFileType:)`; functionality is unaffected.
