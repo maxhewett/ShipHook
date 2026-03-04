@@ -333,6 +333,8 @@ struct PipelineRunner {
         checkoutPath: String,
         onOutput: ((String) -> Void)?
     ) throws {
+        try cleanShipHookGeneratedDocsIfNeeded(checkoutPath: checkoutPath, onOutput: onOutput)
+
         guard repository.buildMode == .xcodeArchive, let xcode = repository.xcode else {
             return
         }
@@ -388,6 +390,62 @@ struct PipelineRunner {
             environment: [:],
             onOutput: onOutput
         )
+    }
+
+    private func cleanShipHookGeneratedDocsIfNeeded(
+        checkoutPath: String,
+        onOutput: ((String) -> Void)?
+    ) throws {
+        let statusOutput = try commandRunner
+            .run("git -C '\(checkoutPath)' status --porcelain", currentDirectory: checkoutPath, environment: [:])
+            .output
+
+        var trackedPathsToRestore: [String] = []
+        var untrackedPathsToRemove: [String] = []
+
+        for line in statusOutput.split(separator: "\n", omittingEmptySubsequences: true) {
+            let text = String(line)
+            guard text.count >= 4 else { continue }
+            let status = String(text.prefix(2))
+            let path = String(text.dropFirst(3))
+
+            guard isShipHookGeneratedDocsPath(path) else {
+                continue
+            }
+
+            if status == "??" {
+                untrackedPathsToRemove.append(path)
+            } else {
+                trackedPathsToRestore.append(path)
+            }
+        }
+
+        if !trackedPathsToRestore.isEmpty {
+            onOutput?("Restoring ShipHook-managed appcast documentation before syncing repository.\n")
+            let quotedPaths = trackedPathsToRestore.map { "'\($0)'" }.joined(separator: " ")
+            _ = try commandRunner.run(
+                "git -C '\(checkoutPath)' restore -- \(quotedPaths)",
+                currentDirectory: checkoutPath,
+                environment: [:],
+                onOutput: onOutput
+            )
+        }
+
+        for path in untrackedPathsToRemove {
+            let absolutePath = "\(checkoutPath)/\(path)"
+            guard FileManager.default.fileExists(atPath: absolutePath) else {
+                continue
+            }
+            onOutput?("Removing generated ShipHook file \(path) before syncing repository.\n")
+            try FileManager.default.removeItem(atPath: absolutePath)
+        }
+    }
+
+    private func isShipHookGeneratedDocsPath(_ relativePath: String) -> Bool {
+        relativePath == "docs/appcast.xml"
+            || relativePath == "docs/beta/appcast.xml"
+            || relativePath.hasPrefix("docs/release-notes/")
+            || relativePath.hasPrefix("docs/beta/release-notes/")
     }
 
     private func resolvedReleaseNotesSource(
