@@ -16,6 +16,8 @@ struct ReleasePlan {
     var latestAppcastItem: AppcastVersion?
     var appliedBuildMutation: Bool
     var originalVersion: AppVersion
+    var shouldSkipPublish: Bool
+    var skipReason: String?
 }
 
 struct ReleaseInspection {
@@ -55,6 +57,19 @@ struct ReleasePlanner {
 
         let current = try inspectProjectVersion(xcode: xcode)
         let latest = try fetchLatestAppcastVersion(for: repository, channel: channel)
+        if let latest,
+           repository.sparkle?.skipIfVersionIsNotNewer ?? true,
+           !isVersionNewer(current, than: latest) {
+            return ReleasePlan(
+                version: current,
+                appcastURL: resolvedAppcastURL(for: repository, channel: channel),
+                latestAppcastItem: latest,
+                appliedBuildMutation: false,
+                originalVersion: current,
+                shouldSkipPublish: true,
+                skipReason: "Skipping publish because \(current.marketingVersion) (\(current.buildVersion)) is not newer than the current appcast item."
+            )
+        }
         let desiredBuild = try computeNextBuild(currentBuild: current.buildVersion, latestAppcast: latest, autoIncrement: repository.sparkle?.autoIncrementBuild ?? true)
 
         var mutated = false
@@ -68,7 +83,9 @@ struct ReleasePlanner {
             appcastURL: resolvedAppcastURL(for: repository, channel: channel),
             latestAppcastItem: latest,
             appliedBuildMutation: mutated,
-            originalVersion: current
+            originalVersion: current,
+            shouldSkipPublish: false,
+            skipReason: nil
         )
     }
 
@@ -146,10 +163,33 @@ struct ReleasePlanner {
         }
 
         if autoIncrement {
-            return String(latestBuild + 1)
+            let nextBuild = String(latestBuild + 1)
+            let width = max(currentBuild.count, latest.buildVersion.count)
+            if currentBuild.hasPrefix("0") || latest.buildVersion.hasPrefix("0") {
+                return nextBuild.count < width
+                    ? String(repeating: "0", count: width - nextBuild.count) + nextBuild
+                    : nextBuild
+            }
+            return nextBuild
         }
 
         throw ReleasePlannerError.nonNumericBuild("Current build \(currentBuild) is not newer than appcast build \(latest.buildVersion)")
+    }
+
+    private func isVersionNewer(_ current: AppVersion, than latest: AppcastVersion) -> Bool {
+        guard let currentBuild = Int(current.buildVersion), let latestBuild = Int(latest.buildVersion) else {
+            return current.buildVersion != latest.buildVersion
+        }
+
+        if currentBuild != latestBuild {
+            return currentBuild > latestBuild
+        }
+
+        if let latestMarketing = latest.marketingVersion, !latestMarketing.isEmpty {
+            return current.marketingVersion != latestMarketing
+        }
+
+        return false
     }
 
     private func updateProjectVersion(xcode: XcodeBuildConfiguration, marketingVersion: String, buildVersion: String) throws {

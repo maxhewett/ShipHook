@@ -9,6 +9,10 @@ final class AppState: ObservableObject {
         didSet {
             refreshDirtyState()
             refreshNotarizationProfiles()
+            if oldValue.webDashboardEnabled != configuration.webDashboardEnabled
+                || oldValue.webDashboardPort != configuration.webDashboardPort {
+                applyWebDashboardConfiguration()
+            }
         }
     }
     @Published private(set) var repoStates: [String: RepositoryRuntimeState] = [:]
@@ -23,6 +27,8 @@ final class AppState: ObservableObject {
     @Published private(set) var latestPublishedVersions: [String: AppcastVersion] = [:]
     @Published private(set) var launchesAtLogin = false
     @Published private(set) var launchAtLoginStatusMessage: String?
+    @Published private(set) var webDashboardStatusMessage = "Local web dashboard is turned off."
+    @Published private(set) var webDashboardURLString: String?
 
     private var configStore = ConfigStore()
     private let buildHistoryStore = BuildHistoryStore()
@@ -40,6 +46,9 @@ final class AppState: ObservableObject {
     private let ignoredCommitMarkers = ["[shiphook skip]", "[skip shiphook]"]
     private let notarizationProfilesDefaultsKey = "ShipHookKnownNotarizationProfiles"
     private var lastSavedConfiguration: AppConfiguration = .default
+    private lazy var webDashboardServer = WebDashboardServer { [weak self] in
+        self?.makeWebDashboardSnapshot() ?? WebDashboardSnapshot(generatedAt: Date(), repositories: [])
+    }
 
     init() {
         loadConfiguration()
@@ -48,6 +57,7 @@ final class AppState: ObservableObject {
         refreshNotarizationProfiles()
         refreshLaunchAtLoginStatus()
         refreshPublishedVersions()
+        applyWebDashboardConfiguration()
         startPollingLoop()
     }
 
@@ -84,6 +94,9 @@ final class AppState: ObservableObject {
                 }
                 if repository.sparkle == nil {
                     repository.sparkle = .default
+                }
+                if repository.notifications == nil {
+                    repository.notifications = .default
                 }
                 if repository.signing == nil {
                     repository.signing = .default
@@ -141,6 +154,7 @@ final class AppState: ObservableObject {
         return RepositoryConfiguration(
             id: "repo-\(UUID().uuidString.prefix(8).lowercased())",
             name: appName.isEmpty ? repo : appName,
+            isEnabled: true,
             owner: owner,
             repo: repo,
             branch: branch.isEmpty ? "main" : branch,
@@ -167,8 +181,10 @@ final class AppState: ObservableObject {
             versionStrategy: .shortSHATimestamp,
             sparkle: SparkleConfiguration(
                 appcastURL: defaultAppcastURL(owner: owner, repo: repo),
-                autoIncrementBuild: true
+                autoIncrementBuild: false,
+                skipIfVersionIsNotNewer: true
             ),
+            notifications: .default,
             signing: .default
         )
     }
@@ -266,12 +282,32 @@ final class AppState: ObservableObject {
 
     func triggerManualPoll() {
         Task {
-            await checkRepositories(force: true)
+            await checkRepositories(force: true, repositoryID: nil)
+        }
+    }
+
+    func triggerManualPoll(for repositoryID: String) {
+        Task {
+            await checkRepositories(force: true, repositoryID: repositoryID)
+        }
+    }
+
+    func triggerManualPollAll() {
+        Task {
+            await checkRepositories(force: true, repositoryID: nil)
         }
     }
 
     func openConfigInFinder() {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: configPath)])
+    }
+
+    func openWebDashboard() {
+        guard let webDashboardURLString,
+              let url = URL(string: webDashboardURLString) else {
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     func refreshLaunchAtLoginStatus() {
@@ -312,6 +348,20 @@ final class AppState: ObservableObject {
         }
 
         refreshLaunchAtLoginStatus()
+    }
+
+    func publishedVersion(for repository: RepositoryConfiguration) -> String? {
+        guard let published = latestPublishedVersions[repository.id] else {
+            return nil
+        }
+
+        if let marketingVersion = published.marketingVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !marketingVersion.isEmpty {
+            return marketingVersion
+        }
+
+        let buildVersion = published.buildVersion.trimmingCharacters(in: .whitespacesAndNewlines)
+        return buildVersion.isEmpty ? nil : buildVersion
     }
 
     func history(for repositoryID: String) -> [BuildRecord] {
@@ -373,6 +423,15 @@ final class AppState: ObservableObject {
         hasUnsavedChanges = configuration != lastSavedConfiguration
     }
 
+    private func applyWebDashboardConfiguration() {
+        let status = webDashboardServer.configure(
+            enabled: configuration.webDashboardEnabled,
+            port: configuration.webDashboardPort
+        )
+        webDashboardStatusMessage = status.message
+        webDashboardURLString = status.urlString
+    }
+
     private func refreshNotarizationProfiles() {
         let storedProfiles = UserDefaults.standard.stringArray(forKey: notarizationProfilesDefaultsKey) ?? []
         let configuredProfiles = configuration.repositories.compactMap { repository in
@@ -407,13 +466,26 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func checkRepositories(force: Bool) async {
+    private func checkRepositories(force: Bool, repositoryID: String? = nil) async {
         for repository in configuration.repositories {
+            if let repositoryID, repository.id != repositoryID {
+                continue
+            }
             await check(repository: repository, force: force)
         }
     }
 
     private func check(repository: RepositoryConfiguration, force: Bool) async {
+        if !repository.isEnabled {
+            updateState(for: repository.id) {
+                $0.activity = .idle
+                $0.buildPhase = .idle
+                $0.summary = "Repository is disabled"
+                $0.lastCheckDate = Date()
+            }
+            return
+        }
+
             updateState(for: repository.id) {
                 $0.activity = .polling
                 $0.buildPhase = .idle
@@ -533,6 +605,20 @@ final class AppState: ObservableObject {
 
         switch result {
         case let .success(outcome):
+            if outcome.skippedPublish {
+                updateState(for: repository.id) {
+                    $0.activity = .idle
+                    $0.lastBuiltSHA = outcome.builtSHA
+                    $0.buildStartedAt = nil
+                    $0.buildPhase = .idle
+                    $0.lastLog = outcome.log
+                    $0.lastLogPath = outcome.logPath
+                    $0.lastError = nil
+                    $0.summary = outcome.summary
+                }
+                startNextQueuedBuildIfPossible()
+                return
+            }
             let historyRecord = BuildRecord(
                 id: UUID().uuidString,
                 repositoryID: repository.id,
@@ -551,7 +637,7 @@ final class AppState: ObservableObject {
                 $0.lastLog = outcome.log
                 $0.lastLogPath = outcome.logPath
                 $0.lastError = nil
-                $0.summary = "Published \(outcome.version) from \(snapshot.sha.prefix(7))"
+                $0.summary = outcome.summary
             }
         case let .failure(error):
             updateState(for: repository.id) {
@@ -564,6 +650,7 @@ final class AppState: ObservableObject {
                 }
                 $0.summary = "Build or publish failed"
             }
+            postFailureDiscordWebhookIfNeeded(repository: repository, snapshot: snapshot, error: error)
         }
 
         startNextQueuedBuildIfPossible()
@@ -672,6 +759,123 @@ final class AppState: ObservableObject {
         repoStates = repoStates.filter { validIDs.contains($0.key) }
         configuration.repositories.forEach { repo in
             repoStates[repo.id] = repoStates[repo.id] ?? .initial(id: repo.id)
+        }
+    }
+
+    private func postFailureDiscordWebhookIfNeeded(
+        repository: RepositoryConfiguration,
+        snapshot: GitHubBranchSnapshot,
+        error: Error
+    ) {
+        guard let notifications = repository.notifications,
+              notifications.postOnFailure,
+              let webhookURL = notifications.discordWebhookURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !webhookURL.isEmpty,
+              let url = URL(string: webhookURL) else {
+            return
+        }
+
+        let payload: [String: Any] = [
+            "content": "ShipHook failed to build **\(repository.name)**.",
+            "embeds": [[
+                "title": "\(repository.name) build failed",
+                "description": snapshot.message.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Build failed",
+                "url": snapshot.htmlURL?.absoluteString ?? "",
+                "color": 15_704_317,
+                "fields": [
+                    ["name": "Repository", "value": "\(repository.owner)/\(repository.repo)", "inline": true],
+                    ["name": "Commit", "value": String(snapshot.sha.prefix(7)), "inline": true],
+                    ["name": "Branch", "value": repository.branch, "inline": true],
+                    ["name": "Error", "value": error.localizedDescription, "inline": false],
+                ],
+            ]]
+        ]
+
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+
+        URLSession.shared.dataTask(with: request).resume()
+    }
+
+    private func makeWebDashboardSnapshot() -> WebDashboardSnapshot {
+        let repositories = configuration.repositories.map { repository in
+            let state = repoStates[repository.id] ?? .initial(id: repository.id)
+            let recentBuilds = Array(history(for: repository.id).prefix(6)).map { record in
+                WebDashboardSnapshot.Build(
+                    version: record.version,
+                    sha: record.sha,
+                    builtAt: record.builtAt
+                )
+            }
+            let latestBuild = recentBuilds.first
+
+            return WebDashboardSnapshot.Repository(
+                id: repository.id,
+                name: repository.name,
+                isEnabled: repository.isEnabled,
+                slug: "\(repository.owner)/\(repository.repo)",
+                branch: repository.branch,
+                activity: state.activity.rawValue,
+                phase: state.buildPhase.rawValue,
+                summary: state.summary,
+                version: displayedVersion(for: repository),
+                publishedVersion: publishedVersion(for: repository),
+                lastSeenSHA: state.lastSeenSHA,
+                lastBuiltSHA: state.lastBuiltSHA,
+                lastCheckDate: state.lastCheckDate,
+                lastSuccessDate: state.lastSuccessDate,
+                buildStartedAt: state.buildStartedAt,
+                latestBuild: latestBuild,
+                recentBuilds: recentBuilds,
+                recentLog: state.lastLog,
+                lastLogPath: state.lastLogPath,
+                lastError: state.lastError,
+                progress: progressSnapshot(for: state)
+            )
+        }
+
+        return WebDashboardSnapshot(
+            generatedAt: Date(),
+            repositories: repositories
+        )
+    }
+
+    private func progressSnapshot(for state: RepositoryRuntimeState) -> WebDashboardSnapshot.Progress? {
+        let steps = progressStep(for: state.buildPhase)
+        guard let steps else {
+            return nil
+        }
+
+        return WebDashboardSnapshot.Progress(
+            currentStep: steps.current,
+            totalSteps: steps.total,
+            label: steps.label,
+            fractionComplete: Double(steps.current) / Double(steps.total)
+        )
+    }
+
+    private func progressStep(for phase: RepositoryBuildPhase) -> (current: Int, total: Int, label: String)? {
+        switch phase {
+        case .idle:
+            return nil
+        case .queued:
+            return (1, 5, "Queued")
+        case .syncing:
+            return (2, 5, "Syncing")
+        case .planningRelease:
+            return (3, 5, "Planning Release")
+        case .archiving:
+            return (4, 5, "Archiving")
+        case .notarizing:
+            return (5, 6, ShipHookLocale.notarising)
+        case .publishing:
+            return (6, 6, "Publishing")
         }
     }
 }

@@ -11,6 +11,7 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView {
             sidebar
+                .navigationSplitViewColumnWidth(min: 320, ideal: 344)
         } detail: {
             detailContent
         }
@@ -66,8 +67,19 @@ struct ContentView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label("Repositories", systemImage: "shippingbox")
-                .font(.title2.weight(.bold))
+            HStack(alignment: .center, spacing: 12) {
+                Label("Repositories", systemImage: "shippingbox")
+                    .font(.title2.weight(.bold))
+                Spacer()
+                Button {
+                    appState.triggerManualPollAll()
+                } label: {
+                    Label("Check All", systemImage: "arrow.clockwise")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(GlassActionButtonStyle())
+                .controlSize(.small)
+            }
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
@@ -103,13 +115,14 @@ struct ContentView: View {
     @ViewBuilder
     private var detailContent: some View {
         if let repositoryIndex = selectedRepositoryIndex {
-            let repository = appState.configuration.repositories[repositoryIndex]
+            let repositoryBinding = $appState.configuration.repositories[repositoryIndex]
+            let repository = repositoryBinding.wrappedValue
             let runtimeState = appState.repoStates[repository.id] ?? .initial(id: repository.id)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     RepositoryEditor(
-                        repository: $appState.configuration.repositories[repositoryIndex],
+                        repository: repositoryBinding,
                         runtimeState: runtimeState,
                         onResetBuildState: {
                             appState.resetBuildState(for: repository.id)
@@ -124,7 +137,7 @@ struct ContentView: View {
                 .padding(.bottom, 20)
             }
             .safeAreaInset(edge: .top, spacing: 0) {
-                stickyHeader(for: repository)
+                stickyHeader(for: repositoryBinding)
             }
             .background(
                 LinearGradient(
@@ -145,82 +158,97 @@ struct ContentView: View {
     private func repositoryRow(_ repo: RepositoryConfiguration) -> some View {
         let state = appState.repoStates[repo.id] ?? .initial(id: repo.id)
         let isSelected = selectedRepositoryID == repo.id
-        let statusColor = color(for: state.activity)
-        let statusSymbol = repositoryStatusSymbol(for: state.activity)
+        let isDisabled = !repo.isEnabled
+        let statusColor = isDisabled ? .yellow : color(for: state.activity)
+        let statusSymbol = isDisabled ? "xmark.circle.fill" : repositoryStatusSymbol(for: state.activity)
         let latestVersion = appState.displayedVersion(for: repo)
 
         return Button {
             selectedRepositoryID = repo.id
         } label: {
-            HStack(alignment: .top, spacing: 12) {
-                Image(nsImage: repositoryIcon(for: repo))
-                    .resizable()
-                    .frame(width: 32, height: 32)
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .strokeBorder(.white.opacity(0.18))
-                    }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(nsImage: repositoryIcon(for: repo))
+                        .resizable()
+                        .frame(width: 38, height: 38)
 
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack(spacing: 8) {
-                        Text(repo.name.isEmpty ? repo.id : repo.name)
-                            .font(.headline)
-                            .foregroundStyle(.primary)
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 8) {
+                            Text(repo.name.isEmpty ? repo.id : repo.name)
+                                .font(.headline)
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            if isDisabled {
+                                Text("Disabled")
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .foregroundStyle(.yellow)
+                                    .background(.yellow.opacity(0.16), in: Capsule())
+                            }
+                            if let latestVersion, !latestVersion.isEmpty {
+                                Text("v\(latestVersion)")
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(.thinMaterial, in: Capsule())
+                            }
+                            if state.activity == .building {
+                                Text(phaseBadgeLabel(for: state.buildPhase))
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(.regularMaterial, in: Capsule())
+                            }
+                        }
+
+                        Text("\(repo.owner)/\(repo.repo) @ \(repo.branch)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                             .lineLimit(1)
-                        if let latestVersion, !latestVersion.isEmpty {
-                            Text("v\(latestVersion)")
-                                .font(.caption2.weight(.semibold))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(.thinMaterial, in: Capsule())
-                        }
-                        if state.activity == .building {
-                            Text(phaseBadgeLabel(for: state.buildPhase))
-                                .font(.caption2.weight(.semibold))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(.regularMaterial, in: Capsule())
-                        }
                     }
 
-                    Text("\(repo.owner)/\(repo.repo) @ \(repo.branch)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
 
-                    HStack(alignment: .top, spacing: 8) {
-                        if state.activity == .building {
+                HStack(alignment: .center, spacing: 8) {
+                    HStack(spacing: 6) {
+                        if state.activity == .building && !isDisabled {
                             ProgressView()
                                 .controlSize(.small)
                                 .tint(statusColor)
-                                .padding(.top, 1)
                         } else {
                             Image(systemName: statusSymbol)
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(statusColor)
-                                .frame(width: 14, alignment: .center)
-                                .padding(.top, 1)
                         }
-                        Text(state.summary)
-                            .lineLimit(2)
-                            .foregroundStyle(statusColor)
+                        Text(isDisabled ? "Disabled" : phaseBadgeLabel(for: state.buildPhase))
+                            .font(.caption.weight(.semibold))
                     }
-                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(statusColor.opacity(0.14), in: Capsule())
 
-                    if state.activity == .building {
-                        let progress = phaseProgress(for: state.buildPhase)
-                        VStack(alignment: .leading, spacing: 4) {
-                            ProgressView(value: progress.current, total: progress.total)
-                                .tint(statusColor)
-                            Text("Step \(Int(progress.current)) of \(Int(progress.total)) - \(progress.label)")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
+                    Text(state.summary)
+                        .lineLimit(2)
+                        .foregroundStyle(statusColor)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Spacer(minLength: 0)
+                }
+                .font(.caption)
+
+                if state.activity == .building && !isDisabled {
+                    let progress = phaseProgress(for: state.buildPhase)
+                    VStack(alignment: .leading, spacing: 4) {
+                        ProgressView(value: progress.current, total: progress.total)
+                            .tint(statusColor)
+                        Text("Step \(Int(progress.current)) of \(Int(progress.total)) - \(progress.label)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
-
-                Spacer(minLength: 0)
             }
             .padding(12)
             .background {
@@ -236,17 +264,18 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
-    private func stickyHeader(for repository: RepositoryConfiguration) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+    private func stickyHeader(for repository: Binding<RepositoryConfiguration>) -> some View {
+        let value = repository.wrappedValue
+        return VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 14) {
-                Image(nsImage: repositoryIcon(for: repository))
+                Image(nsImage: repositoryIcon(for: value))
                     .resizable()
                     .frame(width: 56, height: 56)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(repository.name.isEmpty ? repository.id : repository.name)
+                    Text(value.name.isEmpty ? value.id : value.name)
                         .font(.system(size: 30, weight: .bold, design: .rounded))
-                    Text("\(repository.owner)/\(repository.repo) @ \(repository.branch)")
+                    Text("\(value.owner)/\(value.repo) @ \(value.branch)")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -256,7 +285,11 @@ struct ContentView: View {
 
             HStack(spacing: 10) {
                 headerActionButton("Check Now", systemImage: "arrow.clockwise") {
-                    appState.triggerManualPoll()
+                    appState.triggerManualPoll(for: value.id)
+                }
+                headerActionButton(value.isEnabled ? "Disable Repo" : "Enable Repo", systemImage: value.isEnabled ? "pause.circle" : "play.circle") {
+                    repository.wrappedValue.isEnabled.toggle()
+                    appState.saveConfiguration()
                 }
             }
 
@@ -441,7 +474,7 @@ private struct AddRepositoryWizard: View {
     @State private var releaseInspection: ReleaseInspection?
     @State private var selectedScheme = ""
     @State private var appcastURL = ""
-    @State private var autoIncrementBuild = true
+    @State private var autoIncrementBuild = false
     @State private var developmentTeam = ""
     @State private var codeSignIdentity = ""
     @State private var codeSignStyle: SigningConfiguration.CodeSignStyle = .automatic
@@ -685,7 +718,8 @@ private struct AddRepositoryWizard: View {
             var repository = generatedRepository
             repository.sparkle = SparkleConfiguration(
                 appcastURL: appcastURL.isEmpty ? nil : appcastURL,
-                autoIncrementBuild: autoIncrementBuild
+                autoIncrementBuild: autoIncrementBuild,
+                skipIfVersionIsNotNewer: true
             )
             repository.signing = SigningConfiguration(
                 developmentTeam: developmentTeam.isEmpty ? nil : developmentTeam,
@@ -1127,29 +1161,33 @@ private struct RepositoryEditor: View {
         let progress = phaseProgress(for: runtimeState.buildPhase)
         let latestBuild = appState.latestBuildRecord(for: repository.id)
         let displayedVersion = appState.displayedVersion(for: repository)
+        let statusActivity: RepositoryActivity = repository.isEnabled ? runtimeState.activity : .idle
+        let statusText = repository.isEnabled ? runtimeState.activity.rawValue.capitalized : "Disabled"
+        let statusIcon = repository.isEnabled ? repositoryStatusSymbol(for: runtimeState.activity) : "xmark.circle.fill"
+        let effectiveStatusColor = repository.isEnabled ? statusColor : .yellow
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label("Status", systemImage: "bolt.horizontal.circle")
                     .font(.title3.bold())
                 Spacer()
                 HStack(spacing: 8) {
-                    if runtimeState.activity == .building {
+                    if statusActivity == .building {
                         ProgressView()
                             .controlSize(.small)
-                            .tint(statusColor)
+                            .tint(effectiveStatusColor)
                     } else {
-                        Image(systemName: repositoryStatusSymbol(for: runtimeState.activity))
+                        Image(systemName: statusIcon)
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(statusColor)
+                            .foregroundStyle(effectiveStatusColor)
                     }
 
-                    Text(runtimeState.activity.rawValue.capitalized)
+                    Text(statusText)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(statusColor)
+                        .foregroundStyle(effectiveStatusColor)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
-                .background(statusColor.opacity(0.18), in: Capsule())
+                .background(effectiveStatusColor.opacity(0.18), in: Capsule())
             }
 
             Text(runtimeState.summary)
@@ -1372,10 +1410,20 @@ private struct RepositoryEditor: View {
     }
 
     private var publishPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let notifications = notificationBinding
+        return VStack(alignment: .leading, spacing: 12) {
             DisclosureGroup(isExpanded: $showPublish) {
-                labeledField("Publish Command", symbol: "paperplane", text: $repository.publishCommand, axis: .vertical)
-                    .padding(.top, 10)
+                VStack(alignment: .leading, spacing: 14) {
+                    labeledField("Publish Command", symbol: "paperplane", text: $repository.publishCommand, axis: .vertical)
+                    Divider()
+                    Toggle("Post to Discord after successful publish", isOn: notifications.postOnSuccess)
+                    Toggle("Post to Discord after failed build", isOn: notifications.postOnFailure)
+                    labeledField("Discord Webhook URL", symbol: "message.badge", text: optionalStringBinding(notifications.discordWebhookURL))
+                    Text("Discord webhook delivery is best-effort. ShipHook logs webhook failures but does not fail the release after the app is already published.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.top, 10)
             } label: {
                 Label("Publish", systemImage: "paperplane")
                     .font(.title3.bold())
@@ -1390,6 +1438,7 @@ private struct RepositoryEditor: View {
             Label("Sparkle", systemImage: "sparkles")
                 .font(.title3.bold())
             labeledField("Appcast URL", symbol: "link", text: appcastURLBinding)
+            Toggle("Skip build when project version is not newer than appcast", isOn: sparkle.skipIfVersionIsNotNewer)
             Toggle("Auto-increment build when appcast build is not newer", isOn: sparkle.autoIncrementBuild)
             Text("ShipHook compares the latest appcast build with `CURRENT_PROJECT_VERSION` and bumps the project build number before archiving when needed.")
                 .font(.caption)
@@ -1502,6 +1551,13 @@ private struct RepositoryEditor: View {
         )
     }
 
+    private var notificationBinding: Binding<NotificationConfiguration> {
+        Binding(
+            get: { repository.notifications ?? .default },
+            set: { repository.notifications = $0 }
+        )
+    }
+
     private var appcastURLBinding: Binding<String> {
         Binding(
             get: {
@@ -1535,6 +1591,9 @@ private struct RepositoryEditor: View {
     }
 
     private var primaryStatusTint: Color {
+        if !repository.isEnabled {
+            return .yellow
+        }
         switch runtimeState.activity {
         case .idle:
             return .primary

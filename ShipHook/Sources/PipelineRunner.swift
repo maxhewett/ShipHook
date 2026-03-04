@@ -6,6 +6,15 @@ struct PipelineOutcome {
     var artifactPath: String
     var log: String
     var logPath: String
+    var skippedPublish: Bool
+    var summary: String
+}
+
+private struct ReleaseNotesSource {
+    var sha: String
+    var title: String
+    var message: String
+    var commitURL: URL?
 }
 
 enum NotarizationError: LocalizedError {
@@ -73,9 +82,14 @@ struct PipelineRunner {
 
         let version = releasePlan?.version.marketingVersion ?? makeVersion(for: repository, snapshot: snapshot)
         let buildVersion = releasePlan?.version.buildVersion ?? ""
-        let releaseNotesPath = try resolvedReleaseNotesPath(
+        let releaseNotesSource = try resolvedReleaseNotesSource(
             for: repository,
             snapshot: snapshot,
+            checkoutPath: checkoutPath
+        )
+        let releaseNotesPath = try resolvedReleaseNotesPath(
+            for: repository,
+            releaseNotesSource: releaseNotesSource,
             checkoutPath: checkoutPath,
             version: version
         )
@@ -103,6 +117,19 @@ struct PipelineRunner {
         }
         if releaseChannel == .beta {
             combinedLog += "Detected beta release channel from commit message.\n"
+        }
+        if let releasePlan, releasePlan.shouldSkipPublish {
+            let summary = releasePlan.skipReason ?? "Skipped publish because the app version is not newer than the current appcast item."
+            combinedLog += "\(summary)\n"
+            return PipelineOutcome(
+                builtSHA: snapshot.sha,
+                version: version,
+                artifactPath: "",
+                log: combinedLog,
+                logPath: logPath,
+                skippedPublish: true,
+                summary: summary
+            )
         }
 
         let artifactPath: String
@@ -144,13 +171,25 @@ struct PipelineRunner {
         publishEnvironment["SHIPHOOK_ARTIFACT_PATH"] = artifactPath
         onStageChange?(.publishing)
         _ = try commandRunner.run(repository.publishCommand, currentDirectory: workingDirectory, environment: publishEnvironment, onOutput: appendOutput)
+        postDiscordWebhookIfNeeded(
+            repository: repository,
+            snapshot: snapshot,
+            version: version,
+            releaseChannel: releaseChannel,
+            appcastURL: releasePlan?.appcastURL,
+            artifactPath: artifactPath,
+            releaseNotesSource: releaseNotesSource,
+            onOutput: appendOutput
+        )
 
         return PipelineOutcome(
             builtSHA: snapshot.sha,
             version: version,
             artifactPath: artifactPath,
             log: combinedLog,
-            logPath: logPath
+            logPath: logPath,
+            skippedPublish: false,
+            summary: "Published \(version) from \(snapshot.sha.prefix(7))"
         )
     }
 
@@ -291,9 +330,86 @@ struct PipelineRunner {
         )
     }
 
-    private func resolvedReleaseNotesPath(
+    private func resolvedReleaseNotesSource(
         for repository: RepositoryConfiguration,
         snapshot: GitHubBranchSnapshot,
+        checkoutPath: String
+    ) throws -> ReleaseNotesSource {
+        let snapshotTitle = snapshot.message
+            .split(whereSeparator: \.isNewline)
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty ?? "Release"
+
+        let isMergeCommit = (try? isMergeCommit(at: checkoutPath)) ?? false
+        guard isMergeCommit else {
+            return ReleaseNotesSource(
+                sha: snapshot.sha,
+                title: snapshotTitle,
+                message: snapshot.message,
+                commitURL: snapshot.htmlURL
+            )
+        }
+
+        let fallback = try nearestNonMergeCommit(for: repository, in: checkoutPath)
+        guard let fallback, !fallback.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return ReleaseNotesSource(
+                sha: snapshot.sha,
+                title: snapshotTitle,
+                message: snapshot.message,
+                commitURL: snapshot.htmlURL
+            )
+        }
+
+        return fallback
+    }
+
+    private func isMergeCommit(at checkoutPath: String) throws -> Bool {
+        let parents = try commandRunner
+            .run("git -C '\(checkoutPath)' show -s --format=%P HEAD", currentDirectory: checkoutPath, environment: [:])
+            .output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: " ")
+        return parents.count > 1
+    }
+
+    private func nearestNonMergeCommit(
+        for repository: RepositoryConfiguration,
+        in checkoutPath: String
+    ) throws -> ReleaseNotesSource? {
+        let output = try commandRunner
+            .run("git -C '\(checkoutPath)' log --no-merges -n 1 --format='%H%x1f%s%x1f%b' HEAD", currentDirectory: checkoutPath, environment: [:])
+            .output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !output.isEmpty else {
+            return nil
+        }
+
+        let fields = output.components(separatedBy: "\u{1f}")
+        guard let sha = fields.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sha.isEmpty else {
+            return nil
+        }
+
+        let title = fields.dropFirst().first?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Release"
+        let body = fields.dropFirst(2).joined(separator: "\u{1f}")
+        let message = ([title] + [body.trimmingCharacters(in: .whitespacesAndNewlines)])
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        let commitURL: URL?
+        if !repository.owner.isEmpty, !repository.repo.isEmpty {
+            commitURL = URL(string: "https://github.com/\(repository.owner)/\(repository.repo)/commit/\(sha)")
+        } else {
+            commitURL = nil
+        }
+        return ReleaseNotesSource(sha: sha, title: title, message: message, commitURL: commitURL)
+    }
+
+    private func resolvedReleaseNotesPath(
+        for repository: RepositoryConfiguration,
+        releaseNotesSource: ReleaseNotesSource,
         checkoutPath: String,
         version: String
     ) throws -> String {
@@ -304,19 +420,14 @@ struct PipelineRunner {
 
         let releaseNotesDirectory = "\(checkoutPath)/.shiphook/release-notes"
         let releaseNotesPath = "\(releaseNotesDirectory)/\(repository.id)-\(sanitizedFilenameComponent(version)).html"
-        let title = snapshot.message
-            .split(whereSeparator: \.isNewline)
-            .first
-            .map(String.init)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .nilIfEmpty ?? "Release \(version)"
+        let title = releaseNotesSource.title.nilIfEmpty ?? "Release \(version)"
 
         let html = makeReleaseNotesHTML(
             title: title,
             version: version,
-            message: snapshot.message,
-            shortSHA: String(snapshot.sha.prefix(7)),
-            commitURL: snapshot.htmlURL
+            message: releaseNotesSource.message,
+            shortSHA: String(releaseNotesSource.sha.prefix(7)),
+            commitURL: releaseNotesSource.commitURL
         )
 
         try FileManager.default.createDirectory(
@@ -431,6 +542,105 @@ struct PipelineRunner {
         }
 
         return pathComponents.dropFirst(rootComponents.count).joined(separator: "/")
+    }
+
+    private func postDiscordWebhookIfNeeded(
+        repository: RepositoryConfiguration,
+        snapshot: GitHubBranchSnapshot,
+        version: String,
+        releaseChannel: ReleaseChannel,
+        appcastURL: String?,
+        artifactPath: String,
+        releaseNotesSource: ReleaseNotesSource,
+        onOutput: ((String) -> Void)?
+    ) {
+        guard let notifications = repository.notifications,
+              notifications.postOnSuccess,
+              let webhookURL = notifications.discordWebhookURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !webhookURL.isEmpty else {
+            return
+        }
+
+        guard let url = URL(string: webhookURL) else {
+            onOutput?("Skipping Discord webhook: invalid URL.\n")
+            return
+        }
+
+        let channelLabel = releaseChannel == .beta ? "beta" : "stable"
+        let releaseNotesSummary = summarizedReleaseNotesText(from: releaseNotesSource.message)
+        let fields: [[String: Any]] = [
+            ["name": "Repository", "value": "\(repository.owner)/\(repository.repo)", "inline": true],
+            ["name": "Commit", "value": String(snapshot.sha.prefix(7)), "inline": true],
+            ["name": "Channel", "value": channelLabel.capitalized, "inline": true],
+            ["name": "Artifact", "value": URL(fileURLWithPath: artifactPath).lastPathComponent, "inline": true],
+            ["name": "Appcast", "value": appcastURL ?? "N/A", "inline": false],
+            ["name": "Release Notes", "value": releaseNotesSummary, "inline": false],
+        ]
+
+        let payload: [String: Any] = [
+            "content": "ShipHook published **\(repository.name)** \(version) on the **\(channelLabel)** channel.",
+            "embeds": [[
+                "title": "\(repository.name) \(version)",
+                "description": releaseNotesSource.title,
+                "url": releaseNotesSource.commitURL?.absoluteString ?? snapshot.htmlURL?.absoluteString ?? "",
+                "color": releaseChannel == .beta ? 16_717_567 : 5_768_191,
+                "fields": fields,
+            ]]
+        ]
+
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            onOutput?("Skipping Discord webhook: could not encode payload.\n")
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var requestError: Error?
+        var responseCode: Int?
+
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            requestError = error
+            responseCode = (response as? HTTPURLResponse)?.statusCode
+            semaphore.signal()
+        }.resume()
+
+        semaphore.wait()
+
+        if let requestError {
+            onOutput?("Discord webhook failed: \(requestError.localizedDescription)\n")
+            return
+        }
+
+        guard let responseCode, (200..<300).contains(responseCode) else {
+            onOutput?("Discord webhook failed with HTTP \(responseCode ?? -1).\n")
+            return
+        }
+
+        onOutput?("Posted Discord webhook notification.\n")
+    }
+
+    private func summarizedReleaseNotesText(from message: String) -> String {
+        let collapsed = message
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !collapsed.isEmpty else {
+            return "No release notes were provided."
+        }
+
+        if collapsed.count <= 900 {
+            return collapsed
+        }
+
+        let truncated = collapsed.prefix(897)
+        return "\(truncated)..."
     }
 
     private func normalizeCodeSigningIfNeeded(

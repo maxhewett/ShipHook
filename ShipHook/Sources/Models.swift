@@ -3,22 +3,67 @@ import Foundation
 struct AppConfiguration: Codable, Hashable {
     var pollIntervalSeconds: TimeInterval
     var githubTokenEnvVar: String?
+    var webDashboardEnabled: Bool
+    var webDashboardPort: Int
     var repositories: [RepositoryConfiguration]
 
     static let `default` = AppConfiguration(
         pollIntervalSeconds: 300,
         githubTokenEnvVar: "GITHUB_TOKEN",
+        webDashboardEnabled: false,
+        webDashboardPort: 8787,
         repositories: []
     )
 
     var containsOnlyPlaceholderRepository: Bool {
         repositories.count == 1 && repositories[0].isPlaceholderExample
     }
+
+    enum CodingKeys: String, CodingKey {
+        case pollIntervalSeconds
+        case githubTokenEnvVar
+        case webDashboardEnabled
+        case webDashboardPort
+        case repositories
+    }
+
+    init(
+        pollIntervalSeconds: TimeInterval,
+        githubTokenEnvVar: String?,
+        webDashboardEnabled: Bool,
+        webDashboardPort: Int,
+        repositories: [RepositoryConfiguration]
+    ) {
+        self.pollIntervalSeconds = pollIntervalSeconds
+        self.githubTokenEnvVar = githubTokenEnvVar
+        self.webDashboardEnabled = webDashboardEnabled
+        self.webDashboardPort = webDashboardPort
+        self.repositories = repositories
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        pollIntervalSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .pollIntervalSeconds) ?? 300
+        githubTokenEnvVar = try container.decodeIfPresent(String.self, forKey: .githubTokenEnvVar) ?? "GITHUB_TOKEN"
+        webDashboardEnabled = try container.decodeIfPresent(Bool.self, forKey: .webDashboardEnabled) ?? false
+        webDashboardPort = try container.decodeIfPresent(Int.self, forKey: .webDashboardPort) ?? 8787
+        repositories = try container.decodeIfPresent([RepositoryConfiguration].self, forKey: .repositories) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(pollIntervalSeconds, forKey: .pollIntervalSeconds)
+        try container.encodeIfPresent(githubTokenEnvVar, forKey: .githubTokenEnvVar)
+        try container.encode(webDashboardEnabled, forKey: .webDashboardEnabled)
+        try container.encode(webDashboardPort, forKey: .webDashboardPort)
+        try container.encode(repositories, forKey: .repositories)
+    }
 }
 
 struct RepositoryConfiguration: Codable, Identifiable, Hashable {
     var id: String
     var name: String
+    var isEnabled: Bool
     var owner: String
     var repo: String
     var branch: String
@@ -34,6 +79,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
     var environment: [String: String]
     var versionStrategy: VersionStrategy
     var sparkle: SparkleConfiguration?
+    var notifications: NotificationConfiguration?
     var signing: SigningConfiguration?
 
     enum BuildMode: String, Codable {
@@ -50,6 +96,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
     enum CodingKeys: String, CodingKey {
         case id
         case name
+        case isEnabled
         case owner
         case repo
         case branch
@@ -65,12 +112,14 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
         case environment
         case versionStrategy
         case sparkle
+        case notifications
         case signing
     }
 
     init(
         id: String,
         name: String,
+        isEnabled: Bool,
         owner: String,
         repo: String,
         branch: String,
@@ -86,10 +135,12 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
         environment: [String: String],
         versionStrategy: VersionStrategy,
         sparkle: SparkleConfiguration?,
+        notifications: NotificationConfiguration?,
         signing: SigningConfiguration?
     ) {
         self.id = id
         self.name = name
+        self.isEnabled = isEnabled
         self.owner = owner
         self.repo = repo
         self.branch = branch
@@ -105,6 +156,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
         self.environment = environment
         self.versionStrategy = versionStrategy
         self.sparkle = sparkle
+        self.notifications = notifications
         self.signing = signing
     }
 
@@ -112,6 +164,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? id
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
         owner = try container.decodeIfPresent(String.self, forKey: .owner) ?? ""
         repo = try container.decodeIfPresent(String.self, forKey: .repo) ?? ""
         branch = try container.decodeIfPresent(String.self, forKey: .branch) ?? "main"
@@ -127,6 +180,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
         environment = try container.decodeIfPresent([String: String].self, forKey: .environment) ?? [:]
         versionStrategy = try container.decodeIfPresent(VersionStrategy.self, forKey: .versionStrategy) ?? .shortSHATimestamp
         sparkle = try container.decodeIfPresent(SparkleConfiguration.self, forKey: .sparkle)
+        notifications = try container.decodeIfPresent(NotificationConfiguration.self, forKey: .notifications)
         signing = try container.decodeIfPresent(SigningConfiguration.self, forKey: .signing)
     }
 
@@ -134,6 +188,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
         RepositoryConfiguration(
             id: "repo-\(UUID().uuidString.prefix(8).lowercased())",
             name: "New Repository",
+            isEnabled: true,
             owner: "",
             repo: "",
             branch: "main",
@@ -149,6 +204,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
             environment: [:],
             versionStrategy: .shortSHATimestamp,
             sparkle: .default,
+            notifications: .default,
             signing: .default
         )
     }
@@ -163,11 +219,81 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
 struct SparkleConfiguration: Codable, Hashable {
     var appcastURL: String?
     var autoIncrementBuild: Bool
+    var skipIfVersionIsNotNewer: Bool
 
     static let `default` = SparkleConfiguration(
         appcastURL: nil,
-        autoIncrementBuild: true
+        autoIncrementBuild: false,
+        skipIfVersionIsNotNewer: true
     )
+
+    enum CodingKeys: String, CodingKey {
+        case appcastURL
+        case autoIncrementBuild
+        case skipIfVersionIsNotNewer
+    }
+
+    init(
+        appcastURL: String?,
+        autoIncrementBuild: Bool,
+        skipIfVersionIsNotNewer: Bool
+    ) {
+        self.appcastURL = appcastURL
+        self.autoIncrementBuild = autoIncrementBuild
+        self.skipIfVersionIsNotNewer = skipIfVersionIsNotNewer
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        appcastURL = try container.decodeIfPresent(String.self, forKey: .appcastURL)
+        autoIncrementBuild = try container.decodeIfPresent(Bool.self, forKey: .autoIncrementBuild) ?? true
+        skipIfVersionIsNotNewer = try container.decodeIfPresent(Bool.self, forKey: .skipIfVersionIsNotNewer) ?? true
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(appcastURL, forKey: .appcastURL)
+        try container.encode(autoIncrementBuild, forKey: .autoIncrementBuild)
+        try container.encode(skipIfVersionIsNotNewer, forKey: .skipIfVersionIsNotNewer)
+    }
+}
+
+struct NotificationConfiguration: Codable, Hashable {
+    var discordWebhookURL: String?
+    var postOnSuccess: Bool
+    var postOnFailure: Bool
+
+    static let `default` = NotificationConfiguration(
+        discordWebhookURL: nil,
+        postOnSuccess: false,
+        postOnFailure: false
+    )
+
+    enum CodingKeys: String, CodingKey {
+        case discordWebhookURL
+        case postOnSuccess
+        case postOnFailure
+    }
+
+    init(discordWebhookURL: String?, postOnSuccess: Bool, postOnFailure: Bool) {
+        self.discordWebhookURL = discordWebhookURL
+        self.postOnSuccess = postOnSuccess
+        self.postOnFailure = postOnFailure
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        discordWebhookURL = try container.decodeIfPresent(String.self, forKey: .discordWebhookURL)
+        postOnSuccess = try container.decodeIfPresent(Bool.self, forKey: .postOnSuccess) ?? false
+        postOnFailure = try container.decodeIfPresent(Bool.self, forKey: .postOnFailure) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(discordWebhookURL, forKey: .discordWebhookURL)
+        try container.encode(postOnSuccess, forKey: .postOnSuccess)
+        try container.encode(postOnFailure, forKey: .postOnFailure)
+    }
 }
 
 struct SigningConfiguration: Codable, Hashable {

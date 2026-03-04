@@ -9,6 +9,7 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 generalPanel
+                webDashboardPanel
                 launchAtLoginPanel
                 updatePanel
                 filesPanel
@@ -106,6 +107,59 @@ struct SettingsView: View {
                 Text(message)
                     .font(.caption)
                     .foregroundStyle(launchAtLoginError == nil ? Color.secondary : Color.red)
+            }
+        }
+        .glassSection()
+    }
+
+    private var webDashboardPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Web Dashboard", systemImage: "globe")
+                .font(.title3.bold())
+
+            Toggle(isOn: Binding(
+                get: { appState.configuration.webDashboardEnabled },
+                set: { appState.configuration.webDashboardEnabled = $0 }
+            )) {
+                Text("Serve a local read-only dashboard over HTTP")
+            }
+            .toggleStyle(.switch)
+
+            HStack(alignment: .top, spacing: 14) {
+                settingsField(
+                    title: "Port",
+                    symbol: "network",
+                    text: Binding(
+                        get: { String(appState.configuration.webDashboardPort) },
+                        set: {
+                            guard let port = Int($0) else { return }
+                            appState.configuration.webDashboardPort = port
+                        }
+                    ),
+                    prompt: "8787"
+                )
+
+                summaryItem(
+                    title: "URL",
+                    value: appState.webDashboardURLString ?? "Not running",
+                    symbol: "link"
+                )
+            }
+
+            Text(appState.webDashboardStatusMessage)
+                .font(.caption)
+                .foregroundStyle(appState.webDashboardURLString == nil ? Color.secondary : Color.green)
+
+            HStack {
+                Button {
+                    appState.openWebDashboard()
+                } label: {
+                    Label("Open Dashboard", systemImage: "safari")
+                }
+                .buttonStyle(GlassActionButtonStyle())
+                .disabled(appState.webDashboardURLString == nil)
+
+                Spacer()
             }
         }
         .glassSection()
