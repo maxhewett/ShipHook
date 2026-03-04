@@ -71,20 +71,26 @@ struct PipelineRunner {
         }
 
         onStageChange?(.syncing("Fetching latest branch state"))
-        try syncRepository(repository, checkoutPath: checkoutPath, sha: snapshot.sha, onStageChange: onStageChange, onOutput: appendOutput)
+        let synchronizedSHA = try syncRepository(repository, checkoutPath: checkoutPath, sha: snapshot.sha, onStageChange: onStageChange, onOutput: appendOutput)
+        let effectiveSnapshot = try resolvedSynchronizedSnapshot(
+            for: repository,
+            checkoutPath: checkoutPath,
+            fallback: snapshot,
+            synchronizedSHA: synchronizedSHA
+        )
 
         onStageChange?(.planningRelease)
-        let releaseChannel = releaseChannel(for: snapshot)
+        let releaseChannel = releaseChannel(for: effectiveSnapshot)
         let releasePlan = try releasePlanner.prepareRelease(for: repository, channel: releaseChannel)
         defer {
             try? releasePlanner.restoreProjectVersionIfNeeded(releasePlan, xcode: repository.xcode)
         }
 
-        let version = releasePlan?.version.marketingVersion ?? makeVersion(for: repository, snapshot: snapshot)
+        let version = releasePlan?.version.marketingVersion ?? makeVersion(for: repository, snapshot: effectiveSnapshot)
         let buildVersion = releasePlan?.version.buildVersion ?? ""
         let releaseNotesSource = try resolvedReleaseNotesSource(
             for: repository,
-            snapshot: snapshot,
+            snapshot: effectiveSnapshot,
             checkoutPath: checkoutPath
         )
         let releaseNotesPath = try resolvedReleaseNotesPath(
@@ -101,8 +107,8 @@ struct PipelineRunner {
             "SHIPHOOK_GITHUB_OWNER": repository.owner,
             "SHIPHOOK_GITHUB_REPO": repository.repo,
             "SHIPHOOK_BRANCH": repository.branch,
-            "SHIPHOOK_SHA": snapshot.sha,
-            "SHIPHOOK_SHORT_SHA": String(snapshot.sha.prefix(7)),
+            "SHIPHOOK_SHA": effectiveSnapshot.sha,
+            "SHIPHOOK_SHORT_SHA": String(effectiveSnapshot.sha.prefix(7)),
             "SHIPHOOK_VERSION": version,
             "SHIPHOOK_BUILD_VERSION": buildVersion,
             "SHIPHOOK_RELEASE_CHANNEL": releaseChannel.rawValue,
@@ -122,7 +128,7 @@ struct PipelineRunner {
             let summary = releasePlan.skipReason ?? "Skipped publish because the app version is not newer than the current appcast item."
             combinedLog += "\(summary)\n"
             return PipelineOutcome(
-                builtSHA: snapshot.sha,
+                builtSHA: effectiveSnapshot.sha,
                 version: version,
                 artifactPath: "",
                 log: combinedLog,
@@ -180,7 +186,7 @@ struct PipelineRunner {
         )
         postDiscordWebhookIfNeeded(
             repository: repository,
-            snapshot: snapshot,
+            snapshot: effectiveSnapshot,
             version: version,
             releaseChannel: releaseChannel,
             appcastURL: releasePlan?.appcastURL,
@@ -190,13 +196,13 @@ struct PipelineRunner {
         )
 
         return PipelineOutcome(
-            builtSHA: snapshot.sha,
+            builtSHA: effectiveSnapshot.sha,
             version: version,
             artifactPath: artifactPath,
             log: combinedLog,
             logPath: logPath,
             skippedPublish: false,
-            summary: "Published \(version) from \(snapshot.sha.prefix(7))"
+            summary: "Published \(version) from \(effectiveSnapshot.sha.prefix(7))"
         )
     }
 
@@ -259,7 +265,7 @@ struct PipelineRunner {
         sha: String,
         onStageChange: ((PipelineStage) -> Void)?,
         onOutput: ((String) -> Void)?
-    ) throws {
+    ) throws -> String {
         try cleanShipHookVersionMutationIfNeeded(repository, checkoutPath: checkoutPath, onOutput: onOutput)
 
         let commands = [
@@ -279,13 +285,43 @@ struct PipelineRunner {
             .output
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard currentHead == sha else {
-            throw NSError(
-                domain: "ShipHook",
-                code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "Repository HEAD \(currentHead) does not match GitHub snapshot \(sha) after sync."]
-            )
+        if currentHead != sha {
+            onOutput?("Branch advanced during sync from \(String(sha.prefix(7))) to \(String(currentHead.prefix(7))); using the synchronized HEAD.\n")
         }
+
+        return currentHead
+    }
+
+    private func resolvedSynchronizedSnapshot(
+        for repository: RepositoryConfiguration,
+        checkoutPath: String,
+        fallback: GitHubBranchSnapshot,
+        synchronizedSHA: String
+    ) throws -> GitHubBranchSnapshot {
+        guard synchronizedSHA != fallback.sha else {
+            return fallback
+        }
+
+        let message = try commandRunner
+            .run("git -C '\(checkoutPath)' log -1 --format=%B '\(synchronizedSHA)'", currentDirectory: checkoutPath, environment: [:])
+            .output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let committedAtRaw = try commandRunner
+            .run("git -C '\(checkoutPath)' log -1 --format=%cI '\(synchronizedSHA)'", currentDirectory: checkoutPath, environment: [:])
+            .output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let formatter = ISO8601DateFormatter()
+        let committedAt = formatter.date(from: committedAtRaw)
+        let htmlURL = URL(string: "https://github.com/\(repository.owner)/\(repository.repo)/commit/\(synchronizedSHA)")
+
+        return GitHubBranchSnapshot(
+            sha: synchronizedSHA,
+            committedAt: committedAt ?? fallback.committedAt,
+            message: message.isEmpty ? fallback.message : message,
+            htmlURL: htmlURL ?? fallback.htmlURL
+        )
     }
 
     private func runXcodeBuild(
