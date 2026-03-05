@@ -590,4 +590,9 @@ struct BuildRecord: Codable, Hashable, Identifiable {
     var sha: String
     var builtAt: Date
     var releaseChannel: ReleaseChannel?
+    var authorLogin: String?
+    var authorAvatarURL: URL?
+    var authorProfileURL: URL?
+    var summary: String?
+    var logPath: String?
 }

@@ -46,6 +46,13 @@ struct GitHubReleaseSummary: Identifiable, Equatable, Hashable {
     }
 }
 
+struct GitHubCommitAuthor: Equatable, Hashable {
+    var displayName: String
+    var login: String?
+    var avatarURL: URL?
+    var profileURL: URL?
+}
+
 struct GitHubAPI {
     private let session: URLSession = .shared
 
@@ -124,6 +131,46 @@ struct GitHubAPI {
                 }
             )
         }
+    }
+
+    func commitAuthor(
+        owner: String,
+        repo: String,
+        sha: String,
+        token: String?
+    ) async throws -> GitHubCommitAuthor? {
+        let encodedOwner = owner.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? owner
+        let encodedRepo = repo.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? repo
+        let encodedSHA = sha.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? sha
+        let url = URL(string: "https://api.github.com/repos/\(encodedOwner)/\(encodedRepo)/commits/\(encodedSHA)")!
+        var request = makeRequest(url: url, token: token)
+        request.httpMethod = "GET"
+
+        let (data, response) = try await session.data(for: request)
+        try validateResponse(data: data, response: response)
+        let payload = try JSONDecoder.github.decode(CommitResponse.self, from: data)
+
+        if let author = payload.author {
+            return GitHubCommitAuthor(
+                displayName: "@\(author.login)",
+                login: author.login,
+                avatarURL: URL(string: author.avatarURL),
+                profileURL: URL(string: author.htmlURL)
+            )
+        }
+
+        if let commitAuthor = payload.commit.author {
+            let email = commitAuthor.email.trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = commitAuthor.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty && !email.isEmpty {
+                return GitHubCommitAuthor(displayName: "\(name) <\(email)>", login: nil, avatarURL: nil, profileURL: nil)
+            }
+            if !name.isEmpty {
+                return GitHubCommitAuthor(displayName: name, login: nil, avatarURL: nil, profileURL: nil)
+            }
+        }
+
+        return nil
     }
 
     func deleteRelease(
@@ -272,4 +319,30 @@ private struct ReleaseResponse: Decodable {
         case htmlURL = "html_url"
         case author
     }
+}
+
+private struct CommitResponse: Decodable {
+    struct Author: Decodable {
+        var login: String
+        var avatarURL: String
+        var htmlURL: String
+
+        enum CodingKeys: String, CodingKey {
+            case login
+            case avatarURL = "avatar_url"
+            case htmlURL = "html_url"
+        }
+    }
+
+    struct CommitDetails: Decodable {
+        struct CommitAuthor: Decodable {
+            var name: String
+            var email: String
+        }
+
+        var author: CommitAuthor?
+    }
+
+    var author: Author?
+    var commit: CommitDetails
 }

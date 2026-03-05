@@ -1218,6 +1218,10 @@ private struct RepositoryEditor: View {
     @State private var releaseExplorerPage = 0
     @State private var releaseDetailsCandidate: GitHubReleaseSummary?
     @State private var managerReleaseDetailsCandidate: GitHubReleaseSummary?
+    @State private var showBuildExplorer = false
+    @State private var buildExplorerPage = 0
+    @State private var buildDetailsCandidate: BuildRecord?
+    @State private var managerBuildDetailsCandidate: BuildRecord?
     @State private var followLogOutput = true
     @State private var copiedLogToastVisible = false
 
@@ -1259,6 +1263,7 @@ private struct RepositoryEditor: View {
         }
         .onAppear {
             appState.refreshReleaseExplorer(for: repository.id, force: false)
+            appState.preloadBuildCommitAuthors(for: repository.id)
         }
         .overlay(alignment: .bottomTrailing) {
             if copiedLogToastVisible {
@@ -1304,6 +1309,12 @@ private struct RepositoryEditor: View {
         }
         .sheet(item: $releaseDetailsCandidate) { release in
             releaseDetailsSheet(for: release)
+        }
+        .sheet(isPresented: $showBuildExplorer) {
+            buildExplorerSheet
+        }
+        .sheet(item: $buildDetailsCandidate) { record in
+            buildDetailsSheet(for: record)
         }
     }
 
@@ -1459,15 +1470,16 @@ private struct RepositoryEditor: View {
                     followLogOutput.toggle()
                 } label: {
                     Label(followLogOutput ? "Live" : "Paused", systemImage: followLogOutput ? "play.circle.fill" : "pause.circle.fill")
-                        .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(.bordered)
+                .controlSize(.small)
                 Button {
                     copyLatestLogToPasteboard()
                 } label: {
                     Label("Copy", systemImage: "doc.on.doc")
                 }
                 .buttonStyle(.bordered)
+                .controlSize(.small)
                 .disabled(runtimeState.lastLog.isEmpty)
             }
 
@@ -1525,6 +1537,8 @@ private struct RepositoryEditor: View {
     private var buildHistoryPanel: some View {
         let history = appState.history(for: repository.id)
         let latestBuild = history.first
+        let previewBuilds = Array(history.prefix(2))
+        let remainingCount = max(0, history.count - previewBuilds.count)
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -1553,7 +1567,7 @@ private struct RepositoryEditor: View {
                     .foregroundStyle(.secondary)
             } else {
                 VStack(alignment: .leading, spacing: 10) {
-                    ForEach(Array(history.prefix(6))) { record in
+                    ForEach(previewBuilds) { record in
                         HStack(alignment: .top, spacing: 10) {
                             Image(systemName: record.id == latestBuild?.id ? "checkmark.circle.fill" : "clock.fill")
                                 .foregroundStyle(record.id == latestBuild?.id ? .green : .secondary)
@@ -1584,13 +1598,46 @@ private struct RepositoryEditor: View {
                                 Text(record.builtAt.formatted(date: .abbreviated, time: .shortened))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
+
+                                buildAuthorLine(for: record)
                             }
+
+                            Spacer()
+
+                            Button {
+                                buildDetailsCandidate = record
+                            } label: {
+                                Image(systemName: "info.circle")
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
                         }
+                    }
+
+                    if remainingCount > 0 {
+                        Text("\(remainingCount) more build\(remainingCount == 1 ? "" : "s").")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Spacer()
+                        Button {
+                            buildExplorerPage = 0
+                            managerBuildDetailsCandidate = nil
+                            showBuildExplorer = true
+                        } label: {
+                            Label("Explore Builds", systemImage: "rectangle.stack")
+                        }
+                        .buttonStyle(GlassActionButtonStyle())
                     }
                 }
             }
         }
         .glassSection()
+        .onAppear {
+            appState.preloadBuildCommitAuthors(for: repository.id)
+        }
     }
 
     private var releaseExplorerPanel: some View {
@@ -2335,6 +2382,125 @@ private struct RepositoryEditor: View {
         return false
     }
 
+    private var buildExplorerSheet: some View {
+        let history = appState.history(for: repository.id)
+        let pageSize = 10
+        let totalPages = max(1, Int(ceil(Double(max(history.count, 1)) / Double(pageSize))))
+        let currentPage = min(max(0, buildExplorerPage), totalPages - 1)
+        let start = currentPage * pageSize
+        let end = min(start + pageSize, history.count)
+        let pageBuilds = start < end ? Array(history[start..<end]) : []
+
+        return NavigationStack {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Label("Build History Explorer", systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90")
+                        .font(.title2.bold())
+                    Spacer()
+                    Button("Done") {
+                        showBuildExplorer = false
+                    }
+                    .keyboardShortcut(.cancelAction)
+                }
+
+                if pageBuilds.isEmpty {
+                    Text("No completed builds yet.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(.regularMaterial.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(pageBuilds) { record in
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: record.id == history.first?.id ? "checkmark.circle.fill" : "clock.fill")
+                                        .foregroundStyle(record.id == history.first?.id ? .green : .secondary)
+                                        .frame(width: 16)
+
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack(spacing: 8) {
+                                            Text("v\(record.version)")
+                                                .font(.subheadline.weight(.semibold))
+                                            if record.releaseChannel == .beta {
+                                                Text("Beta")
+                                                    .font(.caption2.weight(.semibold))
+                                                    .padding(.horizontal, 8)
+                                                    .padding(.vertical, 3)
+                                                    .foregroundStyle(.orange)
+                                                    .background(.orange.opacity(0.15), in: Capsule())
+                                            }
+                                            if record.id == history.first?.id {
+                                                Text("Current")
+                                                    .font(.caption2.weight(.semibold))
+                                                    .padding(.horizontal, 8)
+                                                    .padding(.vertical, 3)
+                                                    .background(.thinMaterial, in: Capsule())
+                                            }
+                                        }
+
+                                        Text("Commit \(record.sha.prefix(7))")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+
+                                        Text(record.builtAt.formatted(date: .abbreviated, time: .shortened))
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+
+                                        buildAuthorLine(for: record)
+                                    }
+
+                                    Spacer()
+
+                                    HStack(spacing: 8) {
+                                        Button {
+                                            managerBuildDetailsCandidate = record
+                                        } label: {
+                                            Image(systemName: "info.circle")
+                                        }
+                                        .buttonStyle(.plain)
+                                        .foregroundStyle(.secondary)
+
+                                        if let logPath = record.logPath, !logPath.isEmpty {
+                                            Button {
+                                                revealLog(at: logPath)
+                                            } label: {
+                                                Label("Log", systemImage: "doc.text.magnifyingglass")
+                                            }
+                                            .buttonStyle(.bordered)
+                                        }
+                                    }
+                                }
+                                .padding(10)
+                                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            }
+                        }
+                    }
+                }
+
+                HStack {
+                    Text("Page \(currentPage + 1) of \(totalPages)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Previous") {
+                        buildExplorerPage = max(0, currentPage - 1)
+                    }
+                    .disabled(currentPage == 0)
+                    Button("Next") {
+                        buildExplorerPage = min(totalPages - 1, currentPage + 1)
+                    }
+                    .disabled(currentPage >= totalPages - 1)
+                }
+            }
+            .padding(18)
+            .frame(minWidth: 760, minHeight: 520)
+            .sheet(item: $managerBuildDetailsCandidate) { record in
+                buildDetailsSheet(for: record)
+            }
+        }
+    }
+
     private var releaseExplorerManagerSheet: some View {
         let releases = appState.releasesByRepository[repository.id] ?? []
         let pageSize = 10
@@ -2549,6 +2715,94 @@ private struct RepositoryEditor: View {
         }
     }
 
+    private func buildDetailsSheet(for record: BuildRecord) -> some View {
+        let closeDetails: () -> Void = {
+            buildDetailsCandidate = nil
+            managerBuildDetailsCandidate = nil
+        }
+        let commitURL = URL(string: "https://github.com/\(repository.owner)/\(repository.repo)/commit/\(record.sha)")
+
+        return NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Built \(record.builtAt.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Build Metadata")
+                            .font(.headline)
+
+                        metadataRow(title: "Version", value: record.version)
+                        metadataRow(title: "Commit", value: String(record.sha.prefix(7)))
+                        metadataRow(title: "Channel", value: record.releaseChannel == .beta ? "Beta" : "Stable")
+                        if let committer = buildCommitterDisplay(for: record) {
+                            metadataRow(title: "Committed By", value: committer)
+                        } else {
+                            metadataRow(title: "Committed By", value: "Resolving…")
+                        }
+                        if let summary = record.summary, !summary.isEmpty {
+                            metadataRow(title: "Summary", value: summary)
+                        }
+                        if let logPath = record.logPath, !logPath.isEmpty {
+                            metadataRow(title: "Log Path", value: logPath)
+                        }
+                    }
+                    .glassSection()
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Actions")
+                            .font(.headline)
+                        if let commitURL {
+                            Link(destination: commitURL) {
+                                Label("Open Commit on GitHub", systemImage: "link")
+                            }
+                            .font(.subheadline.weight(.semibold))
+                        }
+                        if let logPath = record.logPath, !logPath.isEmpty {
+                            Button {
+                                revealLog(at: logPath)
+                            } label: {
+                                Label("Reveal Build Log in Finder", systemImage: "folder")
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                    .glassSection()
+                }
+                .padding(18)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(minWidth: 620, minHeight: 420)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                HStack(spacing: 10) {
+                    Label("v\(record.version)", systemImage: record.releaseChannel == .beta ? "flask.fill" : "checkmark.seal.fill")
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(record.releaseChannel == .beta ? .orange : .green)
+                    if record.releaseChannel == .beta {
+                        Text("Beta")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.orange.opacity(0.15), in: Capsule())
+                            .foregroundStyle(.orange)
+                    }
+                    Spacer()
+                    Button("Done") {
+                        closeDetails()
+                    }
+                    .keyboardShortcut(.cancelAction)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial)
+            }
+        }
+        .onAppear {
+            appState.ensureBuildCommitAuthor(for: repository.id, sha: record.sha)
+        }
+    }
+
     private func compareURL(for release: GitHubReleaseSummary, in releases: [GitHubReleaseSummary]) -> URL? {
         guard let index = releases.firstIndex(where: { $0.id == release.id }),
               index + 1 < releases.count else {
@@ -2624,6 +2878,109 @@ private struct RepositoryEditor: View {
             return nil
         }
         return try? AttributedString(parsed, including: AttributeScopes.FoundationAttributes.self)
+    }
+
+    private func metadataRow(title: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 78, alignment: .leading)
+            Text(value)
+                .font(.callout)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func revealLog(at path: String) {
+        let expandedPath = (path as NSString).expandingTildeInPath
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: expandedPath)])
+    }
+
+    @ViewBuilder
+    private func buildAuthorLine(for record: BuildRecord) -> some View {
+        if let authorLogin = record.authorLogin, !authorLogin.isEmpty {
+            HStack(spacing: 6) {
+                if let avatarURL = record.authorAvatarURL {
+                    AsyncImage(url: avatarURL) { phase in
+                        switch phase {
+                        case let .success(image):
+                            image
+                                .resizable()
+                                .scaledToFill()
+                        default:
+                            Circle()
+                                .fill(.thinMaterial)
+                        }
+                    }
+                    .frame(width: 16, height: 16)
+                    .clipShape(Circle())
+                }
+
+                if let profileURL = record.authorProfileURL {
+                    Link("@\(authorLogin)", destination: profileURL)
+                        .font(.caption2.weight(.semibold))
+                } else {
+                    Text("@\(authorLogin)")
+                        .font(.caption2.weight(.semibold))
+                }
+                Text("committed this build")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        } else if let fallbackAuthor = appState.buildCommitAuthor(for: repository.id, sha: record.sha) {
+            HStack(spacing: 6) {
+                if let avatarURL = appState.buildCommitAuthorAvatarURL(for: repository.id, sha: record.sha) {
+                    AsyncImage(url: avatarURL) { phase in
+                        switch phase {
+                        case let .success(image):
+                            image
+                                .resizable()
+                                .scaledToFill()
+                        default:
+                            Circle()
+                                .fill(.thinMaterial)
+                        }
+                    }
+                    .frame(width: 16, height: 16)
+                    .clipShape(Circle())
+                } else {
+                    Image(systemName: "person.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let profileURL = appState.buildCommitAuthorProfileURL(for: repository.id, sha: record.sha) {
+                    Link(fallbackAuthor, destination: profileURL)
+                        .font(.caption2.weight(.semibold))
+                } else {
+                    Text(fallbackAuthor)
+                        .font(.caption2.weight(.semibold))
+                }
+                Text("committed this build")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("Resolving committer…")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .onAppear {
+                appState.ensureBuildCommitAuthor(for: repository.id, sha: record.sha)
+            }
+        }
+    }
+
+    private func buildCommitterDisplay(for record: BuildRecord) -> String? {
+        if let authorLogin = record.authorLogin, !authorLogin.isEmpty {
+            return "@\(authorLogin)"
+        }
+        return appState.buildCommitAuthor(for: repository.id, sha: record.sha)
     }
 
     @ViewBuilder

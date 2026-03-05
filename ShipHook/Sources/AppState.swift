@@ -24,6 +24,9 @@ final class AppState: ObservableObject {
     @Published private(set) var signingDiagnostics: SigningDiagnostics?
     @Published private(set) var hasUnsavedChanges = false
     @Published private(set) var buildHistory: [BuildRecord] = []
+    @Published private(set) var buildCommitAuthors: [String: String] = [:]
+    @Published private(set) var buildCommitAuthorAvatarURLs: [String: URL] = [:]
+    @Published private(set) var buildCommitAuthorProfileURLs: [String: URL] = [:]
     @Published private(set) var latestPublishedVersions: [String: AppcastVersion] = [:]
     @Published private(set) var releasesByRepository: [String: [GitHubReleaseSummary]] = [:]
     @Published private(set) var releaseExplorerErrors: [String: String] = [:]
@@ -44,6 +47,9 @@ final class AppState: ObservableObject {
     private let commandRunner = ShellCommandRunner()
     private var buildHistoryByRepository: [String: [BuildRecord]] = [:]
     private var latestBuildByRepository: [String: BuildRecord] = [:]
+    private var webIconDataByRepositoryID: [String: String] = [:]
+    private var buildCommitAuthorLookupInFlight: Set<String> = []
+    private var buildCommitAuthorLookupInFlightKeys: Set<String> = []
     private var pollingTask: Task<Void, Never>?
     private var inFlightBuilds: Set<String> = []
     private var queuedBuilds: [String: (repository: RepositoryConfiguration, snapshot: GitHubBranchSnapshot)] = [:]
@@ -144,9 +150,23 @@ final class AppState: ObservableObject {
             latestBuildByRepository.removeValue(forKey: repositoryID)
             latestPublishedVersions.removeValue(forKey: repositoryID)
             releasesByRepository.removeValue(forKey: repositoryID)
+            webIconDataByRepositoryID.removeValue(forKey: repositoryID)
             releaseExplorerErrors.removeValue(forKey: repositoryID)
             releaseExplorerLoadingRepositoryIDs.remove(repositoryID)
             releaseExplorerLastRefreshedAt.removeValue(forKey: repositoryID)
+            buildCommitAuthors = buildCommitAuthors.filter { key, _ in
+                !key.hasPrefix("\(repositoryID)|")
+            }
+            buildCommitAuthorAvatarURLs = buildCommitAuthorAvatarURLs.filter { key, _ in
+                !key.hasPrefix("\(repositoryID)|")
+            }
+            buildCommitAuthorProfileURLs = buildCommitAuthorProfileURLs.filter { key, _ in
+                !key.hasPrefix("\(repositoryID)|")
+            }
+            buildCommitAuthorLookupInFlight.remove(repositoryID)
+            buildCommitAuthorLookupInFlightKeys = buildCommitAuthorLookupInFlightKeys.filter { key in
+                !key.hasPrefix("\(repositoryID)|")
+            }
             logBuffers.removeValue(forKey: repositoryID)
             logFlushTasks[repositoryID]?.cancel()
             logFlushTasks.removeValue(forKey: repositoryID)
@@ -483,6 +503,161 @@ final class AppState: ObservableObject {
         latestBuildByRepository[repositoryID]
     }
 
+    func buildCommitAuthor(for repositoryID: String, sha: String) -> String? {
+        buildCommitAuthors["\(repositoryID)|\(sha.lowercased())"]
+    }
+
+    func buildCommitAuthorAvatarURL(for repositoryID: String, sha: String) -> URL? {
+        buildCommitAuthorAvatarURLs["\(repositoryID)|\(sha.lowercased())"]
+    }
+
+    func buildCommitAuthorProfileURL(for repositoryID: String, sha: String) -> URL? {
+        buildCommitAuthorProfileURLs["\(repositoryID)|\(sha.lowercased())"]
+    }
+
+    func ensureBuildCommitAuthor(for repositoryID: String, sha: String) {
+        let key = "\(repositoryID)|\(sha.lowercased())"
+        if buildCommitAuthors[key] != nil || buildCommitAuthorLookupInFlightKeys.contains(key) {
+            return
+        }
+        guard let repository = configuration.repositories.first(where: { $0.id == repositoryID }) else {
+            return
+        }
+
+        buildCommitAuthorLookupInFlightKeys.insert(key)
+        let checkoutPath = (repository.localCheckoutPath as NSString).expandingTildeInPath
+        let token = githubToken(for: repository)
+        let githubAPI = self.githubAPI
+
+        Task.detached(priority: .utility) {
+            var resolvedDisplayName: String?
+            var resolvedAvatarURL: URL?
+            var resolvedProfileURL: URL?
+
+            if let remoteAuthor = try? await githubAPI.commitAuthor(
+                owner: repository.owner,
+                repo: repository.repo,
+                sha: sha,
+                token: token
+            ) {
+                resolvedDisplayName = remoteAuthor.displayName
+                resolvedAvatarURL = remoteAuthor.avatarURL
+                resolvedProfileURL = remoteAuthor.profileURL
+            } else if let author = Self.resolveGitCommitAuthor(checkoutPath: checkoutPath, sha: sha),
+                      !author.isEmpty {
+                resolvedDisplayName = author
+            }
+            let finalDisplayName = resolvedDisplayName
+            let finalAvatarURL = resolvedAvatarURL
+            let finalProfileURL = resolvedProfileURL
+
+            await MainActor.run {
+                self.buildCommitAuthorLookupInFlightKeys.remove(key)
+                if let finalDisplayName, !finalDisplayName.isEmpty {
+                    self.buildCommitAuthors[key] = finalDisplayName
+                }
+                if let finalAvatarURL {
+                    self.buildCommitAuthorAvatarURLs[key] = finalAvatarURL
+                }
+                if let finalProfileURL {
+                    self.buildCommitAuthorProfileURLs[key] = finalProfileURL
+                }
+            }
+        }
+    }
+
+    func preloadBuildCommitAuthors(for repositoryID: String) {
+        guard !buildCommitAuthorLookupInFlight.contains(repositoryID) else {
+            return
+        }
+        guard let repository = configuration.repositories.first(where: { $0.id == repositoryID }) else {
+            return
+        }
+        let records = Array((buildHistoryByRepository[repositoryID] ?? []).prefix(36))
+        guard !records.isEmpty else {
+            return
+        }
+
+        let checkoutPath = (repository.localCheckoutPath as NSString).expandingTildeInPath
+        let token = githubToken(for: repository)
+        let githubAPI = self.githubAPI
+        let unresolved = records.filter { record in
+            let key = "\(repositoryID)|\(record.sha.lowercased())"
+            if buildCommitAuthors[key] != nil {
+                return false
+            }
+            return true
+        }
+
+        guard !unresolved.isEmpty else {
+            return
+        }
+        buildCommitAuthorLookupInFlight.insert(repositoryID)
+
+        Task.detached(priority: .utility) {
+            var resolved: [String: String] = [:]
+            var avatars: [String: URL] = [:]
+            var profiles: [String: URL] = [:]
+            let unresolvedKeys = unresolved.map { "\(repositoryID)|\($0.sha.lowercased())" }
+
+            await MainActor.run {
+                for key in unresolvedKeys {
+                    self.buildCommitAuthorLookupInFlightKeys.insert(key)
+                }
+            }
+
+            for record in unresolved {
+                let key = "\(repositoryID)|\(record.sha.lowercased())"
+
+                if let login = record.authorLogin, !login.isEmpty {
+                    resolved[key] = "@\(login)"
+                    if let avatar = record.authorAvatarURL {
+                        avatars[key] = avatar
+                    }
+                    if let profile = record.authorProfileURL {
+                        profiles[key] = profile
+                    }
+                    continue
+                }
+
+                if let remoteAuthor = try? await githubAPI.commitAuthor(
+                    owner: repository.owner,
+                    repo: repository.repo,
+                    sha: record.sha,
+                    token: token
+                ) {
+                    resolved[key] = remoteAuthor.displayName
+                    if let avatar = remoteAuthor.avatarURL {
+                        avatars[key] = avatar
+                    }
+                    if let profile = remoteAuthor.profileURL {
+                        profiles[key] = profile
+                    }
+                    continue
+                }
+
+                if let author = Self.resolveGitCommitAuthor(checkoutPath: checkoutPath, sha: record.sha),
+                   !author.isEmpty {
+                    resolved[key] = author
+                }
+            }
+            let resolvedAuthors = resolved
+            let resolvedAvatars = avatars
+            let resolvedProfiles = profiles
+
+            await MainActor.run {
+                self.buildCommitAuthorLookupInFlight.remove(repositoryID)
+                self.buildCommitAuthors.merge(resolvedAuthors) { current, _ in current }
+                self.buildCommitAuthorAvatarURLs.merge(resolvedAvatars) { current, _ in current }
+                self.buildCommitAuthorProfileURLs.merge(resolvedProfiles) { current, _ in current }
+                for record in unresolved {
+                    let key = "\(repositoryID)|\(record.sha.lowercased())"
+                    self.buildCommitAuthorLookupInFlightKeys.remove(key)
+                }
+            }
+        }
+    }
+
     func displayedVersion(for repository: RepositoryConfiguration) -> String? {
         if let localVersion = latestBuildRecord(for: repository.id)?.version, !localVersion.isEmpty {
             return localVersion
@@ -790,7 +965,12 @@ final class AppState: ObservableObject {
                 version: outcome.version,
                 sha: outcome.builtSHA,
                 builtAt: Date(),
-                releaseChannel: outcome.releaseChannel
+                releaseChannel: outcome.releaseChannel,
+                authorLogin: snapshot.authorLogin,
+                authorAvatarURL: snapshot.authorAvatarURL,
+                authorProfileURL: snapshot.authorProfileURL,
+                summary: outcome.summary,
+                logPath: outcome.logPath
             )
             appendBuildRecord(historyRecord)
             updateState(for: repository.id) {
@@ -953,6 +1133,40 @@ final class AppState: ObservableObject {
     private func shouldIgnore(snapshot: GitHubBranchSnapshot) -> Bool {
         let message = snapshot.message.lowercased()
         return ignoredCommitMarkers.contains(where: { message.contains($0) })
+    }
+
+    nonisolated private static func resolveGitCommitAuthor(checkoutPath: String, sha: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = [
+            "git",
+            "-C",
+            checkoutPath,
+            "show",
+            "-s",
+            "--format=%an <%ae>",
+            sha
+        ]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+
+        guard process.terminationStatus == 0 else {
+            return nil
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return output?.isEmpty == false ? output : nil
     }
 
     private func releaseChannel(for snapshot: GitHubBranchSnapshot) -> ReleaseChannel {
@@ -1536,7 +1750,25 @@ final class AppState: ObservableObject {
                     version: record.version,
                     sha: record.sha,
                     builtAt: record.builtAt,
-                    releaseChannel: record.releaseChannel?.rawValue
+                    releaseChannel: record.releaseChannel?.rawValue,
+                    authorLogin: record.authorLogin ?? buildCommitAuthor(for: repository.id, sha: record.sha),
+                    authorAvatarURL: (record.authorAvatarURL ?? buildCommitAuthorAvatarURL(for: repository.id, sha: record.sha))?.absoluteString,
+                    authorProfileURL: (record.authorProfileURL ?? buildCommitAuthorProfileURL(for: repository.id, sha: record.sha))?.absoluteString,
+                    summary: record.summary,
+                    logPath: record.logPath
+                )
+            }
+            let recentReleases = Array((releasesByRepository[repository.id] ?? []).prefix(20)).map { release in
+                WebDashboardSnapshot.Release(
+                    tagName: release.tagName,
+                    name: release.name,
+                    body: release.body,
+                    isPrerelease: release.isPrerelease,
+                    publishedAt: release.publishedAt,
+                    htmlURL: release.htmlURL?.absoluteString,
+                    authorLogin: release.author?.login,
+                    authorAvatarURL: release.author?.avatarURL?.absoluteString,
+                    authorProfileURL: release.author?.profileURL?.absoluteString
                 )
             }
             let latestBuild = recentBuilds.first
@@ -1544,6 +1776,7 @@ final class AppState: ObservableObject {
             return WebDashboardSnapshot.Repository(
                 id: repository.id,
                 name: repository.name,
+                iconDataURL: webRepositoryIconDataURL(for: repository),
                 isEnabled: repository.isEnabled,
                 slug: "\(repository.owner)/\(repository.repo)",
                 branch: repository.branch,
@@ -1554,16 +1787,17 @@ final class AppState: ObservableObject {
                 version: displayedVersion(for: repository),
                 publishedVersion: publishedVersion(for: repository),
                 lastSeenSHA: state.lastSeenSHA,
-                lastBuiltSHA: state.lastBuiltSHA,
+                lastBuiltSHA: state.lastBuiltSHA ?? latestBuild?.sha,
                 lastCheckDate: state.lastCheckDate,
-                lastSuccessDate: state.lastSuccessDate,
+                lastSuccessDate: state.lastSuccessDate ?? latestBuild?.builtAt,
                 buildStartedAt: state.buildStartedAt,
                 latestBuild: latestBuild,
                 recentBuilds: recentBuilds,
-                recentLog: state.lastLog,
-                lastLogPath: state.lastLogPath,
-                lastError: state.lastError,
-                progress: progressSnapshot(for: state)
+                recentReleases: recentReleases,
+                progress: progressSnapshot(for: state),
+                lastCommitAuthorLogin: state.lastCommitAuthorLogin,
+                lastCommitAuthorAvatarURL: state.lastCommitAuthorAvatarURL?.absoluteString,
+                lastCommitAuthorProfileURL: state.lastCommitAuthorProfileURL?.absoluteString
             )
         }
 
@@ -1604,5 +1838,68 @@ final class AppState: ObservableObject {
         case .publishing:
             return (6, 6, "Publishing")
         }
+    }
+
+    private func webRepositoryIconDataURL(for repository: RepositoryConfiguration) -> String? {
+        if let cached = webIconDataByRepositoryID[repository.id] {
+            return cached
+        }
+
+        let icon = resolveWebRepositoryIcon(for: repository)
+        guard let dataURL = Self.pngDataURL(from: icon) else {
+            return nil
+        }
+        webIconDataByRepositoryID[repository.id] = dataURL
+        return dataURL
+    }
+
+    private func resolveWebRepositoryIcon(for repository: RepositoryConfiguration) -> NSImage {
+        let fileManager = FileManager.default
+
+        if let artifactPath = repository.xcode?.artifactPath {
+            let expandedPath = (artifactPath as NSString).expandingTildeInPath
+            if fileManager.fileExists(atPath: expandedPath) {
+                return NSWorkspace.shared.icon(forFile: expandedPath)
+            }
+        }
+
+        let checkoutPath = (repository.localCheckoutPath as NSString).expandingTildeInPath
+        if fileManager.fileExists(atPath: checkoutPath) {
+            return NSWorkspace.shared.icon(forFile: checkoutPath)
+        }
+
+        if let projectPath = repository.xcode?.projectPath {
+            let expandedProjectPath = (projectPath as NSString).expandingTildeInPath
+            if fileManager.fileExists(atPath: expandedProjectPath) {
+                return NSWorkspace.shared.icon(forFile: expandedProjectPath)
+            }
+        }
+
+        if let workspacePath = repository.xcode?.workspacePath {
+            let expandedWorkspacePath = (workspacePath as NSString).expandingTildeInPath
+            if fileManager.fileExists(atPath: expandedWorkspacePath) {
+                return NSWorkspace.shared.icon(forFile: expandedWorkspacePath)
+            }
+        }
+
+        if #available(macOS 12.0, *) {
+            return NSWorkspace.shared.icon(for: .application)
+        }
+        return NSWorkspace.shared.icon(forFileType: "app")
+    }
+
+    nonisolated private static func pngDataURL(from image: NSImage) -> String? {
+        let targetSize = NSSize(width: 48, height: 48)
+        let resized = NSImage(size: targetSize)
+        resized.lockFocus()
+        image.draw(in: NSRect(origin: .zero, size: targetSize), from: .zero, operation: .copy, fraction: 1)
+        resized.unlockFocus()
+
+        guard let tiffData = resized.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiffData),
+              let pngData = bitmap.representation(using: .png, properties: [:]) else {
+            return nil
+        }
+        return "data:image/png;base64,\(pngData.base64EncodedString())"
     }
 }
