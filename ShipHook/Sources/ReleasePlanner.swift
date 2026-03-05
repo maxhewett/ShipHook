@@ -140,7 +140,12 @@ struct ReleasePlanner {
             return nil
         }
 
-        let data = try Data(contentsOf: url)
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            return nil
+        }
         let parser = AppcastParser()
         return parser.parse(data: data)
     }
@@ -250,11 +255,15 @@ struct ReleasePlanner {
     }
 
     private func resolvedAppcastURL(for repository: RepositoryConfiguration, channel: ReleaseChannel) -> String? {
-        if let explicit = repository.sparkle?.appcastURL, !explicit.isEmpty {
+        if let configured = repository.sparkle?.appcastURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !configured.isEmpty,
+           let explicitURL = URL(string: configured),
+           let scheme = explicitURL.scheme?.lowercased(),
+           ["http", "https", "file"].contains(scheme) {
             if channel == .beta {
-                return betaAppcastURL(from: explicit)
+                return betaAppcastURL(from: configured)
             }
-            return explicit
+            return configured
         }
 
         guard !repository.owner.isEmpty, !repository.repo.isEmpty else {

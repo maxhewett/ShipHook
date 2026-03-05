@@ -432,8 +432,25 @@ final class AppState: ObservableObject {
                 xcode.workspacePath = xcode.sanitizedWorkspacePath
                 repository.xcode = xcode
             }
+            repository.publishCommand = normalizedPublishCommand(repository.publishCommand)
             return repository
         }
+    }
+
+    private func normalizedPublishCommand(_ command: String) -> String {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return command
+        }
+        guard trimmed.contains("$SHIPHOOK_BUNDLED_PUBLISH_SCRIPT") else {
+            return command
+        }
+        guard !trimmed.contains("--channel \"$SHIPHOOK_RELEASE_CHANNEL\""),
+              !trimmed.contains("--channel '$SHIPHOOK_RELEASE_CHANNEL'"),
+              !trimmed.contains("--channel=") else {
+            return command
+        }
+        return "\(command) --channel \"$SHIPHOOK_RELEASE_CHANNEL\""
     }
 
     private func refreshDirtyState() {

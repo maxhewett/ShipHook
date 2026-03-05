@@ -1180,12 +1180,13 @@ struct PipelineRunner {
             return namedMatch
         }
 
-        if let genericMatch = findFirstFile(
+        if let preferredMatch = findPreferredFile(
             under: sourceRoot,
             withExtension: expectedExtension,
+            preferredBaseName: appIconName,
             excluding: repository.sparkle?.betaIconPath?.expandingTildeInPath
         ) {
-            return genericMatch
+            return preferredMatch
         }
 
         throw NSError(
@@ -1273,6 +1274,68 @@ struct PipelineRunner {
             }
         }
         return nil
+    }
+
+    private func findPreferredFile(
+        under root: String,
+        withExtension pathExtension: String,
+        preferredBaseName: String?,
+        excluding excludedPath: String?
+    ) -> String? {
+        guard let enumerator = FileManager.default.enumerator(atPath: root) else {
+            return nil
+        }
+
+        let normalizedExcluded = excludedPath?.expandingTildeInPath
+        var candidates: [String] = []
+        for case let relativePath as String in enumerator {
+            let absolutePath = "\(root)/\(relativePath)"
+            if let normalizedExcluded, absolutePath == normalizedExcluded {
+                continue
+            }
+            if URL(fileURLWithPath: absolutePath).pathExtension.lowercased() == pathExtension.lowercased() {
+                candidates.append(absolutePath)
+            }
+        }
+
+        guard !candidates.isEmpty else {
+            return nil
+        }
+
+        let preferred = preferredBaseName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        func score(_ path: String) -> Int {
+            let lowerPath = path.lowercased()
+            let baseName = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent.lowercased()
+            var value = 0
+
+            if let preferred, !preferred.isEmpty {
+                if baseName == preferred {
+                    value += 120
+                } else if baseName.contains(preferred) {
+                    value += 70
+                }
+            }
+
+            if baseName.contains("appicon") {
+                value += 50
+            }
+            if lowerPath.contains(".xcassets/") {
+                value += 35
+            }
+            if lowerPath.contains("/assets") {
+                value += 10
+            }
+            return value
+        }
+
+        return candidates.sorted { lhs, rhs in
+            let lhsScore = score(lhs)
+            let rhsScore = score(rhs)
+            if lhsScore != rhsScore {
+                return lhsScore > rhsScore
+            }
+            return lhs.count < rhs.count
+        }.first
     }
 
     private func resolvedReleaseChannel(requestedChannel: ReleaseChannel, version: AppVersion) -> ReleaseChannel {

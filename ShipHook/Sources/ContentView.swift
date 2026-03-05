@@ -219,13 +219,6 @@ struct ContentView: View {
                                     .foregroundStyle(.orange)
                                     .background(.orange.opacity(0.16), in: Capsule())
                             }
-                            if state.activity == .building {
-                                Text(phaseBadgeLabel(for: state.buildPhase))
-                                    .font(.caption2.weight(.semibold))
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3)
-                                    .background(.regularMaterial, in: Capsule())
-                            }
                         }
 
                         Text("\(repo.owner)/\(repo.repo) @ \(repo.branch)")
