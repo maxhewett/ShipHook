@@ -65,6 +65,7 @@ enum AppBuildChannel: String {
 
 struct AppConfiguration: Codable, Hashable {
     var pollIntervalSeconds: TimeInterval
+    var githubToken: String?
     var githubTokenEnvVar: String?
     var generatedDataRetentionCount: Int
     var autoPauseFailureCount: Int
@@ -74,6 +75,7 @@ struct AppConfiguration: Codable, Hashable {
 
     static let `default` = AppConfiguration(
         pollIntervalSeconds: 300,
+        githubToken: nil,
         githubTokenEnvVar: "GITHUB_TOKEN",
         generatedDataRetentionCount: 3,
         autoPauseFailureCount: 3,
@@ -88,6 +90,7 @@ struct AppConfiguration: Codable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case pollIntervalSeconds
+        case githubToken
         case githubTokenEnvVar
         case generatedDataRetentionCount
         case autoPauseFailureCount
@@ -98,6 +101,7 @@ struct AppConfiguration: Codable, Hashable {
 
     init(
         pollIntervalSeconds: TimeInterval,
+        githubToken: String?,
         githubTokenEnvVar: String?,
         generatedDataRetentionCount: Int,
         autoPauseFailureCount: Int,
@@ -106,6 +110,7 @@ struct AppConfiguration: Codable, Hashable {
         repositories: [RepositoryConfiguration]
     ) {
         self.pollIntervalSeconds = pollIntervalSeconds
+        self.githubToken = githubToken
         self.githubTokenEnvVar = githubTokenEnvVar
         self.generatedDataRetentionCount = max(1, generatedDataRetentionCount)
         self.autoPauseFailureCount = max(1, autoPauseFailureCount)
@@ -117,6 +122,7 @@ struct AppConfiguration: Codable, Hashable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         pollIntervalSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .pollIntervalSeconds) ?? 300
+        githubToken = try container.decodeIfPresent(String.self, forKey: .githubToken)
         githubTokenEnvVar = try container.decodeIfPresent(String.self, forKey: .githubTokenEnvVar) ?? "GITHUB_TOKEN"
         generatedDataRetentionCount = max(1, try container.decodeIfPresent(Int.self, forKey: .generatedDataRetentionCount) ?? 3)
         autoPauseFailureCount = max(1, try container.decodeIfPresent(Int.self, forKey: .autoPauseFailureCount) ?? 3)
@@ -128,6 +134,7 @@ struct AppConfiguration: Codable, Hashable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(pollIntervalSeconds, forKey: .pollIntervalSeconds)
+        try container.encodeIfPresent(githubToken, forKey: .githubToken)
         try container.encodeIfPresent(githubTokenEnvVar, forKey: .githubTokenEnvVar)
         try container.encode(max(1, generatedDataRetentionCount), forKey: .generatedDataRetentionCount)
         try container.encode(max(1, autoPauseFailureCount), forKey: .autoPauseFailureCount)
@@ -507,6 +514,9 @@ struct GitHubBranchSnapshot: Equatable {
     var committedAt: Date?
     var message: String
     var htmlURL: URL?
+    var authorLogin: String?
+    var authorAvatarURL: URL?
+    var authorProfileURL: URL?
 }
 
 enum ReleaseChannel: String, Codable {
@@ -546,6 +556,9 @@ struct RepositoryRuntimeState: Identifiable {
     var lastLogPath: String?
     var lastError: String?
     var releaseChannel: ReleaseChannel?
+    var lastCommitAuthorLogin: String?
+    var lastCommitAuthorAvatarURL: URL?
+    var lastCommitAuthorProfileURL: URL?
 
     static func initial(id: String) -> RepositoryRuntimeState {
         RepositoryRuntimeState(
@@ -561,7 +574,10 @@ struct RepositoryRuntimeState: Identifiable {
             lastLog: "",
             lastLogPath: nil,
             lastError: nil,
-            releaseChannel: nil
+            releaseChannel: nil,
+            lastCommitAuthorLogin: nil,
+            lastCommitAuthorAvatarURL: nil,
+            lastCommitAuthorProfileURL: nil
         )
     }
 }

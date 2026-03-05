@@ -6,23 +6,45 @@ struct SettingsView: View {
     @State private var launchAtLoginError: String?
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+        TabView {
+            settingsTab {
                 generalPanel
-                webDashboardPanel
+            }
+            .tabItem { Label("General", systemImage: "gearshape") }
+
+            settingsTab {
                 launchAtLoginPanel
+                webDashboardPanel
+            }
+            .tabItem { Label("Automation", systemImage: "bolt") }
+
+            settingsTab {
                 updatePanel
+            }
+            .tabItem { Label("Updates", systemImage: "sparkles") }
+
+            settingsTab {
                 filesPanel
             }
-            .padding(20)
+            .tabItem { Label("Files", systemImage: "folder") }
         }
         .frame(minWidth: 560, minHeight: 460)
         .background(
-            LinearGradient(
-                colors: [Color.white.opacity(0.06), Color.cyan.opacity(0.02)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            ZStack {
+                LinearGradient(
+                    colors: [Color.white.opacity(0.09), Color.cyan.opacity(0.04)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                Rectangle()
+                    .fill(.ultraThinMaterial.opacity(0.74))
+                RadialGradient(
+                    colors: [Color.cyan.opacity(0.20), Color.clear],
+                    center: .topTrailing,
+                    startRadius: 12,
+                    endRadius: 420
+                )
+            }
         )
         .overlay(alignment: .bottomTrailing) {
             if appState.hasUnsavedChanges {
@@ -45,6 +67,26 @@ struct SettingsView: View {
         }
     }
 
+    private func settingsTab<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                content()
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(12)
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(.white.opacity(0.12))
+        }
+        .shadow(color: .black.opacity(0.12), radius: 20, y: 8)
+    }
+
     private var generalPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             Label("General", systemImage: "slider.horizontal.3")
@@ -64,18 +106,24 @@ struct SettingsView: View {
                     prompt: "300"
                 )
 
-                settingsField(
-                    title: "GitHub Token Variable",
-                    symbol: "key.horizontal",
-                    text: Binding(
-                        get: { appState.configuration.githubTokenEnvVar ?? "" },
-                        set: { appState.configuration.githubTokenEnvVar = $0.isEmpty ? nil : $0 }
-                    ),
-                    prompt: "GITHUB_TOKEN"
-                )
+                tokenField
             }
 
-            Text("GitHub token is optional for public repositories, recommended for rate limits, and required for private repositories. ShipHook reads the token from the environment variable named above.")
+            Text("GitHub token is optional for public repositories, recommended for rate limits, and required for private repositories.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 14) {
+                Link(destination: URL(string: "https://github.com/settings/tokens/new")!) {
+                    Label("Create Token", systemImage: "link")
+                        .font(.caption.weight(.semibold))
+                }
+                Link(destination: URL(string: "https://docs.github.com/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token")!) {
+                    Label("Token Help", systemImage: "book")
+                        .font(.caption.weight(.semibold))
+                }
+                Spacer()
+            }
+            Text("ShipHook stores this token in your local config file. Leave it empty to fall back to environment-variable token lookup.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -269,6 +317,23 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
             TextField(prompt, text: text)
                 .textFieldStyle(.roundedBorder)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var tokenField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("GitHub Token", systemImage: "key.horizontal")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            SecureField(
+                "ghp_...",
+                text: Binding(
+                    get: { appState.configuration.githubToken ?? "" },
+                    set: { appState.configuration.githubToken = $0.isEmpty ? nil : $0 }
+                )
+            )
+            .textFieldStyle(.roundedBorder)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

@@ -25,6 +25,10 @@ final class AppState: ObservableObject {
     @Published private(set) var hasUnsavedChanges = false
     @Published private(set) var buildHistory: [BuildRecord] = []
     @Published private(set) var latestPublishedVersions: [String: AppcastVersion] = [:]
+    @Published private(set) var releasesByRepository: [String: [GitHubReleaseSummary]] = [:]
+    @Published private(set) var releaseExplorerErrors: [String: String] = [:]
+    @Published private(set) var releaseExplorerLoadingRepositoryIDs: Set<String> = []
+    @Published private(set) var releaseExplorerLastRefreshedAt: [String: Date] = [:]
     @Published private(set) var launchesAtLogin = false
     @Published private(set) var launchAtLoginStatusMessage: String?
     @Published private(set) var webDashboardStatusMessage = "Local web dashboard is turned off."
@@ -138,6 +142,11 @@ final class AppState: ObservableObject {
             queuedBuildOrder.removeAll { queuedID in queuedID == repositoryID }
             buildHistoryByRepository.removeValue(forKey: repositoryID)
             latestBuildByRepository.removeValue(forKey: repositoryID)
+            latestPublishedVersions.removeValue(forKey: repositoryID)
+            releasesByRepository.removeValue(forKey: repositoryID)
+            releaseExplorerErrors.removeValue(forKey: repositoryID)
+            releaseExplorerLoadingRepositoryIDs.remove(repositoryID)
+            releaseExplorerLastRefreshedAt.removeValue(forKey: repositoryID)
             logBuffers.removeValue(forKey: repositoryID)
             logFlushTasks[repositoryID]?.cancel()
             logFlushTasks.removeValue(forKey: repositoryID)
@@ -307,6 +316,96 @@ final class AppState: ObservableObject {
     func triggerManualPollAll() {
         Task {
             await checkRepositories(force: true, repositoryID: nil)
+        }
+    }
+
+    func refreshReleaseExplorer(for repositoryID: String) {
+        refreshReleaseExplorer(for: repositoryID, force: true)
+    }
+
+    func refreshReleaseExplorer(for repositoryID: String, force: Bool) {
+        guard let repository = configuration.repositories.first(where: { $0.id == repositoryID }) else {
+            return
+        }
+        if releaseExplorerLoadingRepositoryIDs.contains(repositoryID) {
+            return
+        }
+        if !force,
+           let lastRefresh = releaseExplorerLastRefreshedAt[repositoryID],
+           Date().timeIntervalSince(lastRefresh) < 120,
+           releasesByRepository[repositoryID] != nil {
+            return
+        }
+
+        let token = githubToken(for: repository)
+        let githubAPI = self.githubAPI
+        releaseExplorerLoadingRepositoryIDs.insert(repositoryID)
+        releaseExplorerErrors.removeValue(forKey: repositoryID)
+
+        Task.detached(priority: .utility) {
+            do {
+                let releases = try await githubAPI.listReleases(
+                    owner: repository.owner,
+                    repo: repository.repo,
+                    token: token,
+                    perPage: 30
+                )
+                await MainActor.run {
+                    self.releasesByRepository[repositoryID] = releases
+                    self.releaseExplorerLastRefreshedAt[repositoryID] = Date()
+                    self.releaseExplorerLoadingRepositoryIDs.remove(repositoryID)
+                }
+            } catch {
+                await MainActor.run {
+                    self.releaseExplorerErrors[repositoryID] = error.localizedDescription
+                    self.releaseExplorerLoadingRepositoryIDs.remove(repositoryID)
+                }
+            }
+        }
+    }
+
+    func rollbackRelease(repositoryID: String, release: GitHubReleaseSummary) {
+        guard let repository = configuration.repositories.first(where: { $0.id == repositoryID }) else {
+            return
+        }
+
+        let token = githubToken(for: repository)
+        let githubAPI = self.githubAPI
+        releaseExplorerLoadingRepositoryIDs.insert(repositoryID)
+        releaseExplorerErrors.removeValue(forKey: repositoryID)
+
+        Task.detached(priority: .userInitiated) {
+            do {
+                let summary = try await Self.performReleaseRollback(
+                    repository: repository,
+                    release: release,
+                    token: token,
+                    githubAPI: githubAPI
+                )
+
+                let releases = try await githubAPI.listReleases(
+                    owner: repository.owner,
+                    repo: repository.repo,
+                    token: token,
+                    perPage: 30
+                )
+
+                await MainActor.run {
+                    self.releasesByRepository[repositoryID] = releases
+                    self.releaseExplorerLastRefreshedAt[repositoryID] = Date()
+                    self.releaseExplorerLoadingRepositoryIDs.remove(repositoryID)
+                    self.releaseExplorerErrors.removeValue(forKey: repositoryID)
+                    self.updateState(for: repositoryID) {
+                        $0.summary = summary
+                    }
+                    self.refreshPublishedVersions()
+                }
+            } catch {
+                await MainActor.run {
+                    self.releaseExplorerErrors[repositoryID] = error.localizedDescription
+                    self.releaseExplorerLoadingRepositoryIDs.remove(repositoryID)
+                }
+            }
         }
     }
 
@@ -514,7 +613,7 @@ final class AppState: ObservableObject {
             updateState(for: repository.id) {
                 $0.activity = .idle
                 $0.buildPhase = .idle
-                $0.summary = "Repository is disabled"
+                $0.summary = "Repository is paused"
                 $0.lastCheckDate = Date()
             }
             return
@@ -528,8 +627,7 @@ final class AppState: ObservableObject {
             }
 
         do {
-            let tokenEnvVar = repository.githubTokenEnvVar ?? configuration.githubTokenEnvVar
-            let token = tokenEnvVar.flatMap { ProcessInfo.processInfo.environment[$0] }
+            let token = githubToken(for: repository)
             let snapshot = try await githubAPI.latestBranchSnapshot(
                 owner: repository.owner,
                 repo: repository.repo,
@@ -543,7 +641,13 @@ final class AppState: ObservableObject {
                 $0.summary = "Latest GitHub commit \(snapshot.sha.prefix(7))"
                 $0.activity = .idle
                 $0.lastError = nil
+                $0.lastCommitAuthorLogin = snapshot.authorLogin
+                $0.lastCommitAuthorAvatarURL = snapshot.authorAvatarURL
+                $0.lastCommitAuthorProfileURL = snapshot.authorProfileURL
             }
+            let sawNewCommit = currentState.lastSeenSHA != snapshot.sha
+            let shouldForceReleaseRefresh = force || sawNewCommit
+            maybeRefreshReleaseExplorer(for: repository.id, force: shouldForceReleaseRefresh)
 
             if shouldIgnore(snapshot: snapshot) {
                 updateState(for: repository.id) {
@@ -570,8 +674,10 @@ final class AppState: ObservableObject {
             }
 
             if inFlightBuilds.contains(repository.id) {
-                updateState(for: repository.id) {
-                    $0.summary = "Build already in progress"
+                if activeBuildRepositoryID != repository.id {
+                    updateState(for: repository.id) {
+                        $0.summary = "Build already in progress"
+                    }
                 }
                 return
             }
@@ -587,6 +693,9 @@ final class AppState: ObservableObject {
                     $0.buildPhase = .queued
                     $0.summary = "Queued behind \(activeName)"
                     $0.lastSeenSHA = snapshot.sha
+                    $0.lastCommitAuthorLogin = snapshot.authorLogin
+                    $0.lastCommitAuthorAvatarURL = snapshot.authorAvatarURL
+                    $0.lastCommitAuthorProfileURL = snapshot.authorProfileURL
                 }
                 return
             }
@@ -606,6 +715,9 @@ final class AppState: ObservableObject {
                 $0.lastLogPath = "\((repository.localCheckoutPath as NSString).expandingTildeInPath)/.shiphook/logs/\(repository.id)-latest.log"
                 $0.lastLog = ""
                 $0.releaseChannel = releaseChannel
+                $0.lastCommitAuthorLogin = snapshot.authorLogin
+                $0.lastCommitAuthorAvatarURL = snapshot.authorAvatarURL
+                $0.lastCommitAuthorProfileURL = snapshot.authorProfileURL
             }
 
             let runner = pipelineRunner
@@ -694,6 +806,7 @@ final class AppState: ObservableObject {
                 $0.releaseChannel = outcome.releaseChannel
             }
             consecutiveBuildFailures[repository.id] = 0
+            refreshReleaseExplorer(for: repository.id, force: true)
         case let .failure(error):
             handleFailure(
                 for: repository,
@@ -706,6 +819,18 @@ final class AppState: ObservableObject {
 
         pruneGeneratedData(for: repository)
         startNextQueuedBuildIfPossible()
+    }
+
+    private func maybeRefreshReleaseExplorer(for repositoryID: String, force: Bool) {
+        if force || releasesByRepository[repositoryID] == nil {
+            refreshReleaseExplorer(for: repositoryID, force: true)
+            return
+        }
+
+        if let lastRefresh = releaseExplorerLastRefreshedAt[repositoryID],
+           Date().timeIntervalSince(lastRefresh) > 15 * 60 {
+            refreshReleaseExplorer(for: repositoryID, force: true)
+        }
     }
 
     private func updateBuildStage(_ stage: PipelineStage, for repositoryID: String, sha: String) {
@@ -1100,6 +1225,146 @@ final class AppState: ObservableObject {
 
     private func modificationDate(for url: URL) -> Date {
         (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+    }
+
+    private func githubToken(for repository: RepositoryConfiguration) -> String? {
+        if let inlineToken = configuration.githubToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !inlineToken.isEmpty {
+            return inlineToken
+        }
+
+        let tokenEnvVar = repository.githubTokenEnvVar ?? configuration.githubTokenEnvVar
+        return tokenEnvVar.flatMap { ProcessInfo.processInfo.environment[$0] }
+    }
+
+    private nonisolated static func performReleaseRollback(
+        repository: RepositoryConfiguration,
+        release: GitHubReleaseSummary,
+        token: String?,
+        githubAPI: GitHubAPI
+    ) async throws -> String {
+        guard let token, !token.isEmpty else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 900,
+                userInfo: [NSLocalizedDescriptionKey: "A GitHub token is required to roll back releases. Configure your token environment variable in Settings."]
+            )
+        }
+
+        let checkoutPath = (repository.localCheckoutPath as NSString).expandingTildeInPath
+        let channel: ReleaseChannel = release.isBeta ? .beta : .stable
+        let docsRoot = "\(checkoutPath)/docs"
+        let appcastPath = channel == .beta ? "\(docsRoot)/beta/appcast.xml" : "\(docsRoot)/appcast.xml"
+        let releaseNotesPath = channel == .beta
+            ? "\(docsRoot)/beta/release-notes/\(release.versionLabel).html"
+            : "\(docsRoot)/release-notes/\(release.versionLabel).html"
+
+        let commandRunner = ShellCommandRunner()
+        _ = try commandRunner.run("git -C '\(checkoutPath)' fetch origin '\(repository.branch)' --tags", currentDirectory: checkoutPath, environment: [:])
+        _ = try commandRunner.run("git -C '\(checkoutPath)' checkout '\(repository.branch)'", currentDirectory: checkoutPath, environment: [:])
+        _ = try commandRunner.run("git -C '\(checkoutPath)' pull --ff-only origin '\(repository.branch)'", currentDirectory: checkoutPath, environment: [:])
+
+        guard FileManager.default.fileExists(atPath: appcastPath) else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 901,
+                userInfo: [NSLocalizedDescriptionKey: "Could not find appcast file at \(appcastPath)."]
+            )
+        }
+
+        let originalAppcast = try String(contentsOfFile: appcastPath, encoding: .utf8)
+        let updatedAppcast = removeReleaseItemFromAppcast(
+            originalAppcast,
+            version: release.versionLabel,
+            tagName: release.tagName
+        )
+
+        guard updatedAppcast != originalAppcast else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 902,
+                userInfo: [NSLocalizedDescriptionKey: "Could not find release \(release.tagName) in \(URL(fileURLWithPath: appcastPath).lastPathComponent)."]
+            )
+        }
+
+        try updatedAppcast.write(toFile: appcastPath, atomically: true, encoding: String.Encoding.utf8)
+        if FileManager.default.fileExists(atPath: releaseNotesPath) {
+            try? FileManager.default.removeItem(atPath: releaseNotesPath)
+        }
+
+        var gitTargets = [appcastPath]
+        gitTargets.append(releaseNotesPath)
+        let quotedTargets = gitTargets.map { "'\($0)'" }.joined(separator: " ")
+        _ = try commandRunner.run("git -C '\(checkoutPath)' add -- \(quotedTargets)", currentDirectory: checkoutPath, environment: [:])
+        _ = try commandRunner.run("git -C '\(checkoutPath)' add -u -- \(quotedTargets)", currentDirectory: checkoutPath, environment: [:])
+
+        let staged = try commandRunner
+            .run("git -C '\(checkoutPath)' diff --cached --name-only -- \(quotedTargets)", currentDirectory: checkoutPath, environment: [:])
+            .output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if staged.isEmpty {
+            throw NSError(
+                domain: "ShipHook",
+                code: 903,
+                userInfo: [NSLocalizedDescriptionKey: "No appcast changes were staged for rollback."]
+            )
+        }
+
+        let channelPrefix = channel == .beta ? "beta " : ""
+        let commitMessage = "chore(shiphook): rollback \(channelPrefix)release \(release.versionLabel) [shiphook skip]"
+        _ = try commandRunner.run("git -C '\(checkoutPath)' commit -m '\(commitMessage)'", currentDirectory: checkoutPath, environment: [:])
+        _ = try commandRunner.run("git -C '\(checkoutPath)' push origin '\(repository.branch)'", currentDirectory: checkoutPath, environment: [:])
+
+        try await githubAPI.deleteRelease(
+            owner: repository.owner,
+            repo: repository.repo,
+            releaseID: release.id,
+            token: token
+        )
+        try await githubAPI.deleteTagReference(
+            owner: repository.owner,
+            repo: repository.repo,
+            tagName: release.tagName,
+            token: token
+        )
+
+        return "Rolled back \(release.tagName) on the \(channel.rawValue) channel."
+    }
+
+    private nonisolated static func removeReleaseItemFromAppcast(_ appcast: String, version: String, tagName: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: "(?s)<item>.*?</item>", options: []) else {
+            return appcast
+        }
+
+        let ns = appcast as NSString
+        let matches = regex.matches(in: appcast, options: [], range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else {
+            return appcast
+        }
+
+        let normalizedVersion = version.trimmingCharacters(in: .whitespacesAndNewlines)
+        let quotedTag = "/\(tagName)/"
+        let updated = NSMutableString(string: appcast)
+        var removed = false
+
+        for match in matches.reversed() {
+            let item = ns.substring(with: match.range)
+            let hasVersion = item.contains("<sparkle:shortVersionString>\(normalizedVersion)</sparkle:shortVersionString>")
+                || item.contains("<title>\(normalizedVersion)</title>")
+            let hasTag = item.contains(quotedTag)
+
+            if hasVersion || hasTag {
+                updated.replaceCharacters(in: match.range, with: "")
+                removed = true
+                break
+            }
+        }
+
+        guard removed else {
+            return appcast
+        }
+
+        return String(updated)
     }
 
     private func refreshPublishedVersions() {

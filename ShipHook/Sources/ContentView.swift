@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.colorScheme) private var colorScheme
     @StateObject private var repositoryIconCache = RepositoryIconCache()
     @State private var selectedRepositoryID: String?
     @State private var showingAddRepositoryWizard = false
@@ -156,12 +157,26 @@ struct ContentView: View {
                 stickyHeader(for: repositoryBinding)
             }
             .background(
-                LinearGradient(
-                    colors: [Color.white.opacity(0.06), Color.cyan.opacity(0.02)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
+                ZStack {
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.08), Color.cyan.opacity(0.04)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    Rectangle()
+                        .fill(.ultraThinMaterial.opacity(0.72))
+                    RadialGradient(
+                        colors: [Color.cyan.opacity(0.18), Color.clear],
+                        center: .topTrailing,
+                        startRadius: 10,
+                        endRadius: 420
+                    )
+                }
             )
+            .overlay {
+                RoundedRectangle(cornerRadius: 0, style: .continuous)
+                    .strokeBorder(.white.opacity(0.06))
+            }
         } else {
             ContentUnavailableView(
                 "No Repository Selected",
@@ -175,8 +190,8 @@ struct ContentView: View {
         let state = appState.repoStates[repo.id] ?? .initial(id: repo.id)
         let isSelected = selectedRepositoryID == repo.id
         let isDisabled = !repo.isEnabled
-        let statusColor = isDisabled ? .yellow : color(for: state.activity)
-        let statusSymbol = isDisabled ? "xmark.circle.fill" : repositoryStatusSymbol(for: state.activity)
+        let statusColor = isDisabled ? pausedAccentColor : color(for: state.activity)
+        let statusSymbol = isDisabled ? "pause.circle.fill" : repositoryStatusSymbol(for: state.activity)
         let latestVersion = appState.displayedVersion(for: repo)
         let latestBuild = appState.latestBuildRecord(for: repo.id)
         let channel = state.releaseChannel ?? latestBuild?.releaseChannel
@@ -196,14 +211,6 @@ struct ContentView: View {
                                 .font(.headline)
                                 .foregroundStyle(.primary)
                                 .lineLimit(1)
-                            if isDisabled {
-                                Text("Disabled")
-                                    .font(.caption2.weight(.semibold))
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3)
-                                    .foregroundStyle(.yellow)
-                                    .background(.yellow.opacity(0.16), in: Capsule())
-                            }
                             if let latestVersion, !latestVersion.isEmpty {
                                 Text("v\(latestVersion)")
                                     .font(.caption2.weight(.semibold))
@@ -241,7 +248,7 @@ struct ContentView: View {
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(statusColor)
                         }
-                        Text(isDisabled ? "Disabled" : phaseBadgeLabel(for: state.buildPhase))
+                        Text(isDisabled ? "Paused" : phaseBadgeLabel(for: state.buildPhase))
                             .font(.caption.weight(.semibold))
                     }
                     .padding(.horizontal, 8)
@@ -299,17 +306,22 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Spacer()
-            }
-
-            HStack(spacing: 10) {
-                headerActionButton("Check Now", systemImage: "arrow.clockwise") {
+                headerIconButton(
+                    systemImage: "arrow.clockwise",
+                    accessibilityLabel: "Check now"
+                ) {
                     appState.triggerManualPoll(for: value.id)
                 }
-                headerActionButton(value.isEnabled ? "Disable Repo" : "Enable Repo", systemImage: value.isEnabled ? "pause.circle" : "play.circle") {
+
+                headerIconButton(
+                    systemImage: value.isEnabled ? "pause.circle" : "play.circle",
+                    accessibilityLabel: value.isEnabled ? "Pause repository" : "Resume repository"
+                ) {
                     repository.wrappedValue.isEnabled.toggle()
                     appState.saveConfiguration()
                 }
+
+                Spacer()
             }
 
             if let error = appState.lastGlobalError {
@@ -329,13 +341,21 @@ struct ContentView: View {
         }
     }
 
-    private func headerActionButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+    private func headerIconButton(systemImage: String, accessibilityLabel: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .labelStyle(.titleAndIcon)
-                .frame(minWidth: 112)
+            Image(systemName: systemImage)
+                .font(.title3)
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
         }
-        .buttonStyle(GlassActionButtonStyle())
+        .buttonStyle(.plain)
+        .padding(6)
+        .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(.white.opacity(0.16))
+        }
+        .accessibilityLabel(Text(accessibilityLabel))
     }
 
     private func compactField(title: String, symbol: String, text: Binding<String>, prompt: String) -> some View {
@@ -354,14 +374,18 @@ struct ContentView: View {
         case .idle:
             return .secondary
         case .polling:
-            return .blue
+            return .cyan
         case .building:
-            return .orange
+            return .blue
         case .succeeded:
             return .green
         case .failed:
             return .red
         }
+    }
+
+    private var pausedAccentColor: Color {
+        .orange
     }
 
     private func repositoryIcon(for repository: RepositoryConfiguration) -> NSImage {
@@ -695,8 +719,6 @@ private struct AddRepositoryWizard: View {
             signing: signingConfigurationBinding,
             identities: appState.availableSigningIdentities,
             notarizationProfiles: appState.availableNotarizationProfiles,
-            identityLoadError: appState.lastSigningIdentityError,
-            diagnostics: appState.signingDiagnostics,
             onRefreshIdentities: appState.refreshSigningIdentities
         )
     }
@@ -842,166 +864,176 @@ private struct SigningOverridesEditor: View {
     @Binding var signing: SigningConfiguration
     let identities: [SigningIdentity]
     let notarizationProfiles: [String]
-    let identityLoadError: String?
-    let diagnostics: SigningDiagnostics?
     let onRefreshIdentities: () -> Void
-    @State private var showDiagnostics = false
     @State private var showingNotaryProfileSheet = false
     @State private var notaryStatusMessage: String?
     @State private var notaryStatusIsError = false
+    @State private var showSigningConfiguration = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label(title, systemImage: "checkmark.shield")
-                .font(.title3.bold())
-
-            GlassSegmentedControl(
-                selection: $signing.codeSignStyle,
-                options: [
-                    (SigningConfiguration.CodeSignStyle.automatic, "Automatic"),
-                    (SigningConfiguration.CodeSignStyle.manual, "Manual")
-                ]
-            )
-
-            if signing.codeSignStyle == .automatic {
-                Text("Automatic is best when the target app already archives correctly in Xcode.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("Manual signing is for projects that do not already archive with correct release signing settings. For Sparkle, ShipHook expects a `Developer ID Application` certificate.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            HStack {
+                Label(title, systemImage: "checkmark.shield")
+                    .font(.title3.bold())
+                Spacer()
+                Button {
+                    withAnimation(.snappy(duration: 0.22)) {
+                        showSigningConfiguration.toggle()
+                    }
+                } label: {
+                    Label(showSigningConfiguration ? "Done" : "Configure", systemImage: showSigningConfiguration ? "checkmark.circle.fill" : "gearshape.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(showSigningConfiguration ? .green : .secondary)
+                }
+                .buttonStyle(.plain)
             }
 
-            if signing.codeSignStyle == .manual {
-                Group {
-                    HStack(alignment: .top) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Label("Signing Identity", systemImage: "checkmark.shield")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                            Picker("Signing Identity", selection: selectedIdentityNameBinding) {
-                                Text("None Selected").tag("")
-                                ForEach(identities) { identity in
-                                    let suffix = identity.isRecommendedForSparkle ? " Recommended" : ""
-                                    Text("\(identity.displayName)\(suffix)").tag(identity.commonName)
-                                }
-                            }
-                            .pickerStyle(.menu)
-                            .labelsHidden()
-                        }
-
-                        Spacer()
-
-                        Button("Refresh") {
-                            onRefreshIdentities()
-                        }
-                        .buttonStyle(.bordered)
-                    }
-
-                    HStack {
-                        Label(
-                            identities.isEmpty
-                                ? "No local signing identities detected"
-                                : "\(identities.count) local signing identit\(identities.count == 1 ? "y" : "ies") available",
-                            systemImage: identities.isEmpty ? "xmark.seal" : "checkmark.seal"
+            ZStack {
+                if showSigningConfiguration {
+                    VStack(alignment: .leading, spacing: 12) {
+                        GlassSegmentedControl(
+                            selection: $signing.codeSignStyle,
+                            options: [
+                                (SigningConfiguration.CodeSignStyle.automatic, "Automatic"),
+                                (SigningConfiguration.CodeSignStyle.manual, "Manual")
+                            ]
                         )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        Spacer()
-                    }
 
-                    if identities.isEmpty {
-                        Text("No valid local code-signing identities were found on this Mac. You do not need to upload a `.p12` into ShipHook itself, but you do need the signing certificate and private key installed in this Mac's keychain before manual signing can work.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    if let configuredIdentity = signing.codeSignIdentity, !configuredIdentity.isEmpty,
-                       configuredIdentity.hasPrefix("Apple Development:") || configuredIdentity.hasPrefix("Mac Development:") {
-                        Text("`\(configuredIdentity)` is a development certificate. That is not suitable for Sparkle release archives. Use a `Developer ID Application` identity instead.")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
-
-                    if let identityLoadError {
-                        Text(identityLoadError)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
-
-                    HStack(alignment: .top) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Label("Notary Profile", systemImage: "checkmark.seal")
-                                .font(.caption.weight(.semibold))
+                        if signing.codeSignStyle == .automatic {
+                            Text("Automatic is best when the target app already archives correctly in Xcode.")
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
-                            Picker("Notary Profile", selection: selectedNotaryProfileBinding) {
-                                Text("None Selected").tag("")
-                                ForEach(notarizationProfiles, id: \.self) { profile in
-                                    Text(profile).tag(profile)
-                                }
-                            }
-                            .pickerStyle(.menu)
-                            .labelsHidden()
-                        }
-
-                        Spacer()
-                    }
-
-                    if notarizationProfiles.isEmpty {
-                        Text("No local notary profiles are known to ShipHook yet. Use the setup action below to store one in your keychain on this Mac.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    HStack(spacing: 10) {
-                    Button {
-                        showingNotaryProfileSheet = true
-                    } label: {
-                        Label("Set Up Notary Profile", systemImage: "key.fill")
-                            .labelStyle(.titleAndIcon)
-                    }
-                        .buttonStyle(GlassActionButtonStyle())
-
-                        if let profile = signing.notarizationProfile, !profile.isEmpty {
-                            Text("Using local keychain profile `\(profile)`")
+                        } else {
+                            Text("Manual signing is for projects that do not already archive with correct release signing settings. For Sparkle, ShipHook expects a `Developer ID Application` certificate.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                    }
 
-                    if let notaryStatusMessage {
-                        Text(notaryStatusMessage)
-                            .font(.caption)
-                            .foregroundStyle(notaryStatusIsError ? .red : .green)
-                    }
+                        if signing.codeSignStyle == .manual {
+                            Group {
+                                HStack(alignment: .top) {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Label("Signing Identity", systemImage: "checkmark.shield")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                        Picker("Signing Identity", selection: selectedIdentityNameBinding) {
+                                            Text("None Selected").tag("")
+                                            ForEach(identities) { identity in
+                                                let suffix = identity.isRecommendedForSparkle ? " Recommended" : ""
+                                                Text("\(identity.displayName)\(suffix)").tag(identity.commonName)
+                                            }
+                                        }
+                                        .pickerStyle(.menu)
+                                        .labelsHidden()
+                                    }
 
-                    DisclosureGroup(isExpanded: $showDiagnostics) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            if let diagnostics {
-                                Text(diagnostics.summary)
-                                ForEach(diagnostics.details, id: \.self) { detail in
-                                    Text(detail)
+                                    Spacer()
+
+                                    Button("Refresh") {
+                                        onRefreshIdentities()
+                                    }
+                                    .buttonStyle(.bordered)
+                                }
+
+                                if identities.isEmpty {
+                                    Text("No valid local code-signing identities were found on this Mac. You do not need to upload a `.p12` into ShipHook itself, but you do need the signing certificate and private key installed in this Mac's keychain before manual signing can work.")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
-                                        .textSelection(.enabled)
                                 }
-                            } else {
-                                Text("No signing diagnostics available yet.")
-                                    .foregroundStyle(.secondary)
+
+                                if let configuredIdentity = signing.codeSignIdentity, !configuredIdentity.isEmpty,
+                                   configuredIdentity.hasPrefix("Apple Development:") || configuredIdentity.hasPrefix("Mac Development:") {
+                                    Text("`\(configuredIdentity)` is a development certificate. That is not suitable for Sparkle release archives. Use a `Developer ID Application` identity instead.")
+                                        .font(.caption)
+                                        .foregroundStyle(.orange)
+                                }
+
+                                HStack(alignment: .top) {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Label("Notary Profile", systemImage: "checkmark.seal")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                        Picker("Notary Profile", selection: selectedNotaryProfileBinding) {
+                                            Text("None Selected").tag("")
+                                            ForEach(notarizationProfiles, id: \.self) { profile in
+                                                Text(profile).tag(profile)
+                                            }
+                                        }
+                                        .pickerStyle(.menu)
+                                        .labelsHidden()
+                                    }
+
+                                    Spacer()
+                                }
+
+                                if notarizationProfiles.isEmpty {
+                                    Text("No local notary profiles are known to ShipHook yet. Use the setup action below to store one in your keychain on this Mac.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                HStack(spacing: 10) {
+                                    Button {
+                                        showingNotaryProfileSheet = true
+                                    } label: {
+                                        Label("Set Up Notary Profile", systemImage: "key.fill")
+                                            .labelStyle(.titleAndIcon)
+                                    }
+                                    .buttonStyle(GlassActionButtonStyle())
+
+                                    if let profile = signing.notarizationProfile, !profile.isEmpty {
+                                        Text("Using local keychain profile `\(profile)`")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+
+                                if let notaryStatusMessage {
+                                    Text(notaryStatusMessage)
+                                        .font(.caption)
+                                        .foregroundStyle(notaryStatusIsError ? .red : .green)
+                                }
                             }
                         }
-                        .padding(.top, 8)
-                    } label: {
-                        Label("Signing Diagnostics", systemImage: "stethoscope")
-                            .font(.headline)
                     }
-
-                    Text("If the certificate is already installed on this Mac, pick it from the menu and ShipHook will apply it automatically. The notary profile is just the local keychain profile name that `notarytool` uses on this Mac, not an Apple-side identifier.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+                } else {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Text("Mode")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(signing.codeSignStyle == .automatic ? "Automatic" : "Manual")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        if let identity = signing.codeSignIdentity, !identity.isEmpty {
+                            HStack(spacing: 8) {
+                                Text("Identity")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(identity)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                            }
+                        }
+                        if let profile = signing.notarizationProfile, !profile.isEmpty {
+                            HStack(spacing: 8) {
+                                Text("Notary")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(profile)
+                                    .font(.caption)
+                            }
+                        }
+                        Text("Tap configure to edit signing identity and notarisation profile.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .leading)))
                 }
             }
+            .rotation3DEffect(.degrees(showSigningConfiguration ? 2 : 0), axis: (x: 0, y: 1, z: 0))
+            .frame(minHeight: 120, alignment: .topLeading)
         }
         .glassSection()
         .sheet(isPresented: $showingNotaryProfileSheet) {
@@ -1160,34 +1192,125 @@ private struct NotaryProfileSheet: View {
 }
 
 private struct RepositoryEditor: View {
+    private enum EditorTab: Hashable {
+        case status
+        case builds
+        case configuration
+    }
+
+    @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var appState: AppState
     @Binding var repository: RepositoryConfiguration
     let runtimeState: RepositoryRuntimeState
     let onResetBuildState: () -> Void
     let onDeleteRequested: () -> Void
     @State private var showAdvanced = false
-    @State private var showLogs = false
     @State private var showRepositoryDetails = true
     @State private var showPaths = false
-    @State private var showPublish = false
+    @State private var showWebhooks = false
+    @State private var showBuildAutomation = false
+    @State private var showSparkleSettings = false
+    @State private var showRepositorySetup = false
+    @State private var selectedTab: EditorTab = .status
     @State private var betaIconSelectionError: String?
+    @State private var rollbackCandidate: GitHubReleaseSummary?
+    @State private var showReleaseExplorerManager = false
+    @State private var releaseExplorerPage = 0
+    @State private var releaseDetailsCandidate: GitHubReleaseSummary?
+    @State private var managerReleaseDetailsCandidate: GitHubReleaseSummary?
+    @State private var followLogOutput = true
+    @State private var copiedLogToastVisible = false
+
+    private let logBottomAnchorID = "shiphook-log-bottom-anchor"
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            statusPanel
-            buildHistoryPanel
-            repositoryPanel
-            buildSummaryPanel
-            sparklePanel
-            signingPanel
-            publishPanel
-            DisclosureGroup("Advanced Build Settings", isExpanded: $showAdvanced) {
-                advancedBuildPanel
-                    .padding(.top, 12)
+        VStack(alignment: .leading, spacing: 14) {
+            GlassSegmentedControl(
+                selection: $selectedTab,
+                options: [
+                    (.status, "Status"),
+                    (.builds, "Builds & Releases"),
+                    (.configuration, "Configuration")
+                ]
+            )
+
+            LazyVGrid(columns: cardColumns, alignment: .leading, spacing: 14) {
+                switch selectedTab {
+                case .status:
+                    statusPanel
+                    activityLogPanel
+                case .builds:
+                    buildHistoryPanel
+                    releaseExplorerPanel
+                case .configuration:
+                    repositoryPanel
+                    buildSummaryPanel
+                    sparklePanel
+                    signingPanel
+                    publishPanel
+                    DisclosureGroup("Advanced Build Settings", isExpanded: $showAdvanced) {
+                        advancedBuildPanel
+                            .padding(.top, 12)
+                    }
+                    .glassSection()
+                    deleteAction
+                }
             }
-            .glassSection()
-            deleteAction
         }
+        .onAppear {
+            appState.refreshReleaseExplorer(for: repository.id, force: false)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if copiedLogToastVisible {
+                Label("Copied Output", systemImage: "checkmark.circle.fill")
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.thickMaterial, in: Capsule())
+                    .overlay {
+                        Capsule()
+                            .strokeBorder(.white.opacity(0.14))
+                    }
+                    .padding(.trailing, 8)
+                    .padding(.bottom, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .alert("Rollback Release", isPresented: Binding(
+            get: { rollbackCandidate != nil },
+            set: { isPresented in
+                if !isPresented {
+                    rollbackCandidate = nil
+                }
+            }
+        )) {
+            Button("Cancel", role: .cancel) {
+                rollbackCandidate = nil
+            }
+            Button("Rollback", role: .destructive) {
+                guard let rollbackCandidate else { return }
+                appState.rollbackRelease(repositoryID: repository.id, release: rollbackCandidate)
+                self.rollbackCandidate = nil
+            }
+        } message: {
+            if let rollbackCandidate {
+                Text("This will remove \(rollbackCandidate.tagName) from the \(rollbackCandidate.isBeta ? "beta" : "stable") appcast, push the appcast change, and delete the GitHub release/tag.")
+            } else {
+                Text("This action cannot be undone.")
+            }
+        }
+        .sheet(isPresented: $showReleaseExplorerManager) {
+            releaseExplorerManagerSheet
+        }
+        .sheet(item: $releaseDetailsCandidate) { release in
+            releaseDetailsSheet(for: release)
+        }
+    }
+
+    private var cardColumns: [GridItem] {
+        [
+            GridItem(.adaptive(minimum: 420, maximum: 760), spacing: 14, alignment: .top)
+        ]
     }
 
     private var statusPanel: some View {
@@ -1196,9 +1319,9 @@ private struct RepositoryEditor: View {
         let displayedVersion = appState.displayedVersion(for: repository)
         let releaseChannel = runtimeState.releaseChannel ?? latestBuild?.releaseChannel
         let statusActivity: RepositoryActivity = repository.isEnabled ? runtimeState.activity : .idle
-        let statusText = repository.isEnabled ? runtimeState.activity.rawValue.capitalized : "Disabled"
-        let statusIcon = repository.isEnabled ? repositoryStatusSymbol(for: runtimeState.activity) : "xmark.circle.fill"
-        let effectiveStatusColor = repository.isEnabled ? statusColor : .yellow
+        let statusText = repository.isEnabled ? runtimeState.activity.rawValue.capitalized : "Paused"
+        let statusIcon = repository.isEnabled ? repositoryStatusSymbol(for: runtimeState.activity) : "pause.circle.fill"
+        let effectiveStatusColor = repository.isEnabled ? statusColor : pausedAccentColor
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label("Status", systemImage: "bolt.horizontal.circle")
@@ -1226,6 +1349,37 @@ private struct RepositoryEditor: View {
 
             Text(runtimeState.summary)
                 .foregroundStyle(primaryStatusTint)
+
+            if let authorLogin = runtimeState.lastCommitAuthorLogin, !authorLogin.isEmpty {
+                HStack(spacing: 8) {
+                    if let avatarURL = runtimeState.lastCommitAuthorAvatarURL {
+                        AsyncImage(url: avatarURL) { phase in
+                            switch phase {
+                            case let .success(image):
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                            default:
+                                Circle()
+                                    .fill(.thinMaterial)
+                            }
+                        }
+                        .frame(width: 20, height: 20)
+                        .clipShape(Circle())
+                    }
+
+                    if let profileURL = runtimeState.lastCommitAuthorProfileURL {
+                        Link("@\(authorLogin)", destination: profileURL)
+                            .font(.caption.weight(.semibold))
+                    } else {
+                        Text("@\(authorLogin)")
+                            .font(.caption.weight(.semibold))
+                    }
+                    Text("published this commit")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
 
             if let latestBuild {
                 Label("Current version: \(latestBuild.version)", systemImage: "tag")
@@ -1285,26 +1439,84 @@ private struct RepositoryEditor: View {
                 }
             }
 
-            if !runtimeState.lastLog.isEmpty {
-                DisclosureGroup("Recent Output", isExpanded: $showLogs) {
-                    ScrollView {
-                        Text(runtimeState.lastLog)
-                            .font(.caption.monospaced())
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(12)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 140, maxHeight: 220)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .padding(.top, 8)
-                }
-            }
-
             if runtimeState.activity == .building {
                 Button("Reset Build State") {
                     onResetBuildState()
                 }
                 .buttonStyle(.bordered)
+            }
+        }
+        .glassSection()
+    }
+
+    private var activityLogPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Live Output", systemImage: "text.alignleft")
+                    .font(.title3.bold())
+                Spacer()
+                Button {
+                    followLogOutput.toggle()
+                } label: {
+                    Label(followLogOutput ? "Live" : "Paused", systemImage: followLogOutput ? "play.circle.fill" : "pause.circle.fill")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+                Button {
+                    copyLatestLogToPasteboard()
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                }
+                .buttonStyle(.bordered)
+                .disabled(runtimeState.lastLog.isEmpty)
+            }
+
+            if runtimeState.lastLog.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "terminal")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                    Text("No output yet.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 180)
+                .background(.regularMaterial.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(runtimeState.lastLog)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                                .padding(12)
+                            Color.clear
+                                .frame(height: 1)
+                                .id(logBottomAnchorID)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 180, maxHeight: 260)
+                    .background(.regularMaterial.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .onAppear {
+                        guard followLogOutput else { return }
+                        scrollLogToBottom(proxy: proxy, animated: false)
+                    }
+                    .onChange(of: runtimeState.lastLog) { _, _ in
+                        guard followLogOutput else { return }
+                        scrollLogToBottom(proxy: proxy, animated: true)
+                    }
+                }
+            }
+
+            if let logPath = runtimeState.lastLogPath, !logPath.isEmpty {
+                Text(logPath)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
             }
         }
         .glassSection()
@@ -1381,85 +1593,269 @@ private struct RepositoryEditor: View {
         .glassSection()
     }
 
-    private var repositoryPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            DisclosureGroup(isExpanded: $showRepositoryDetails) {
-                VStack(alignment: .leading, spacing: 14) {
-                    grid {
-                        HStack(alignment: .top, spacing: 14) {
-                            labeledField("Display Name", symbol: "character.textbox", text: $repository.name)
-                            labeledField("Owner", symbol: "person.crop.circle", text: $repository.owner)
-                            labeledField("Repo", symbol: "shippingbox", text: $repository.repo)
-                        }
+    private var releaseExplorerPanel: some View {
+        let releases = appState.releasesByRepository[repository.id] ?? []
+        let isLoading = appState.releaseExplorerLoadingRepositoryIDs.contains(repository.id)
+        let error = appState.releaseExplorerErrors[repository.id]
+        let lastRefreshed = appState.releaseExplorerLastRefreshedAt[repository.id]
+        let previewReleases = Array(releases.prefix(2))
+        let remainingCount = max(0, releases.count - previewReleases.count)
 
-                        HStack(alignment: .top, spacing: 14) {
-                            labeledField("Branch", symbol: "point.topleft.down.curvedto.point.bottomright.up", text: $repository.branch)
-                        }
-                    }
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("Release Explorer", systemImage: "shippingbox.and.arrow.backward")
+                    .font(.title3.bold())
+                Spacer()
+                Text(releaseExplorerRefreshLabel(from: lastRefreshed))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button {
+                    appState.refreshReleaseExplorer(for: repository.id)
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.headline)
+                }
+                .buttonStyle(.plain)
+                .padding(6)
+                .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(.white.opacity(0.14))
+                }
+                .disabled(isLoading)
+            }
 
-                    HStack(spacing: 16) {
-                        Toggle("Build on first seen commit", isOn: $repository.buildOnFirstSeen)
-                        Spacer()
-                    }
+            if let error, !error.isEmpty {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
 
-                    GlassSegmentedControl(
-                        selection: $repository.versionStrategy,
-                        options: [
-                            (.shortSHA, "Short SHA"),
-                            (.shortSHATimestamp, "SHA + Timestamp"),
-                            (.dateAndShortSHA, "Date + SHA")
-                        ]
-                    )
+            if isLoading && releases.isEmpty {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading releases...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else if releases.isEmpty {
+                Text("No releases found yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(previewReleases) { release in
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: release.isBeta ? "flask.fill" : "checkmark.seal.fill")
+                                .foregroundStyle(release.isBeta ? .orange : .green)
+                                .frame(width: 16)
 
-                    DisclosureGroup("Paths & Optional Overrides", isExpanded: $showPaths) {
-                        VStack(alignment: .leading, spacing: 14) {
-                            labeledField("Local Checkout Path", symbol: "folder", text: $repository.localCheckoutPath)
-                            HStack(alignment: .top, spacing: 14) {
-                                labeledField("Working Directory", symbol: "terminal", text: optionalStringBinding($repository.workingDirectory))
-                                labeledField("Token Env Var", symbol: "key.horizontal", text: optionalStringBinding($repository.githubTokenEnvVar))
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 8) {
+                                    Text(release.tagName)
+                                        .font(.subheadline.weight(.semibold))
+                                    Text(release.isBeta ? "Beta" : "Stable")
+                                        .font(.caption2.weight(.semibold))
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 3)
+                                        .background((release.isBeta ? Color.orange : Color.green).opacity(0.15), in: Capsule())
+                                        .foregroundStyle(release.isBeta ? .orange : .green)
+                                }
+
+                                Text(release.name)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+
+                                if let publishedAt = release.publishedAt {
+                                    Text(publishedAt.formatted(date: .abbreviated, time: .shortened))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                releaseAuthorLine(for: release)
                             }
-                            labeledField("Release Notes Path Override", symbol: "note.text", text: optionalStringBinding($repository.releaseNotesPath))
-                            Text("Leave this empty to generate Sparkle release notes from the commit title and description being built.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+
+                            Spacer()
+
+                            Button {
+                                releaseDetailsCandidate = release
+                            } label: {
+                                Image(systemName: "info.circle")
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
                         }
-                        .padding(.top, 10)
+                    }
+
+                    if remainingCount > 0 {
+                        Text("\(remainingCount) more release\(remainingCount == 1 ? "" : "s").")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Spacer()
+                        Button {
+                            releaseExplorerPage = 0
+                            managerReleaseDetailsCandidate = nil
+                            showReleaseExplorerManager = true
+                        } label: {
+                            Label("Explore Releases", systemImage: "rectangle.stack")
+                        }
+                        .buttonStyle(GlassActionButtonStyle())
                     }
                 }
-                .padding(.top, 10)
-            } label: {
+            }
+        }
+        .glassSection()
+    }
+
+    private var repositoryPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
                 Label("Repository Setup", systemImage: "folder.badge.gearshape")
                     .font(.title3.bold())
+                Spacer()
+                Button {
+                    withAnimation(.snappy(duration: 0.22)) {
+                        showRepositorySetup.toggle()
+                    }
+                } label: {
+                    Label(showRepositorySetup ? "Done" : "Configure", systemImage: showRepositorySetup ? "checkmark.circle.fill" : "gearshape.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(showRepositorySetup ? .green : .secondary)
+                }
+                .buttonStyle(.plain)
             }
+
+            ZStack {
+                if showRepositorySetup {
+                    VStack(alignment: .leading, spacing: 14) {
+                        grid {
+                            HStack(alignment: .top, spacing: 14) {
+                                labeledField("Display Name", symbol: "character.textbox", text: $repository.name)
+                                labeledField("Owner", symbol: "person.crop.circle", text: $repository.owner)
+                                labeledField("Repo", symbol: "shippingbox", text: $repository.repo)
+                            }
+
+                            HStack(alignment: .top, spacing: 14) {
+                                labeledField("Branch", symbol: "point.topleft.down.curvedto.point.bottomright.up", text: $repository.branch)
+                            }
+                        }
+
+                        HStack(spacing: 16) {
+                            Toggle("Build on first seen commit", isOn: $repository.buildOnFirstSeen)
+                            Spacer()
+                        }
+
+                        GlassSegmentedControl(
+                            selection: $repository.versionStrategy,
+                            options: [
+                                (.shortSHA, "Short SHA"),
+                                (.shortSHATimestamp, "SHA + Timestamp"),
+                                (.dateAndShortSHA, "Date + SHA")
+                            ]
+                        )
+
+                        DisclosureGroup("Paths & Optional Overrides", isExpanded: $showPaths) {
+                            VStack(alignment: .leading, spacing: 14) {
+                                labeledField("Local Checkout Path", symbol: "folder", text: $repository.localCheckoutPath)
+                                HStack(alignment: .top, spacing: 14) {
+                                    labeledField("Working Directory", symbol: "terminal", text: optionalStringBinding($repository.workingDirectory))
+                                    labeledField("Token Env Var", symbol: "key.horizontal", text: optionalStringBinding($repository.githubTokenEnvVar))
+                                }
+                                labeledField("Release Notes Path Override", symbol: "note.text", text: optionalStringBinding($repository.releaseNotesPath))
+                                Text("Leave this empty to generate Sparkle release notes from the commit title and description being built.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.top, 10)
+                        }
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+                } else {
+                    summaryGrid(rows: [
+                        ("Repository", "\(repository.owner)/\(repository.repo)", "shippingbox"),
+                        ("Branch", repository.branch, "point.topleft.down.curvedto.point.bottomright.up"),
+                        ("Checkout", repository.localCheckoutPath, "folder")
+                    ])
+                    .transition(.opacity.combined(with: .move(edge: .leading)))
+                }
+            }
+            .rotation3DEffect(.degrees(showRepositorySetup ? -2 : 0), axis: (x: 0, y: 1, z: 0))
+            .frame(minHeight: 120, alignment: .topLeading)
         }
         .glassSection()
     }
 
     private var buildSummaryPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Build Automation", systemImage: "hammer")
-                .font(.title3.bold())
-
-            switch repository.buildMode {
-            case .xcodeArchive:
-                let xcode = xcodeBinding
-                HStack(alignment: .top, spacing: 14) {
-                    labeledField("Scheme", symbol: "shippingbox.circle", text: xcode.scheme)
-                    labeledField("App Name", symbol: "app", text: xcode.appName)
-                    labeledField("Configuration", symbol: "slider.horizontal.3", text: xcode.configuration)
+            HStack {
+                Label("Build Automation", systemImage: "hammer")
+                    .font(.title3.bold())
+                Spacer()
+                Button {
+                    withAnimation(.snappy(duration: 0.22)) {
+                        showBuildAutomation.toggle()
+                    }
+                } label: {
+                    Label(showBuildAutomation ? "Done" : "Configure", systemImage: showBuildAutomation ? "checkmark.circle.fill" : "gearshape.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(showBuildAutomation ? .green : .secondary)
                 }
-                HStack(alignment: .top, spacing: 14) {
-                    labeledField("Archive Path", symbol: "archivebox", text: xcode.archivePath)
-                    labeledField("Artifact Path", symbol: "app.badge", text: xcode.artifactPath)
-                }
-                Text("ShipHook uses `xcodebuild archive` and publishes the signed `.app` from inside the `.xcarchive`.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            case .shell:
-                let shell = shellBinding
-                labeledField("Build Command", symbol: "terminal", text: shell.command, axis: .vertical)
-                labeledField("Artifact Path", symbol: "app.badge", text: shell.artifactPath)
+                .buttonStyle(.plain)
             }
+
+            ZStack {
+                if showBuildAutomation {
+                    VStack(alignment: .leading, spacing: 12) {
+                        switch repository.buildMode {
+                        case .xcodeArchive:
+                            let xcode = xcodeBinding
+                            HStack(alignment: .top, spacing: 14) {
+                                labeledField("Scheme", symbol: "shippingbox.circle", text: xcode.scheme)
+                                labeledField("App Name", symbol: "app", text: xcode.appName)
+                                labeledField("Configuration", symbol: "slider.horizontal.3", text: xcode.configuration)
+                            }
+                            HStack(alignment: .top, spacing: 14) {
+                                labeledField("Archive Path", symbol: "archivebox", text: xcode.archivePath)
+                                labeledField("Artifact Path", symbol: "app.badge", text: xcode.artifactPath)
+                            }
+                        case .shell:
+                            let shell = shellBinding
+                            labeledField("Build Command", symbol: "terminal", text: shell.command, axis: .vertical)
+                            labeledField("Artifact Path", symbol: "app.badge", text: shell.artifactPath)
+                        }
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+                } else {
+                    VStack(alignment: .leading, spacing: 12) {
+                        switch repository.buildMode {
+                        case .xcodeArchive:
+                            let xcode = xcodeBinding
+                            summaryGrid(rows: [
+                                ("Scheme", xcode.wrappedValue.scheme, "shippingbox.circle"),
+                                ("App Name", xcode.wrappedValue.appName, "app"),
+                                ("Configuration", xcode.wrappedValue.configuration, "slider.horizontal.3")
+                            ])
+                        case .shell:
+                            let shell = shellBinding.wrappedValue
+                            summaryGrid(rows: [
+                                ("Build Command", shell.command, "terminal"),
+                                ("Artifact Path", shell.artifactPath, "app.badge")
+                            ])
+                        }
+                        Text("Tap the configure icon to edit build settings.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .leading)))
+                }
+            }
+            .rotation3DEffect(.degrees(showBuildAutomation ? 2 : 0), axis: (x: 0, y: 1, z: 0))
+            .frame(minHeight: 130, alignment: .topLeading)
         }
         .glassSection()
     }
@@ -1467,22 +1863,44 @@ private struct RepositoryEditor: View {
     private var publishPanel: some View {
         let notifications = notificationBinding
         return VStack(alignment: .leading, spacing: 12) {
-            DisclosureGroup(isExpanded: $showPublish) {
-                VStack(alignment: .leading, spacing: 14) {
-                    labeledField("Publish Command", symbol: "paperplane", text: $repository.publishCommand, axis: .vertical)
-                    Divider()
-                    Toggle("Post to Discord after successful publish", isOn: notifications.postOnSuccess)
-                    Toggle("Post to Discord after failed build", isOn: notifications.postOnFailure)
-                    labeledField("Discord Webhook URL", symbol: "message.badge", text: optionalStringBinding(notifications.discordWebhookURL))
-                    Text("Discord webhook delivery is best-effort. ShipHook logs webhook failures but does not fail the release after the app is already published.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.top, 10)
-            } label: {
-                Label("Publish", systemImage: "paperplane")
+            HStack {
+                Label("Webhooks", systemImage: "message.badge")
                     .font(.title3.bold())
+                Spacer()
+                Button {
+                    withAnimation(.snappy(duration: 0.22)) {
+                        showWebhooks.toggle()
+                    }
+                } label: {
+                    Label(showWebhooks ? "Done" : "Configure", systemImage: showWebhooks ? "checkmark.circle.fill" : "gearshape.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(showWebhooks ? .green : .secondary)
+                }
+                .buttonStyle(.plain)
             }
+
+            ZStack {
+                if showWebhooks {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Toggle("Post to Discord after successful publish", isOn: notifications.postOnSuccess)
+                        Toggle("Post to Discord after failed build", isOn: notifications.postOnFailure)
+                        labeledField("Discord Webhook URL", symbol: "message.badge", text: optionalStringBinding(notifications.discordWebhookURL))
+                        Text("Discord webhook delivery is best-effort. ShipHook logs webhook failures but does not fail the release after the app is already published.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+                } else {
+                    summaryGrid(rows: [
+                        ("Success Notifications", notifications.wrappedValue.postOnSuccess ? "Enabled" : "Disabled", "checkmark.circle"),
+                        ("Failure Notifications", notifications.wrappedValue.postOnFailure ? "Enabled" : "Disabled", "xmark.circle"),
+                        ("Webhook URL", notifications.wrappedValue.discordWebhookURL ?? "", "message.badge")
+                    ])
+                    .transition(.opacity.combined(with: .move(edge: .leading)))
+                }
+            }
+            .rotation3DEffect(.degrees(showWebhooks ? 2 : 0), axis: (x: 0, y: 1, z: 0))
+            .frame(minHeight: 120, alignment: .topLeading)
         }
         .glassSection()
     }
@@ -1490,27 +1908,60 @@ private struct RepositoryEditor: View {
     private var sparklePanel: some View {
         let sparkle = sparkleBinding
         return VStack(alignment: .leading, spacing: 12) {
-            Label("Sparkle", systemImage: "sparkles")
-                .font(.title3.bold())
-            labeledField("Appcast URL", symbol: "link", text: appcastURLBinding)
-            VStack(alignment: .leading, spacing: 8) {
-                Label("Beta Icon Path (.icon or .icns)", systemImage: "photo.badge.plus")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                HStack(alignment: .center, spacing: 10) {
-                    TextField("Path to beta icon", text: optionalStringBinding(sparkle.betaIconPath))
-                        .textFieldStyle(.roundedBorder)
-                    Button("Browse") {
-                        chooseBetaIcon()
+            HStack {
+                Label("Sparkle", systemImage: "sparkles")
+                    .font(.title3.bold())
+                Spacer()
+                Button {
+                    withAnimation(.snappy(duration: 0.22)) {
+                        showSparkleSettings.toggle()
                     }
-                    .buttonStyle(.bordered)
+                } label: {
+                    Label(showSparkleSettings ? "Done" : "Configure", systemImage: showSparkleSettings ? "checkmark.circle.fill" : "gearshape.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(showSparkleSettings ? .green : .secondary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            ZStack {
+                if showSparkleSettings {
+                    VStack(alignment: .leading, spacing: 10) {
+                        labeledField("Appcast URL", symbol: "link", text: appcastURLBinding)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Beta Icon Path (.icon or .icns)", systemImage: "photo.badge.plus")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            HStack(alignment: .center, spacing: 10) {
+                                TextField("Path to beta icon", text: optionalStringBinding(sparkle.betaIconPath))
+                                    .textFieldStyle(.roundedBorder)
+                                Button("Browse") {
+                                    chooseBetaIcon()
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                        Toggle("Skip build when project version is not newer than appcast", isOn: sparkle.skipIfVersionIsNotNewer)
+                        Toggle("Auto-increment build when appcast build is not newer", isOn: sparkle.autoIncrementBuild)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+                } else {
+                    VStack(alignment: .leading, spacing: 10) {
+                        summaryGrid(rows: [
+                            ("Appcast", appcastURLBinding.wrappedValue, "link"),
+                            ("Skip Older Versions", sparkle.wrappedValue.skipIfVersionIsNotNewer ? "Enabled" : "Disabled", "arrow.uturn.backward.circle"),
+                            ("Auto Increment Build", sparkle.wrappedValue.autoIncrementBuild ? "Enabled" : "Disabled", "number.circle")
+                        ])
+                        Text("Tap the configure icon to edit Sparkle settings.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .leading)))
                 }
             }
-            Toggle("Skip build when project version is not newer than appcast", isOn: sparkle.skipIfVersionIsNotNewer)
-            Toggle("Auto-increment build when appcast build is not newer", isOn: sparkle.autoIncrementBuild)
-            Text("ShipHook compares the latest appcast build with `CURRENT_PROJECT_VERSION` and bumps the project build number before archiving when needed. For beta-channel builds, ShipHook can override app icons from `.icon` (source swap before build) or `.icns` (bundle patch before signing).")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            .rotation3DEffect(.degrees(showSparkleSettings ? -2 : 0), axis: (x: 0, y: 1, z: 0))
+            .frame(minHeight: 130, alignment: .topLeading)
+
             if let betaIconSelectionError, !betaIconSelectionError.isEmpty {
                 Label(betaIconSelectionError, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
@@ -1526,8 +1977,6 @@ private struct RepositoryEditor: View {
             signing: signingBinding,
             identities: appState.availableSigningIdentities,
             notarizationProfiles: appState.availableNotarizationProfiles,
-            identityLoadError: appState.lastSigningIdentityError,
-            diagnostics: appState.signingDiagnostics,
             onRefreshIdentities: appState.refreshSigningIdentities
         )
     }
@@ -1665,7 +2114,7 @@ private struct RepositoryEditor: View {
 
     private var primaryStatusTint: Color {
         if !repository.isEnabled {
-            return .yellow
+            return pausedAccentColor
         }
         switch runtimeState.activity {
         case .idle:
@@ -1673,6 +2122,10 @@ private struct RepositoryEditor: View {
         case .polling, .building, .succeeded, .failed:
             return statusColor
         }
+    }
+
+    private var pausedAccentColor: Color {
+        .orange
     }
 
     private var buildPhaseLabel: String {
@@ -1798,6 +2251,37 @@ private struct RepositoryEditor: View {
         betaIconSelectionError = nil
     }
 
+    private func copyLatestLogToPasteboard() {
+        guard !runtimeState.lastLog.isEmpty else {
+            return
+        }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(runtimeState.lastLog, forType: .string)
+        withAnimation(.snappy(duration: 0.16)) {
+            copiedLogToastVisible = true
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.3))
+            withAnimation(.snappy(duration: 0.2)) {
+                copiedLogToastVisible = false
+            }
+        }
+    }
+
+    private func scrollLogToBottom(proxy: ScrollViewProxy, animated: Bool) {
+        let action = {
+            proxy.scrollTo(logBottomAnchorID, anchor: .bottom)
+        }
+        if animated {
+            withAnimation(.easeOut(duration: 0.16)) {
+                action()
+            }
+        } else {
+            action()
+        }
+    }
+
     private var usesIconComposerProject: Bool {
         guard repository.buildMode == .xcodeArchive else {
             return false
@@ -1850,12 +2334,344 @@ private struct RepositoryEditor: View {
 
         return false
     }
+
+    private var releaseExplorerManagerSheet: some View {
+        let releases = appState.releasesByRepository[repository.id] ?? []
+        let pageSize = 10
+        let totalPages = max(1, Int(ceil(Double(max(releases.count, 1)) / Double(pageSize))))
+        let currentPage = min(max(0, releaseExplorerPage), totalPages - 1)
+        let start = currentPage * pageSize
+        let end = min(start + pageSize, releases.count)
+        let pageReleases = start < end ? Array(releases[start..<end]) : []
+        let isLoading = appState.releaseExplorerLoadingRepositoryIDs.contains(repository.id)
+        let error = appState.releaseExplorerErrors[repository.id]
+        let lastRefreshed = appState.releaseExplorerLastRefreshedAt[repository.id]
+
+        return NavigationStack {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Label("Release Explorer", systemImage: "shippingbox.and.arrow.backward")
+                        .font(.title2.bold())
+                    Spacer()
+                    Text(releaseExplorerRefreshLabel(from: lastRefreshed))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button {
+                        appState.refreshReleaseExplorer(for: repository.id)
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                        .font(.headline)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isLoading)
+                    Button("Done") {
+                        showReleaseExplorerManager = false
+                    }
+                    .keyboardShortcut(.cancelAction)
+                }
+
+                if let error, !error.isEmpty {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
+                if pageReleases.isEmpty {
+                    VStack(spacing: 8) {
+                        if isLoading {
+                            ProgressView()
+                        }
+                        Text(isLoading ? "Loading releases..." : "No releases found.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(.regularMaterial.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(pageReleases) { release in
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: release.isBeta ? "flask.fill" : "checkmark.seal.fill")
+                                        .foregroundStyle(release.isBeta ? .orange : .green)
+                                        .frame(width: 16)
+
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack(spacing: 8) {
+                                            Text(release.tagName)
+                                                .font(.subheadline.weight(.semibold))
+                                            Text(release.isBeta ? "Beta" : "Stable")
+                                                .font(.caption2.weight(.semibold))
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 3)
+                                                .background((release.isBeta ? Color.orange : Color.green).opacity(0.15), in: Capsule())
+                                                .foregroundStyle(release.isBeta ? .orange : .green)
+                                        }
+
+                                        Text(release.name)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+
+                                        if let publishedAt = release.publishedAt {
+                                            Text(publishedAt.formatted(date: .abbreviated, time: .shortened))
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+
+                                        releaseAuthorLine(for: release)
+                                    }
+
+                                    Spacer()
+
+                                    HStack(spacing: 8) {
+                                        Button {
+                                            managerReleaseDetailsCandidate = release
+                                        } label: {
+                                            Image(systemName: "info.circle")
+                                        }
+                                        .buttonStyle(.plain)
+                                        .foregroundStyle(.secondary)
+
+                                        Button(role: .destructive) {
+                                            rollbackCandidate = release
+                                        } label: {
+                                            Label("Rollback", systemImage: "arrow.uturn.backward.circle")
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .disabled(isLoading)
+                                    }
+                                }
+                                .padding(10)
+                                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            }
+                        }
+                    }
+                }
+
+                HStack {
+                    Text("Page \(currentPage + 1) of \(totalPages)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Previous") {
+                        releaseExplorerPage = max(0, currentPage - 1)
+                    }
+                    .disabled(currentPage == 0 || isLoading)
+                    Button("Next") {
+                        releaseExplorerPage = min(totalPages - 1, currentPage + 1)
+                    }
+                    .disabled(currentPage >= totalPages - 1 || isLoading)
+                }
+            }
+            .padding(18)
+            .frame(minWidth: 760, minHeight: 520)
+            .sheet(item: $managerReleaseDetailsCandidate) { release in
+                releaseDetailsSheet(for: release)
+            }
+        }
+    }
+
+    private func releaseDetailsSheet(for release: GitHubReleaseSummary) -> some View {
+        let releases = appState.releasesByRepository[repository.id] ?? []
+        let compareURL = compareURL(for: release, in: releases)
+        let notes = release.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        let closeDetails: () -> Void = {
+            releaseDetailsCandidate = nil
+            managerReleaseDetailsCandidate = nil
+        }
+
+        return NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let publishedAt = release.publishedAt {
+                        Text("Published \(publishedAt.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Release Notes")
+                            .font(.headline)
+                        renderedReleaseNotesView(for: notes)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .glassSection()
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Diff Report")
+                            .font(.headline)
+                        if let compareURL {
+                            Link(destination: compareURL) {
+                                Label("Open GitHub Compare", systemImage: "arrow.triangle.branch")
+                            }
+                            .font(.subheadline.weight(.semibold))
+                        } else {
+                            Text("No previous release to compare against.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let htmlURL = release.htmlURL {
+                            Link(destination: htmlURL) {
+                                Label("Open GitHub Release", systemImage: "link")
+                            }
+                            .font(.caption)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .glassSection()
+                }
+                .padding(18)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(minWidth: 620, minHeight: 460)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                HStack(spacing: 10) {
+                    Label(release.tagName, systemImage: release.isBeta ? "flask.fill" : "checkmark.seal.fill")
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(release.isBeta ? .orange : .green)
+                    Text(release.isBeta ? "Beta" : "Stable")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background((release.isBeta ? Color.orange : Color.green).opacity(0.15), in: Capsule())
+                        .foregroundStyle(release.isBeta ? .orange : .green)
+                    Spacer()
+                    Button("Done") {
+                        closeDetails()
+                    }
+                    .keyboardShortcut(.cancelAction)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial)
+            }
+        }
+    }
+
+    private func compareURL(for release: GitHubReleaseSummary, in releases: [GitHubReleaseSummary]) -> URL? {
+        guard let index = releases.firstIndex(where: { $0.id == release.id }),
+              index + 1 < releases.count else {
+            return nil
+        }
+        let older = releases[index + 1]
+        return URL(string: "https://github.com/\(repository.owner)/\(repository.repo)/compare/\(older.tagName)...\(release.tagName)")
+    }
+
+    private func renderedReleaseNotesView(for rawNotes: String) -> some View {
+        let notes = rawNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Group {
+            if notes.isEmpty {
+                Text("No release notes available.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else if looksLikeHTML(notes),
+                      let attributed = htmlAttributedString(from: notes) {
+                Text(attributed)
+                    .font(.callout)
+                    .textSelection(.enabled)
+            } else if looksLikeMarkdown(notes),
+                      let attributed = try? AttributedString(markdown: notes) {
+                Text(attributed)
+                    .font(.callout)
+                    .textSelection(.enabled)
+            } else {
+                Text(notes)
+                    .font(.callout)
+                    .textSelection(.enabled)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .multilineTextAlignment(.leading)
+    }
+
+    private func looksLikeHTML(_ text: String) -> Bool {
+        guard text.contains("<"), text.contains(">") else {
+            return false
+        }
+        return text.range(of: "<[^>]+>", options: .regularExpression) != nil
+    }
+
+    private func looksLikeMarkdown(_ text: String) -> Bool {
+        let markdownHints = [
+            "# ",
+            "## ",
+            "### ",
+            "- ",
+            "* ",
+            "1. ",
+            "```",
+            "[",
+            "](",
+            "**",
+            "_"
+        ]
+        return markdownHints.contains(where: { text.contains($0) })
+    }
+
+    private func htmlAttributedString(from html: String) -> AttributedString? {
+        guard let data = html.data(using: .utf8) else {
+            return nil
+        }
+        guard let parsed = try? NSAttributedString(
+            data: data,
+            options: [
+                .documentType: NSAttributedString.DocumentType.html,
+                .characterEncoding: String.Encoding.utf8.rawValue
+            ],
+            documentAttributes: nil
+        ) else {
+            return nil
+        }
+        return try? AttributedString(parsed, including: AttributeScopes.FoundationAttributes.self)
+    }
+
+    @ViewBuilder
+    private func releaseAuthorLine(for release: GitHubReleaseSummary) -> some View {
+        if let author = release.author {
+            HStack(spacing: 6) {
+                if let avatarURL = author.avatarURL {
+                    AsyncImage(url: avatarURL) { phase in
+                        switch phase {
+                        case let .success(image):
+                            image
+                                .resizable()
+                                .scaledToFill()
+                        default:
+                            Circle()
+                                .fill(.thinMaterial)
+                        }
+                    }
+                    .frame(width: 16, height: 16)
+                    .clipShape(Circle())
+                }
+
+                if let profileURL = author.profileURL {
+                    Link("@\(author.login)", destination: profileURL)
+                        .font(.caption2.weight(.semibold))
+                } else {
+                    Text("@\(author.login)")
+                        .font(.caption2.weight(.semibold))
+                }
+                Text("published this release")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func releaseExplorerRefreshLabel(from date: Date?) -> String {
+        guard let date else {
+            return "Not refreshed yet"
+        }
+        return "Updated \(date.formatted(date: .omitted, time: .shortened))"
+    }
 }
 
 private func repositoryStatusSymbol(for activity: RepositoryActivity) -> String {
     switch activity {
     case .idle:
-        return "pause.circle.fill"
+        return "minus.circle.fill"
     case .polling:
         return "arrow.clockwise.circle.fill"
     case .building:
