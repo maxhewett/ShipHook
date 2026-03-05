@@ -193,7 +193,8 @@ final class AppState: ObservableObject {
             sparkle: SparkleConfiguration(
                 appcastURL: defaultAppcastURL(owner: owner, repo: repo),
                 autoIncrementBuild: false,
-                skipIfVersionIsNotNewer: true
+                skipIfVersionIsNotNewer: true,
+                betaIconPath: nil
             ),
             notifications: .default,
             signing: .default
@@ -575,6 +576,7 @@ final class AppState: ObservableObject {
 
             inFlightBuilds.insert(repository.id)
             activeBuildRepositoryID = repository.id
+            let releaseChannel = releaseChannel(for: snapshot)
             buildVersionsInFlight.removeValue(forKey: repository.id)
             logBuffers[repository.id] = ""
             logFlushTasks[repository.id]?.cancel()
@@ -586,6 +588,7 @@ final class AppState: ObservableObject {
                 $0.summary = "Building commit \(snapshot.sha.prefix(7))"
                 $0.lastLogPath = "\((repository.localCheckoutPath as NSString).expandingTildeInPath)/.shiphook/logs/\(repository.id)-latest.log"
                 $0.lastLog = ""
+                $0.releaseChannel = releaseChannel
             }
 
             let runner = pipelineRunner
@@ -645,6 +648,7 @@ final class AppState: ObservableObject {
                     $0.lastLogPath = outcome.logPath
                     $0.lastError = nil
                     $0.summary = outcome.summary
+                    $0.releaseChannel = outcome.releaseChannel
                 }
                 consecutiveBuildFailures[repository.id] = 0
                 startNextQueuedBuildIfPossible()
@@ -656,7 +660,8 @@ final class AppState: ObservableObject {
                 repositoryName: repository.name,
                 version: outcome.version,
                 sha: outcome.builtSHA,
-                builtAt: Date()
+                builtAt: Date(),
+                releaseChannel: outcome.releaseChannel
             )
             appendBuildRecord(historyRecord)
             updateState(for: repository.id) {
@@ -669,6 +674,7 @@ final class AppState: ObservableObject {
                 $0.lastLogPath = outcome.logPath
                 $0.lastError = nil
                 $0.summary = outcome.summary
+                $0.releaseChannel = outcome.releaseChannel
             }
             consecutiveBuildFailures[repository.id] = 0
         case let .failure(error):
@@ -807,6 +813,12 @@ final class AppState: ObservableObject {
         return ignoredCommitMarkers.contains(where: { message.contains($0) })
     }
 
+    private func releaseChannel(for snapshot: GitHubBranchSnapshot) -> ReleaseChannel {
+        let lowercasedMessage = snapshot.message.lowercased()
+        let betaMarkers = ["[beta]", "[shiphook beta]", "[pre-release]", "[prerelease]"]
+        return betaMarkers.contains(where: { lowercasedMessage.contains($0) }) ? .beta : .stable
+    }
+
     private func handleFailure(
         for repository: RepositoryConfiguration,
         snapshot: GitHubBranchSnapshot?,
@@ -832,6 +844,9 @@ final class AppState: ObservableObject {
             $0.buildStartedAt = nil
             $0.buildPhase = .idle
             $0.lastError = error.localizedDescription
+            if let snapshot {
+                $0.releaseChannel = releaseChannel(for: snapshot)
+            }
             if $0.lastLog.isEmpty {
                 $0.lastLog = error.localizedDescription
             }
@@ -1238,7 +1253,8 @@ final class AppState: ObservableObject {
                 WebDashboardSnapshot.Build(
                     version: record.version,
                     sha: record.sha,
-                    builtAt: record.builtAt
+                    builtAt: record.builtAt,
+                    releaseChannel: record.releaseChannel?.rawValue
                 )
             }
             let latestBuild = recentBuilds.first
@@ -1252,6 +1268,7 @@ final class AppState: ObservableObject {
                 activity: state.activity.rawValue,
                 phase: state.buildPhase.rawValue,
                 summary: state.summary,
+                releaseChannel: state.releaseChannel?.rawValue ?? latestBuild?.releaseChannel,
                 version: displayedVersion(for: repository),
                 publishedVersion: publishedVersion(for: repository),
                 lastSeenSHA: state.lastSeenSHA,

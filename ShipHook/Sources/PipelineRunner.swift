@@ -8,6 +8,7 @@ struct PipelineOutcome {
     var logPath: String
     var skippedPublish: Bool
     var summary: String
+    var releaseChannel: ReleaseChannel
 }
 
 private struct ReleaseNotesSource {
@@ -81,20 +82,28 @@ struct PipelineRunner {
         )
 
         onStageChange?(.planningRelease)
-        let releaseChannel = releaseChannel(for: effectiveSnapshot)
-        let releasePlan = try releasePlanner.prepareRelease(for: repository, channel: releaseChannel)
+        let snapshotChannel = releaseChannel(for: effectiveSnapshot)
+        var releasePlan = try releasePlanner.prepareRelease(for: repository, channel: snapshotChannel)
+        var resolvedVersion = AppVersion(
+            marketingVersion: releasePlan?.version.marketingVersion ?? makeVersion(for: repository, snapshot: effectiveSnapshot),
+            buildVersion: releasePlan?.version.buildVersion ?? ""
+        )
+        let releaseChannel = resolvedReleaseChannel(for: effectiveSnapshot, version: resolvedVersion)
+        if releaseChannel != snapshotChannel {
+            try? releasePlanner.restoreProjectVersionIfNeeded(releasePlan, xcode: repository.xcode)
+            releasePlan = try releasePlanner.prepareRelease(for: repository, channel: releaseChannel)
+            resolvedVersion = AppVersion(
+                marketingVersion: releasePlan?.version.marketingVersion ?? makeVersion(for: repository, snapshot: effectiveSnapshot),
+                buildVersion: releasePlan?.version.buildVersion ?? ""
+            )
+        }
         defer {
             try? releasePlanner.restoreProjectVersionIfNeeded(releasePlan, xcode: repository.xcode)
         }
 
-        let version = releasePlan?.version.marketingVersion ?? makeVersion(for: repository, snapshot: effectiveSnapshot)
-        let buildVersion = releasePlan?.version.buildVersion ?? ""
-        onVersionResolved?(
-            AppVersion(
-                marketingVersion: version,
-                buildVersion: buildVersion
-            )
-        )
+        let version = resolvedVersion.marketingVersion
+        let buildVersion = resolvedVersion.buildVersion
+        onVersionResolved?(resolvedVersion)
         let releaseNotesSource = try resolvedReleaseNotesSource(
             for: repository,
             snapshot: effectiveSnapshot,
@@ -141,8 +150,23 @@ struct PipelineRunner {
                 log: combinedLog,
                 logPath: logPath,
                 skippedPublish: true,
-                summary: summary
+                summary: summary,
+                releaseChannel: releaseChannel
             )
+        }
+
+        let restoreBetaSourceIconIfNeeded = try prepareBetaSourceIconOverrideIfNeeded(
+            repository: repository,
+            releaseChannel: releaseChannel,
+            checkoutPath: checkoutPath,
+            onOutput: appendOutput
+        )
+        defer {
+            do {
+                try restoreBetaSourceIconIfNeeded?()
+            } catch {
+                appendOutput("Warning: failed to restore source icon override: \(error.localizedDescription)\n")
+            }
         }
 
         let artifactPath: String
@@ -164,6 +188,13 @@ struct PipelineRunner {
             artifactPath = shell.artifactPath.expandingTildeInPath
         }
 
+        try applyBetaIconIfNeeded(
+            artifactPath: artifactPath,
+            repository: repository,
+            releaseChannel: releaseChannel,
+            checkoutPath: checkoutPath,
+            onOutput: appendOutput
+        )
         let expectedTeamID = repository.signing?.developmentTeam
         try normalizeCodeSigningIfNeeded(
             artifactPath: artifactPath,
@@ -209,7 +240,8 @@ struct PipelineRunner {
             log: combinedLog,
             logPath: logPath,
             skippedPublish: false,
-            summary: "Published \(version) from \(effectiveSnapshot.sha.prefix(7))"
+            summary: "Published \(version) from \(effectiveSnapshot.sha.prefix(7))",
+            releaseChannel: releaseChannel
         )
     }
 
@@ -953,6 +985,280 @@ struct PipelineRunner {
         return lines.joined(separator: "\n")
     }
 
+    private func applyBetaIconIfNeeded(
+        artifactPath: String,
+        repository: RepositoryConfiguration,
+        releaseChannel: ReleaseChannel,
+        checkoutPath: String,
+        onOutput: ((String) -> Void)?
+    ) throws {
+        guard releaseChannel == .beta else {
+            return
+        }
+        guard
+            let iconPath = repository.sparkle?.betaIconPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !iconPath.isEmpty
+        else {
+            return
+        }
+
+        let sourcePath = iconPath.expandingTildeInPath
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: sourcePath) else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 830,
+                userInfo: [NSLocalizedDescriptionKey: "Beta icon file does not exist at \(sourcePath)."]
+            )
+        }
+
+        let sourceURL = URL(fileURLWithPath: sourcePath)
+        guard sourceURL.pathExtension.lowercased() == "icns" else {
+            // Non-.icns beta icon overrides are handled before archive by replacing source icon files.
+            return
+        }
+
+        let resourcesDirectory = URL(fileURLWithPath: artifactPath).appendingPathComponent("Contents/Resources", isDirectory: true)
+        try fileManager.createDirectory(at: resourcesDirectory, withIntermediateDirectories: true, attributes: nil)
+        let destinationURL = resourcesDirectory.appendingPathComponent(sourceURL.lastPathComponent)
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            try fileManager.removeItem(at: destinationURL)
+        }
+        try fileManager.copyItem(at: sourceURL, to: destinationURL)
+
+        let infoPlistURL = URL(fileURLWithPath: artifactPath).appendingPathComponent("Contents/Info.plist")
+        guard let infoPlist = NSMutableDictionary(contentsOf: infoPlistURL) else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 832,
+                userInfo: [NSLocalizedDescriptionKey: "Could not load app Info.plist to apply beta icon at \(infoPlistURL.path)."]
+            )
+        }
+
+        let iconBaseName = sourceURL.deletingPathExtension().lastPathComponent
+        infoPlist["CFBundleIconFile"] = iconBaseName
+        infoPlist["CFBundleIconName"] = iconBaseName
+        guard infoPlist.write(to: infoPlistURL, atomically: true) else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 833,
+                userInfo: [NSLocalizedDescriptionKey: "Could not update Info.plist with beta icon settings."]
+            )
+        }
+
+        onOutput?("Applied beta icon \(sourceURL.lastPathComponent) to \(URL(fileURLWithPath: artifactPath).lastPathComponent).\n")
+    }
+
+    private func prepareBetaSourceIconOverrideIfNeeded(
+        repository: RepositoryConfiguration,
+        releaseChannel: ReleaseChannel,
+        checkoutPath: String,
+        onOutput: ((String) -> Void)?
+    ) throws -> (() throws -> Void)? {
+        guard releaseChannel == .beta else {
+            return nil
+        }
+        guard repository.buildMode == .xcodeArchive, let xcode = repository.xcode else {
+            return nil
+        }
+        guard
+            let configuredPath = repository.sparkle?.betaIconPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !configuredPath.isEmpty
+        else {
+            return nil
+        }
+
+        let sourcePath = configuredPath.expandingTildeInPath
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: sourcePath) else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 834,
+                userInfo: [NSLocalizedDescriptionKey: "Configured beta icon file does not exist at \(sourcePath)."]
+            )
+        }
+
+        let sourceURL = URL(fileURLWithPath: sourcePath)
+        let sourceExtension = sourceURL.pathExtension.lowercased()
+        guard sourceExtension == "icon" else {
+            return nil
+        }
+
+        let destinationPath = try resolveSourceIconPath(
+            repository: repository,
+            xcode: xcode,
+            checkoutPath: checkoutPath,
+            expectedExtension: sourceExtension
+        )
+        let destinationURL = URL(fileURLWithPath: destinationPath)
+        let backupURL = destinationURL.appendingPathExtension("shiphook-backup")
+        let destinationExists = fileManager.fileExists(atPath: destinationURL.path)
+
+        if fileManager.fileExists(atPath: backupURL.path) {
+            try fileManager.removeItem(at: backupURL)
+        }
+        if destinationExists {
+            try fileManager.copyItem(at: destinationURL, to: backupURL)
+        }
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            try fileManager.removeItem(at: destinationURL)
+        }
+        try fileManager.copyItem(at: sourceURL, to: destinationURL)
+        onOutput?("Applied beta source icon override \(sourceURL.lastPathComponent) -> \(destinationURL.lastPathComponent) before archive.\n")
+
+        return {
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
+            if destinationExists, fileManager.fileExists(atPath: backupURL.path) {
+                try fileManager.moveItem(at: backupURL, to: destinationURL)
+                onOutput?("Restored source icon \(destinationURL.lastPathComponent) after beta build.\n")
+            } else if fileManager.fileExists(atPath: backupURL.path) {
+                try fileManager.removeItem(at: backupURL)
+            }
+        }
+    }
+
+    private func resolveSourceIconPath(
+        repository: RepositoryConfiguration,
+        xcode: XcodeBuildConfiguration,
+        checkoutPath: String,
+        expectedExtension: String
+    ) throws -> String {
+        let settings = try fetchBuildSettings(xcode: xcode, checkoutPath: checkoutPath)
+        let sourceRoot = (settings["SRCROOT"] ?? checkoutPath).expandingTildeInPath
+        let appIconName = settings["ASSETCATALOG_COMPILER_APPICON_NAME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let appIconName, !appIconName.isEmpty,
+           let namedMatch = findFirstMatchingFile(
+               under: sourceRoot,
+               fileName: "\(appIconName).\(expectedExtension)",
+               excluding: repository.sparkle?.betaIconPath?.expandingTildeInPath
+           ) {
+            return namedMatch
+        }
+
+        if let genericMatch = findFirstFile(
+            under: sourceRoot,
+            withExtension: expectedExtension,
+            excluding: repository.sparkle?.betaIconPath?.expandingTildeInPath
+        ) {
+            return genericMatch
+        }
+
+        throw NSError(
+            domain: "ShipHook",
+            code: 835,
+            userInfo: [NSLocalizedDescriptionKey: "Could not locate a source .\(expectedExtension) icon to override in \(sourceRoot)."]
+        )
+    }
+
+    private func fetchBuildSettings(xcode: XcodeBuildConfiguration, checkoutPath: String) throws -> [String: String] {
+        let targetFlag: String
+        let commandDirectory: String
+        if let workspacePath = xcode.sanitizedWorkspacePath?.expandingTildeInPath, !workspacePath.isEmpty {
+            targetFlag = "-workspace '\(workspacePath)'"
+            commandDirectory = URL(fileURLWithPath: workspacePath).deletingLastPathComponent().path
+        } else if let projectPath = xcode.projectPath?.expandingTildeInPath, !projectPath.isEmpty {
+            targetFlag = "-project '\(projectPath)'"
+            commandDirectory = URL(fileURLWithPath: projectPath).deletingLastPathComponent().path
+        } else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 836,
+                userInfo: [NSLocalizedDescriptionKey: "Cannot inspect build settings without project or workspace path."]
+            )
+        }
+
+        let command = "xcodebuild \(targetFlag) -scheme '\(xcode.scheme)' -configuration '\(xcode.configuration)' -showBuildSettings -json"
+        let output = try commandRunner.run(command, currentDirectory: commandDirectory, environment: [:]).output
+        let data = try extractJSONData(from: output)
+        let decoded = try JSONDecoder().decode([PipelineBuildSettingsResponse].self, from: data)
+        return decoded.first?.buildSettings ?? [:]
+    }
+
+    private func extractJSONData(from output: String) throws -> Data {
+        if let data = output.data(using: .utf8),
+           (try? JSONSerialization.jsonObject(with: data)) != nil {
+            return data
+        }
+
+        for marker in ["[", "{"] {
+            for index in output.indices where output[index] == Character(marker) {
+                let slice = output[index...]
+                guard let data = String(slice).data(using: .utf8),
+                      (try? JSONSerialization.jsonObject(with: data)) != nil else {
+                    continue
+                }
+                return data
+            }
+        }
+
+        throw CocoaError(.coderReadCorrupt)
+    }
+
+    private func findFirstMatchingFile(under root: String, fileName: String, excluding excludedPath: String?) -> String? {
+        guard let enumerator = FileManager.default.enumerator(atPath: root) else {
+            return nil
+        }
+
+        let normalizedExcluded = excludedPath?.expandingTildeInPath
+        for case let relativePath as String in enumerator {
+            let absolutePath = "\(root)/\(relativePath)"
+            if let normalizedExcluded, absolutePath == normalizedExcluded {
+                continue
+            }
+            if URL(fileURLWithPath: absolutePath).lastPathComponent == fileName {
+                return absolutePath
+            }
+        }
+        return nil
+    }
+
+    private func findFirstFile(under root: String, withExtension pathExtension: String, excluding excludedPath: String?) -> String? {
+        guard let enumerator = FileManager.default.enumerator(atPath: root) else {
+            return nil
+        }
+
+        let normalizedExcluded = excludedPath?.expandingTildeInPath
+        for case let relativePath as String in enumerator {
+            let absolutePath = "\(root)/\(relativePath)"
+            if let normalizedExcluded, absolutePath == normalizedExcluded {
+                continue
+            }
+            if URL(fileURLWithPath: absolutePath).pathExtension.lowercased() == pathExtension {
+                return absolutePath
+            }
+        }
+        return nil
+    }
+
+    private func resolvedReleaseChannel(for snapshot: GitHubBranchSnapshot, version: AppVersion) -> ReleaseChannel {
+        if releaseChannel(for: snapshot) == .beta {
+            return .beta
+        }
+
+        if hasBetaVersionMarker(version.marketingVersion) || hasBetaVersionMarker(version.buildVersion) {
+            return .beta
+        }
+
+        return .stable
+    }
+
+    private func hasBetaVersionMarker(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else {
+            return false
+        }
+
+        if trimmed.contains("beta") || trimmed.contains("pre") || trimmed.contains("rc") {
+            return true
+        }
+
+        return trimmed.hasPrefix("b")
+    }
+
     private func signingOverrides(for repository: RepositoryConfiguration) -> String {
         guard let signing = repository.signing else {
             return ""
@@ -989,6 +1295,10 @@ struct PipelineRunner {
             return "\(formatter.string(from: date))-\(shortSHA)"
         }
     }
+}
+
+private struct PipelineBuildSettingsResponse: Decodable {
+    var buildSettings: [String: String]
 }
 
 private extension String {

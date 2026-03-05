@@ -200,6 +200,24 @@ struct SettingsView: View {
                 .font(.title3.bold())
 
             HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Update Channel", systemImage: updater.selectedChannel.symbolName)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(updater.selectedChannel == .beta ? .orange : .secondary)
+
+                    Picker("Update Channel", selection: Binding(
+                        get: { updater.selectedChannel },
+                        set: { updater.setUpdateChannel($0) }
+                    )) {
+                        ForEach(AppUpdater.UpdateChannel.allCases) { channel in
+                            Text(channel.label).tag(channel)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+            }
+
+            HStack(alignment: .top, spacing: 14) {
                 summaryItem(title: "Feed", value: updater.feedURLString.isEmpty ? "Not configured" : updater.feedURLString, symbol: "link")
                 summaryItem(title: "Public Key", value: updater.hasPublicKey ? "Installed" : "Missing", symbol: "key")
             }
@@ -207,6 +225,11 @@ struct SettingsView: View {
             Text(updater.isConfigured ? "ShipHook is configured for Sparkle self-updates." : "ShipHook still needs a valid Sparkle feed and public key to self-update.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if updater.selectedChannel == .beta {
+                Label("Beta channel is enabled. Updates will come from the beta appcast feed.", systemImage: "flask.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
         }
         .glassSection()
     }

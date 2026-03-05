@@ -1,0 +1,7 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>ShipHook Beta</title>
+        <description>Beta channel updates for ShipHook</description>
+    </channel>
+</rss>

@@ -1,5 +1,58 @@
 import Foundation
 
+enum AppBuildChannel: String {
+    case stable
+    case beta
+
+    static var current: AppBuildChannel {
+        from(bundle: .main)
+    }
+
+    static func from(bundle: Bundle) -> AppBuildChannel {
+        if let explicit = normalizedString(bundle.object(forInfoDictionaryKey: "ShipHookUpdateChannel")),
+           explicit == "beta" {
+            return .beta
+        }
+
+        if let feedURL = normalizedString(bundle.object(forInfoDictionaryKey: "SUFeedURL")),
+           feedURL.contains("/beta/") {
+            return .beta
+        }
+
+        if let shortVersion = normalizedString(bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString")),
+           containsBetaMarker(shortVersion) {
+            return .beta
+        }
+
+        if let buildVersion = normalizedString(bundle.object(forInfoDictionaryKey: "CFBundleVersion")),
+           containsBetaMarker(buildVersion) {
+            return .beta
+        }
+
+        return .stable
+    }
+
+    private static func normalizedString(_ value: Any?) -> String? {
+        guard let value = value as? String else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func containsBetaMarker(_ value: String) -> Bool {
+        if value.contains("beta") || value.hasPrefix("b") {
+            return true
+        }
+
+        if value.hasPrefix("pre") || value.hasPrefix("rc") {
+            return true
+        }
+
+        return false
+    }
+}
+
 struct AppConfiguration: Codable, Hashable {
     var pollIntervalSeconds: TimeInterval
     var githubTokenEnvVar: String?
@@ -234,27 +287,32 @@ struct SparkleConfiguration: Codable, Hashable {
     var appcastURL: String?
     var autoIncrementBuild: Bool
     var skipIfVersionIsNotNewer: Bool
+    var betaIconPath: String?
 
     static let `default` = SparkleConfiguration(
         appcastURL: nil,
         autoIncrementBuild: false,
-        skipIfVersionIsNotNewer: true
+        skipIfVersionIsNotNewer: true,
+        betaIconPath: nil
     )
 
     enum CodingKeys: String, CodingKey {
         case appcastURL
         case autoIncrementBuild
         case skipIfVersionIsNotNewer
+        case betaIconPath
     }
 
     init(
         appcastURL: String?,
         autoIncrementBuild: Bool,
-        skipIfVersionIsNotNewer: Bool
+        skipIfVersionIsNotNewer: Bool,
+        betaIconPath: String?
     ) {
         self.appcastURL = appcastURL
         self.autoIncrementBuild = autoIncrementBuild
         self.skipIfVersionIsNotNewer = skipIfVersionIsNotNewer
+        self.betaIconPath = betaIconPath
     }
 
     init(from decoder: Decoder) throws {
@@ -262,6 +320,7 @@ struct SparkleConfiguration: Codable, Hashable {
         appcastURL = try container.decodeIfPresent(String.self, forKey: .appcastURL)
         autoIncrementBuild = try container.decodeIfPresent(Bool.self, forKey: .autoIncrementBuild) ?? true
         skipIfVersionIsNotNewer = try container.decodeIfPresent(Bool.self, forKey: .skipIfVersionIsNotNewer) ?? true
+        betaIconPath = try container.decodeIfPresent(String.self, forKey: .betaIconPath)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -269,6 +328,7 @@ struct SparkleConfiguration: Codable, Hashable {
         try container.encodeIfPresent(appcastURL, forKey: .appcastURL)
         try container.encode(autoIncrementBuild, forKey: .autoIncrementBuild)
         try container.encode(skipIfVersionIsNotNewer, forKey: .skipIfVersionIsNotNewer)
+        try container.encodeIfPresent(betaIconPath, forKey: .betaIconPath)
     }
 }
 
@@ -439,7 +499,7 @@ struct GitHubBranchSnapshot: Equatable {
     var htmlURL: URL?
 }
 
-enum ReleaseChannel: String {
+enum ReleaseChannel: String, Codable {
     case stable
     case beta
 }
@@ -475,6 +535,7 @@ struct RepositoryRuntimeState: Identifiable {
     var lastLog: String
     var lastLogPath: String?
     var lastError: String?
+    var releaseChannel: ReleaseChannel?
 
     static func initial(id: String) -> RepositoryRuntimeState {
         RepositoryRuntimeState(
@@ -489,7 +550,8 @@ struct RepositoryRuntimeState: Identifiable {
             summary: "Waiting for first poll",
             lastLog: "",
             lastLogPath: nil,
-            lastError: nil
+            lastError: nil,
+            releaseChannel: nil
         )
     }
 }
@@ -501,4 +563,5 @@ struct BuildRecord: Codable, Hashable, Identifiable {
     var version: String
     var sha: String
     var builtAt: Date
+    var releaseChannel: ReleaseChannel?
 }

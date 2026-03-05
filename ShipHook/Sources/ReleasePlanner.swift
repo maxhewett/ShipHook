@@ -38,7 +38,7 @@ enum ReleasePlannerError: LocalizedError {
         case .xcodeProjectRequired:
             return "A concrete .xcodeproj path is required to update build/version settings."
         case let .nonNumericBuild(build):
-            return "Sparkle requires a numeric build version. Found: \(build)"
+            return "Sparkle build versions must be numeric, or beta-prefixed numeric (for example `42` or `b42`). Found: \(build)"
         case .missingVersionSettings:
             return "Could not determine MARKETING_VERSION or CURRENT_PROJECT_VERSION from the target project."
         case .couldNotUpdateProjectVersion:
@@ -146,7 +146,7 @@ struct ReleasePlanner {
     }
 
     private func computeNextBuild(currentBuild: String, latestAppcast: AppcastVersion?, autoIncrement: Bool) throws -> String {
-        guard let current = Int(currentBuild) else {
+        guard let current = parsedBuild(currentBuild) else {
             throw ReleasePlannerError.nonNumericBuild(currentBuild)
         }
 
@@ -154,35 +154,37 @@ struct ReleasePlanner {
             return currentBuild
         }
 
-        guard let latestBuild = Int(latest.buildVersion) else {
+        guard let latestBuild = parsedBuild(latest.buildVersion) else {
             throw ReleasePlannerError.nonNumericBuild(latest.buildVersion)
         }
 
-        if current > latestBuild {
+        if current.number > latestBuild.number {
             return currentBuild
         }
 
         if autoIncrement {
-            let nextBuild = String(latestBuild + 1)
-            let width = max(currentBuild.count, latest.buildVersion.count)
-            if currentBuild.hasPrefix("0") || latest.buildVersion.hasPrefix("0") {
-                return nextBuild.count < width
+            let nextBuild = String(latestBuild.number + 1)
+            let width = max(current.width, latestBuild.width)
+            let prefix = current.prefix.isEmpty ? latestBuild.prefix : current.prefix
+            if current.hasLeadingZero || latestBuild.hasLeadingZero {
+                let padded = nextBuild.count < width
                     ? String(repeating: "0", count: width - nextBuild.count) + nextBuild
                     : nextBuild
+                return "\(prefix)\(padded)"
             }
-            return nextBuild
+            return "\(prefix)\(nextBuild)"
         }
 
         throw ReleasePlannerError.nonNumericBuild("Current build \(currentBuild) is not newer than appcast build \(latest.buildVersion)")
     }
 
     private func isVersionNewer(_ current: AppVersion, than latest: AppcastVersion) -> Bool {
-        guard let currentBuild = Int(current.buildVersion), let latestBuild = Int(latest.buildVersion) else {
+        guard let currentBuild = parsedBuild(current.buildVersion), let latestBuild = parsedBuild(latest.buildVersion) else {
             return current.buildVersion != latest.buildVersion
         }
 
-        if currentBuild != latestBuild {
-            return currentBuild > latestBuild
+        if currentBuild.number != latestBuild.number {
+            return currentBuild.number > latestBuild.number
         }
 
         if let latestMarketing = latest.marketingVersion, !latestMarketing.isEmpty {
@@ -190,6 +192,37 @@ struct ReleasePlanner {
         }
 
         return false
+    }
+
+    private func parsedBuild(_ value: String) -> ParsedBuild? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        let lowercased = trimmed.lowercased()
+        let prefix: String
+        let numericPart: String
+        if lowercased.hasPrefix("b") {
+            prefix = "b"
+            numericPart = String(lowercased.dropFirst())
+        } else {
+            prefix = ""
+            numericPart = lowercased
+        }
+
+        guard !numericPart.isEmpty,
+              numericPart.allSatisfy(\.isNumber),
+              let number = Int(numericPart) else {
+            return nil
+        }
+
+        return ParsedBuild(
+            number: number,
+            prefix: prefix,
+            width: numericPart.count,
+            hasLeadingZero: numericPart.hasPrefix("0")
+        )
     }
 
     private func updateProjectVersion(xcode: XcodeBuildConfiguration, marketingVersion: String, buildVersion: String) throws {
@@ -253,6 +286,13 @@ struct ReleasePlanner {
         components?.path = betaPath
         return components?.url?.absoluteString ?? urlString
     }
+}
+
+private struct ParsedBuild {
+    var number: Int
+    var prefix: String
+    var width: Int
+    var hasLeadingZero: Bool
 }
 
 private enum JSONExtraction {

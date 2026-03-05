@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var appState: AppState
@@ -31,6 +30,22 @@ struct ContentView: View {
                 .padding(.trailing, 24)
                 .padding(.bottom, 24)
                 .shadow(color: .black.opacity(0.18), radius: 18, y: 10)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if AppBuildChannel.current == .beta {
+                Label("ShipHook Beta", systemImage: "flask.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.regularMaterial, in: Capsule())
+                    .overlay {
+                        Capsule().strokeBorder(.orange.opacity(0.35), lineWidth: 1)
+                    }
+                    .padding(.top, 14)
+                    .padding(.trailing, 14)
+                    .ignoresSafeArea(.container, edges: .top)
             }
         }
         .sheet(isPresented: $showingAddRepositoryWizard) {
@@ -163,6 +178,8 @@ struct ContentView: View {
         let statusColor = isDisabled ? .yellow : color(for: state.activity)
         let statusSymbol = isDisabled ? "xmark.circle.fill" : repositoryStatusSymbol(for: state.activity)
         let latestVersion = appState.displayedVersion(for: repo)
+        let latestBuild = appState.latestBuildRecord(for: repo.id)
+        let channel = state.releaseChannel ?? latestBuild?.releaseChannel
 
         return Button {
             selectedRepositoryID = repo.id
@@ -193,6 +210,14 @@ struct ContentView: View {
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 3)
                                     .background(.thinMaterial, in: Capsule())
+                            }
+                            if channel == .beta {
+                                Label("Beta", systemImage: "flask.fill")
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .foregroundStyle(.orange)
+                                    .background(.orange.opacity(0.16), in: Capsule())
                             }
                             if state.activity == .building {
                                 Text(phaseBadgeLabel(for: state.buildPhase))
@@ -749,7 +774,8 @@ private struct AddRepositoryWizard: View {
             repository.sparkle = SparkleConfiguration(
                 appcastURL: appcastURL.isEmpty ? nil : appcastURL,
                 autoIncrementBuild: autoIncrementBuild,
-                skipIfVersionIsNotNewer: true
+                skipIfVersionIsNotNewer: true,
+                betaIconPath: nil
             )
             repository.signing = SigningConfiguration(
                 developmentTeam: selectedDevelopmentTeam.isEmpty ? nil : selectedDevelopmentTeam,
@@ -1151,6 +1177,7 @@ private struct RepositoryEditor: View {
     @State private var showRepositoryDetails = true
     @State private var showPaths = false
     @State private var showPublish = false
+    @State private var betaIconSelectionError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -1174,6 +1201,7 @@ private struct RepositoryEditor: View {
         let progress = phaseProgress(for: runtimeState.buildPhase)
         let latestBuild = appState.latestBuildRecord(for: repository.id)
         let displayedVersion = appState.displayedVersion(for: repository)
+        let releaseChannel = runtimeState.releaseChannel ?? latestBuild?.releaseChannel
         let statusActivity: RepositoryActivity = repository.isEnabled ? runtimeState.activity : .idle
         let statusText = repository.isEnabled ? runtimeState.activity.rawValue.capitalized : "Disabled"
         let statusIcon = repository.isEnabled ? repositoryStatusSymbol(for: runtimeState.activity) : "xmark.circle.fill"
@@ -1212,6 +1240,16 @@ private struct RepositoryEditor: View {
                     .foregroundStyle(.secondary)
             } else if let displayedVersion {
                 Label("Published version: \(displayedVersion)", systemImage: "tag")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if releaseChannel == .beta {
+                Label("Channel: Beta", systemImage: "flask.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+            } else {
+                Label("Channel: Stable", systemImage: "checkmark.seal")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1289,11 +1327,18 @@ private struct RepositoryEditor: View {
                     .font(.title3.bold())
                 Spacer()
                 if let latestBuild {
-                    Text("Current v\(latestBuild.version)")
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(.thinMaterial, in: Capsule())
+                    HStack(spacing: 8) {
+                        Text("Current v\(latestBuild.version)")
+                            .font(.caption.weight(.semibold))
+                        if latestBuild.releaseChannel == .beta {
+                            Label("Beta", systemImage: "flask.fill")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(.thinMaterial, in: Capsule())
                 }
             }
 
@@ -1313,6 +1358,11 @@ private struct RepositoryEditor: View {
                                 HStack(spacing: 8) {
                                     Text("v\(record.version)")
                                         .font(.subheadline.weight(.semibold))
+                                    if record.releaseChannel == .beta {
+                                        Label("Beta", systemImage: "flask.fill")
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(.orange)
+                                    }
                                     if record.id == latestBuild?.id {
                                         Text("Current")
                                             .font(.caption2.weight(.semibold))
@@ -1450,11 +1500,29 @@ private struct RepositoryEditor: View {
             Label("Sparkle", systemImage: "sparkles")
                 .font(.title3.bold())
             labeledField("Appcast URL", symbol: "link", text: appcastURLBinding)
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Beta Icon Path (.icon or .icns)", systemImage: "photo.badge.plus")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                HStack(alignment: .center, spacing: 10) {
+                    TextField("Path to beta icon", text: optionalStringBinding(sparkle.betaIconPath))
+                        .textFieldStyle(.roundedBorder)
+                    Button("Browse") {
+                        chooseBetaIcon()
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
             Toggle("Skip build when project version is not newer than appcast", isOn: sparkle.skipIfVersionIsNotNewer)
             Toggle("Auto-increment build when appcast build is not newer", isOn: sparkle.autoIncrementBuild)
-            Text("ShipHook compares the latest appcast build with `CURRENT_PROJECT_VERSION` and bumps the project build number before archiving when needed.")
+            Text("ShipHook compares the latest appcast build with `CURRENT_PROJECT_VERSION` and bumps the project build number before archiving when needed. For beta-channel builds, ShipHook can override app icons from `.icon` (source swap before build) or `.icns` (bundle patch before signing).")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let betaIconSelectionError, !betaIconSelectionError.isEmpty {
+                Label(betaIconSelectionError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
         }
         .glassSection()
     }
@@ -1700,6 +1768,94 @@ private struct RepositoryEditor: View {
                 }
             }
         }
+    }
+
+    private func chooseBetaIcon() {
+        let requiresIconComposer = usesIconComposerProject
+        let allowedExtensions = requiresIconComposer ? ["icon"] : ["icon", "icns"]
+
+        let panel = NSOpenPanel()
+        panel.title = "Choose Beta Icon"
+        panel.message = requiresIconComposer
+            ? "This project uses Icon Composer. Select a .icon file for beta builds."
+            : "Select a .icon or .icns file to use for beta builds."
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedFileTypes = allowedExtensions
+        panel.allowsOtherFileTypes = false
+        panel.resolvesAliases = true
+        panel.treatsFilePackagesAsDirectories = false
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        let ext = url.pathExtension.lowercased()
+        guard allowedExtensions.contains(ext) else {
+            betaIconSelectionError = requiresIconComposer
+                ? "This repository requires a .icon file."
+                : "Please choose a .icon or .icns file."
+            return
+        }
+
+        var sparkleConfiguration = repository.sparkle ?? .default
+        sparkleConfiguration.betaIconPath = url.path
+        repository.sparkle = sparkleConfiguration
+        betaIconSelectionError = nil
+    }
+
+    private var usesIconComposerProject: Bool {
+        guard repository.buildMode == .xcodeArchive else {
+            return false
+        }
+
+        if let projectPath = repository.xcode?.projectPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !projectPath.isEmpty {
+            let pbxprojPath = (projectPath as NSString).expandingTildeInPath + "/project.pbxproj"
+            if let text = try? String(contentsOfFile: pbxprojPath, encoding: .utf8),
+               text.contains("folder.iconcomposer.icon") {
+                return true
+            }
+        }
+
+        let checkoutPath = (repository.localCheckoutPath as NSString).expandingTildeInPath
+        guard !checkoutPath.isEmpty,
+              let enumerator = FileManager.default.enumerator(atPath: checkoutPath) else {
+            return false
+        }
+
+        for case let relativePath as String in enumerator {
+            guard relativePath.hasSuffix(".xcodeproj/project.pbxproj") else {
+                continue
+            }
+            let fullPath = "\(checkoutPath)/\(relativePath)"
+            if let text = try? String(contentsOfFile: fullPath, encoding: .utf8),
+               text.contains("folder.iconcomposer.icon") {
+                return true
+            }
+        }
+
+        if containsIconComposerAsset(under: checkoutPath) {
+            return true
+        }
+
+        return false
+    }
+
+    private func containsIconComposerAsset(under rootPath: String) -> Bool {
+        guard !rootPath.isEmpty,
+              let enumerator = FileManager.default.enumerator(atPath: rootPath) else {
+            return false
+        }
+
+        for case let relativePath as String in enumerator {
+            if relativePath.lowercased().hasSuffix(".icon") {
+                return true
+            }
+        }
+
+        return false
     }
 }
 

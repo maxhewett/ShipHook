@@ -19,6 +19,9 @@ struct ShipHookApp: App {
             ContentView()
                 .environmentObject(appState)
                 .environmentObject(updater)
+                .task {
+                    BetaBranding.applyBetaApplicationIconIfNeeded()
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
@@ -37,6 +40,48 @@ struct ShipHookApp: App {
                 .disabled(!updater.canCheckForUpdates)
             }
         }
+    }
+}
+
+private enum BetaBranding {
+    private static var didApply = false
+    private static let preferredResourceNames = [
+        "shiphook-beta-appicon",
+        "shiphookbetaicon",
+        "AppIconBeta",
+        "ShipHookBetaIcon",
+    ]
+
+    static func applyBetaApplicationIconIfNeeded() {
+        guard !didApply else {
+            return
+        }
+        didApply = true
+
+        guard AppBuildChannel.current == .beta else {
+            return
+        }
+
+        for name in preferredResourceNames {
+            if let image = loadImage(named: name) {
+                NSApplication.shared.applicationIconImage = image
+                break
+            }
+        }
+    }
+
+    private static func loadImage(named baseName: String) -> NSImage? {
+        if let url = Bundle.main.url(forResource: baseName, withExtension: "icns"),
+           let image = NSImage(contentsOf: url) {
+            return image
+        }
+
+        if let url = Bundle.main.url(forResource: baseName, withExtension: "png"),
+           let image = NSImage(contentsOf: url) {
+            return image
+        }
+
+        return nil
     }
 }
 

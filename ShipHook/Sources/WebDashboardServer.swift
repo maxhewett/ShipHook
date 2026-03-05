@@ -14,6 +14,7 @@ struct WebDashboardSnapshot: Codable {
         var activity: String
         var phase: String
         var summary: String
+        var releaseChannel: String?
         var version: String?
         var publishedVersion: String?
         var lastSeenSHA: String?
@@ -33,6 +34,7 @@ struct WebDashboardSnapshot: Codable {
         var version: String
         var sha: String
         var builtAt: Date
+        var releaseChannel: String?
     }
 
     struct Progress: Codable {
@@ -252,6 +254,19 @@ final class WebDashboardServer {
     .history-item {
       padding: 10px 12px; border-radius: 14px; background: rgba(255,255,255,.04); font-size: 12px;
     }
+    .channel-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,191,71,.35);
+      background: rgba(255,191,71,.15);
+      color: var(--amber);
+      font-size: 11px;
+      font-weight: 700;
+      margin-left: 8px;
+    }
     pre {
       margin: 14px 0 0; padding: 12px; border-radius: 16px;
       background: rgba(3,8,13,.5); color: rgba(255,255,255,.84);
@@ -320,6 +335,10 @@ final class WebDashboardServer {
           '</div>';
       }
 
+      function betaBadge(channel) {
+        return channel === "beta" ? '<span class="channel-badge">Beta</span>' : "";
+      }
+
       var history = '<div class="empty">No ShipHook build history yet.</div>';
       if (repo.recentBuilds && repo.recentBuilds.length) {
         var historyItems = "";
@@ -327,7 +346,7 @@ final class WebDashboardServer {
           var build = repo.recentBuilds[i];
           historyItems +=
             '<div class="history-item">' +
-              '<span>' + escapeHtml(build.version || "Unknown version") + '</span>' +
+              '<span>' + escapeHtml(build.version || "Unknown version") + betaBadge(build.releaseChannel) + '</span>' +
               '<span>' + shortSHA(build.sha) + ' · ' + formatDate(build.builtAt) + '</span>' +
             '</div>';
         }
@@ -353,7 +372,7 @@ final class WebDashboardServer {
           '<div class="versions">' +
             '<div>' +
               '<strong>Current Version</strong>' +
-              '<span>' + escapeHtml(repo.version || "Unknown") + '</span>' +
+              '<span>' + escapeHtml(repo.version || "Unknown") + betaBadge(repo.releaseChannel) + '</span>' +
             '</div>' +
             '<div>' +
               '<strong>Published</strong>' +
