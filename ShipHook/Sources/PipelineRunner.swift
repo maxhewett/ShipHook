@@ -45,6 +45,7 @@ struct PipelineRunner {
         repository: RepositoryConfiguration,
         snapshot: GitHubBranchSnapshot,
         onStageChange: ((PipelineStage) -> Void)? = nil,
+        onVersionResolved: ((AppVersion) -> Void)? = nil,
         onOutput: ((String) -> Void)? = nil
     ) throws -> PipelineOutcome {
         let workspaceRoot = FileManager.default.currentDirectoryPath
@@ -88,6 +89,12 @@ struct PipelineRunner {
 
         let version = releasePlan?.version.marketingVersion ?? makeVersion(for: repository, snapshot: effectiveSnapshot)
         let buildVersion = releasePlan?.version.buildVersion ?? ""
+        onVersionResolved?(
+            AppVersion(
+                marketingVersion: version,
+                buildVersion: buildVersion
+            )
+        )
         let releaseNotesSource = try resolvedReleaseNotesSource(
             for: repository,
             snapshot: effectiveSnapshot,

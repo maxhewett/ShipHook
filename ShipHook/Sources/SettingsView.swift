@@ -78,6 +78,35 @@ struct SettingsView: View {
             Text("GitHub token is optional for public repositories, recommended for rate limits, and required for private repositories. ShipHook reads the token from the environment variable named above.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            HStack(alignment: .top, spacing: 14) {
+                settingsStepper(
+                    title: "Builds to Keep",
+                    symbol: "externaldrive.badge.timemachine",
+                    value: Binding(
+                        get: { max(1, appState.configuration.generatedDataRetentionCount) },
+                        set: { newValue in
+                            appState.configuration.generatedDataRetentionCount = max(1, newValue)
+                        }
+                    ),
+                    range: 1...50
+                )
+                settingsStepper(
+                    title: "Auto Pause After Fails",
+                    symbol: "pause.circle",
+                    value: Binding(
+                        get: { max(1, appState.configuration.autoPauseFailureCount) },
+                        set: { newValue in
+                            appState.configuration.autoPauseFailureCount = max(1, newValue)
+                        }
+                    ),
+                    range: 1...20
+                )
+            }
+
+            Text("ShipHook automatically prunes old generated archives/logs/notarisation/release-note temp files after each build. Build history is never pruned.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .glassSection()
     }
@@ -217,6 +246,26 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
             TextField(prompt, text: text)
                 .textFieldStyle(.roundedBorder)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func settingsStepper(title: String, symbol: String, value: Binding<Int>, range: ClosedRange<Int>) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: symbol)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Stepper(value: value, in: range) {
+                    Text("\(value.wrappedValue)")
+                        .font(.body.monospacedDigit())
+                        .frame(minWidth: 28, alignment: .trailing)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

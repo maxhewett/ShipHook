@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var appState: AppState
+    @StateObject private var repositoryIconCache = RepositoryIconCache()
     @State private var selectedRepositoryID: String?
     @State private var showingAddRepositoryWizard = false
     @State private var repositoryPendingDeletion: RepositoryConfiguration?
@@ -346,37 +347,7 @@ struct ContentView: View {
     }
 
     private func repositoryIcon(for repository: RepositoryConfiguration) -> NSImage {
-        if let artifactPath = repository.xcode?.artifactPath {
-            let expandedPath = (artifactPath as NSString).expandingTildeInPath
-            if FileManager.default.fileExists(atPath: expandedPath) {
-                return NSWorkspace.shared.icon(forFile: expandedPath)
-            }
-        }
-
-        let checkoutPath = (repository.localCheckoutPath as NSString).expandingTildeInPath
-        if FileManager.default.fileExists(atPath: checkoutPath) {
-            return NSWorkspace.shared.icon(forFile: checkoutPath)
-        }
-
-        if let projectPath = repository.xcode?.projectPath {
-            let expandedProjectPath = (projectPath as NSString).expandingTildeInPath
-            if FileManager.default.fileExists(atPath: expandedProjectPath) {
-                return NSWorkspace.shared.icon(forFile: expandedProjectPath)
-            }
-        }
-
-        if let workspacePath = repository.xcode?.workspacePath {
-            let expandedWorkspacePath = (workspacePath as NSString).expandingTildeInPath
-            if FileManager.default.fileExists(atPath: expandedWorkspacePath) {
-                return NSWorkspace.shared.icon(forFile: expandedWorkspacePath)
-            }
-        }
-
-        if #available(macOS 12.0, *) {
-            return NSWorkspace.shared.icon(for: .application)
-        }
-
-        return NSWorkspace.shared.icon(forFileType: "app")
+        repositoryIconCache.icon(for: repository)
     }
 
     private func phaseBadgeLabel(for phase: RepositoryBuildPhase) -> String {
@@ -460,6 +431,65 @@ struct ContentView: View {
     }
 }
 
+private final class RepositoryIconCache: ObservableObject {
+    private let cache = NSCache<NSString, NSImage>()
+
+    func icon(for repository: RepositoryConfiguration) -> NSImage {
+        let key = cacheKey(for: repository)
+        if let cached = cache.object(forKey: key as NSString) {
+            return cached
+        }
+
+        let icon = resolveIcon(for: repository)
+        cache.setObject(icon, forKey: key as NSString)
+        return icon
+    }
+
+    private func cacheKey(for repository: RepositoryConfiguration) -> String {
+        [
+            repository.id,
+            repository.localCheckoutPath,
+            repository.xcode?.artifactPath ?? "",
+            repository.xcode?.projectPath ?? "",
+            repository.xcode?.workspacePath ?? "",
+        ].joined(separator: "|")
+    }
+
+    private func resolveIcon(for repository: RepositoryConfiguration) -> NSImage {
+        if let artifactPath = repository.xcode?.artifactPath {
+            let expandedPath = (artifactPath as NSString).expandingTildeInPath
+            if FileManager.default.fileExists(atPath: expandedPath) {
+                return NSWorkspace.shared.icon(forFile: expandedPath)
+            }
+        }
+
+        let checkoutPath = (repository.localCheckoutPath as NSString).expandingTildeInPath
+        if FileManager.default.fileExists(atPath: checkoutPath) {
+            return NSWorkspace.shared.icon(forFile: checkoutPath)
+        }
+
+        if let projectPath = repository.xcode?.projectPath {
+            let expandedProjectPath = (projectPath as NSString).expandingTildeInPath
+            if FileManager.default.fileExists(atPath: expandedProjectPath) {
+                return NSWorkspace.shared.icon(forFile: expandedProjectPath)
+            }
+        }
+
+        if let workspacePath = repository.xcode?.workspacePath {
+            let expandedWorkspacePath = (workspacePath as NSString).expandingTildeInPath
+            if FileManager.default.fileExists(atPath: expandedWorkspacePath) {
+                return NSWorkspace.shared.icon(forFile: expandedWorkspacePath)
+            }
+        }
+
+        if #available(macOS 12.0, *) {
+            return NSWorkspace.shared.icon(for: .application)
+        }
+
+        return NSWorkspace.shared.icon(forFileType: "app")
+    }
+}
+
 private struct AddRepositoryWizard: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -475,8 +505,8 @@ private struct AddRepositoryWizard: View {
     @State private var selectedScheme = ""
     @State private var appcastURL = ""
     @State private var autoIncrementBuild = false
-    @State private var developmentTeam = ""
-    @State private var codeSignIdentity = ""
+    @State private var selectedSigningIdentity = ""
+    @State private var selectedDevelopmentTeam = ""
     @State private var codeSignStyle: SigningConfiguration.CodeSignStyle = .automatic
     @State private var notarizationProfile = ""
     @State private var statusMessage = "Point ShipHook at a local checkout. It will inspect the repo, detect Xcode settings, and generate build/archive/publish defaults."
@@ -722,8 +752,8 @@ private struct AddRepositoryWizard: View {
                 skipIfVersionIsNotNewer: true
             )
             repository.signing = SigningConfiguration(
-                developmentTeam: developmentTeam.isEmpty ? nil : developmentTeam,
-                codeSignIdentity: codeSignIdentity.isEmpty ? nil : codeSignIdentity,
+                developmentTeam: selectedDevelopmentTeam.isEmpty ? nil : selectedDevelopmentTeam,
+                codeSignIdentity: selectedSigningIdentity.isEmpty ? nil : selectedSigningIdentity,
                 codeSignStyle: codeSignStyle,
                 notarizationProfile: notarizationProfile.isEmpty ? nil : notarizationProfile
             )
@@ -758,15 +788,15 @@ private struct AddRepositoryWizard: View {
         Binding(
             get: {
                 SigningConfiguration(
-                    developmentTeam: developmentTeam.isEmpty ? nil : developmentTeam,
-                    codeSignIdentity: codeSignIdentity.isEmpty ? nil : codeSignIdentity,
+                    developmentTeam: selectedDevelopmentTeam.isEmpty ? nil : selectedDevelopmentTeam,
+                    codeSignIdentity: selectedSigningIdentity.isEmpty ? nil : selectedSigningIdentity,
                     codeSignStyle: codeSignStyle,
                     notarizationProfile: notarizationProfile.isEmpty ? nil : notarizationProfile
                 )
             },
             set: { newValue in
-                developmentTeam = newValue.developmentTeam ?? ""
-                codeSignIdentity = newValue.codeSignIdentity ?? ""
+                selectedDevelopmentTeam = newValue.developmentTeam ?? ""
+                selectedSigningIdentity = newValue.codeSignIdentity ?? ""
                 codeSignStyle = newValue.codeSignStyle
                 notarizationProfile = newValue.notarizationProfile ?? ""
             }
@@ -774,14 +804,16 @@ private struct AddRepositoryWizard: View {
     }
 
     private func applyRecommendedSigningIdentityIfNeeded() {
-        guard codeSignIdentity.isEmpty, let identity = appState.availableSigningIdentities.first(where: \.isRecommendedForSparkle) ?? appState.availableSigningIdentities.first else {
+        guard let identity = appState.availableSigningIdentities.first(where: \.isRecommendedForSparkle) ?? appState.availableSigningIdentities.first else {
             return
         }
-
-        codeSignIdentity = identity.commonName
-        if developmentTeam.isEmpty, let teamID = identity.teamID {
-            developmentTeam = teamID
-        }
+        // Preload wizard signing config so manual mode has sensible defaults.
+        var config = signingConfigurationBinding.wrappedValue
+        config.codeSignIdentity = identity.commonName
+        config.developmentTeam = identity.teamID
+        signingConfigurationBinding.wrappedValue = config
+        selectedSigningIdentity = identity.commonName
+        selectedDevelopmentTeam = identity.teamID ?? ""
     }
 }
 
@@ -879,11 +911,6 @@ private struct SigningOverridesEditor: View {
                             .foregroundStyle(.red)
                     }
 
-                    HStack(alignment: .top, spacing: 14) {
-                        labeledField("Development Team", symbol: "person.3", text: developmentTeamBinding)
-                        labeledField("Code Sign Identity", symbol: "key", text: codeSignIdentityBinding)
-                    }
-
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 6) {
                             Label("Notary Profile", systemImage: "checkmark.seal")
@@ -951,7 +978,7 @@ private struct SigningOverridesEditor: View {
                             .font(.headline)
                     }
 
-                    Text("If the certificate is already installed on this Mac, pick it from the menu and ShipHook will fill the fields. The notary profile is just the local keychain profile name that `notarytool` uses on this Mac, not an Apple-side identifier.")
+                    Text("If the certificate is already installed on this Mac, pick it from the menu and ShipHook will apply it automatically. The notary profile is just the local keychain profile name that `notarytool` uses on this Mac, not an Apple-side identifier.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -991,30 +1018,16 @@ private struct SigningOverridesEditor: View {
             set: { newValue in
                 if newValue.isEmpty {
                     signing.codeSignIdentity = nil
+                    signing.developmentTeam = nil
                     return
                 }
 
                 signing.codeSignIdentity = newValue
                 if let identity = identities.first(where: { $0.commonName == newValue }),
-                   signing.developmentTeam?.isEmpty != false,
                    let teamID = identity.teamID {
                     signing.developmentTeam = teamID
                 }
             }
-        )
-    }
-
-    private var developmentTeamBinding: Binding<String> {
-        Binding(
-            get: { signing.developmentTeam ?? "" },
-            set: { signing.developmentTeam = $0.isEmpty ? nil : $0 }
-        )
-    }
-
-    private var codeSignIdentityBinding: Binding<String> {
-        Binding(
-            get: { signing.codeSignIdentity ?? "" },
-            set: { signing.codeSignIdentity = $0.isEmpty ? nil : $0 }
         )
     }
 
@@ -1338,7 +1351,6 @@ private struct RepositoryEditor: View {
 
                         HStack(alignment: .top, spacing: 14) {
                             labeledField("Branch", symbol: "point.topleft.down.curvedto.point.bottomright.up", text: $repository.branch)
-                            labeledField("Repository ID", symbol: "number", text: $repository.id)
                         }
                     }
 

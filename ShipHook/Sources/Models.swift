@@ -3,6 +3,8 @@ import Foundation
 struct AppConfiguration: Codable, Hashable {
     var pollIntervalSeconds: TimeInterval
     var githubTokenEnvVar: String?
+    var generatedDataRetentionCount: Int
+    var autoPauseFailureCount: Int
     var webDashboardEnabled: Bool
     var webDashboardPort: Int
     var repositories: [RepositoryConfiguration]
@@ -10,6 +12,8 @@ struct AppConfiguration: Codable, Hashable {
     static let `default` = AppConfiguration(
         pollIntervalSeconds: 300,
         githubTokenEnvVar: "GITHUB_TOKEN",
+        generatedDataRetentionCount: 3,
+        autoPauseFailureCount: 3,
         webDashboardEnabled: false,
         webDashboardPort: 8787,
         repositories: []
@@ -22,6 +26,8 @@ struct AppConfiguration: Codable, Hashable {
     enum CodingKeys: String, CodingKey {
         case pollIntervalSeconds
         case githubTokenEnvVar
+        case generatedDataRetentionCount
+        case autoPauseFailureCount
         case webDashboardEnabled
         case webDashboardPort
         case repositories
@@ -30,12 +36,16 @@ struct AppConfiguration: Codable, Hashable {
     init(
         pollIntervalSeconds: TimeInterval,
         githubTokenEnvVar: String?,
+        generatedDataRetentionCount: Int,
+        autoPauseFailureCount: Int,
         webDashboardEnabled: Bool,
         webDashboardPort: Int,
         repositories: [RepositoryConfiguration]
     ) {
         self.pollIntervalSeconds = pollIntervalSeconds
         self.githubTokenEnvVar = githubTokenEnvVar
+        self.generatedDataRetentionCount = max(1, generatedDataRetentionCount)
+        self.autoPauseFailureCount = max(1, autoPauseFailureCount)
         self.webDashboardEnabled = webDashboardEnabled
         self.webDashboardPort = webDashboardPort
         self.repositories = repositories
@@ -45,6 +55,8 @@ struct AppConfiguration: Codable, Hashable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         pollIntervalSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .pollIntervalSeconds) ?? 300
         githubTokenEnvVar = try container.decodeIfPresent(String.self, forKey: .githubTokenEnvVar) ?? "GITHUB_TOKEN"
+        generatedDataRetentionCount = max(1, try container.decodeIfPresent(Int.self, forKey: .generatedDataRetentionCount) ?? 3)
+        autoPauseFailureCount = max(1, try container.decodeIfPresent(Int.self, forKey: .autoPauseFailureCount) ?? 3)
         webDashboardEnabled = try container.decodeIfPresent(Bool.self, forKey: .webDashboardEnabled) ?? false
         webDashboardPort = try container.decodeIfPresent(Int.self, forKey: .webDashboardPort) ?? 8787
         repositories = try container.decodeIfPresent([RepositoryConfiguration].self, forKey: .repositories) ?? []
@@ -54,6 +66,8 @@ struct AppConfiguration: Codable, Hashable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(pollIntervalSeconds, forKey: .pollIntervalSeconds)
         try container.encodeIfPresent(githubTokenEnvVar, forKey: .githubTokenEnvVar)
+        try container.encode(max(1, generatedDataRetentionCount), forKey: .generatedDataRetentionCount)
+        try container.encode(max(1, autoPauseFailureCount), forKey: .autoPauseFailureCount)
         try container.encode(webDashboardEnabled, forKey: .webDashboardEnabled)
         try container.encode(webDashboardPort, forKey: .webDashboardPort)
         try container.encode(repositories, forKey: .repositories)

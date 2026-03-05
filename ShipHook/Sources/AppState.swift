@@ -38,11 +38,17 @@ final class AppState: ObservableObject {
     private let releasePlanner = ReleasePlanner()
     private let signingInspector = SigningInspector()
     private let commandRunner = ShellCommandRunner()
+    private var buildHistoryByRepository: [String: [BuildRecord]] = [:]
+    private var latestBuildByRepository: [String: BuildRecord] = [:]
     private var pollingTask: Task<Void, Never>?
     private var inFlightBuilds: Set<String> = []
     private var queuedBuilds: [String: (repository: RepositoryConfiguration, snapshot: GitHubBranchSnapshot)] = [:]
     private var queuedBuildOrder: [String] = []
     private var activeBuildRepositoryID: String?
+    private var buildVersionsInFlight: [String: AppVersion] = [:]
+    private var logBuffers: [String: String] = [:]
+    private var logFlushTasks: [String: Task<Void, Never>] = [:]
+    private var consecutiveBuildFailures: [String: Int] = [:]
     private let ignoredCommitMarkers = ["[shiphook skip]", "[skip shiphook]"]
     private let notarizationProfilesDefaultsKey = "ShipHookKnownNotarizationProfiles"
     private var lastSavedConfiguration: AppConfiguration = .default
@@ -130,6 +136,11 @@ final class AppState: ObservableObject {
             inFlightBuilds.remove(repositoryID)
             queuedBuilds.removeValue(forKey: repositoryID)
             queuedBuildOrder.removeAll { queuedID in queuedID == repositoryID }
+            buildHistoryByRepository.removeValue(forKey: repositoryID)
+            latestBuildByRepository.removeValue(forKey: repositoryID)
+            logBuffers.removeValue(forKey: repositoryID)
+            logFlushTasks[repositoryID]?.cancel()
+            logFlushTasks.removeValue(forKey: repositoryID)
         }
     }
 
@@ -365,13 +376,11 @@ final class AppState: ObservableObject {
     }
 
     func history(for repositoryID: String) -> [BuildRecord] {
-        buildHistory
-            .filter { $0.repositoryID == repositoryID }
-            .sorted { $0.builtAt > $1.builtAt }
+        buildHistoryByRepository[repositoryID] ?? []
     }
 
     func latestBuildRecord(for repositoryID: String) -> BuildRecord? {
-        history(for: repositoryID).first
+        latestBuildByRepository[repositoryID]
     }
 
     func displayedVersion(for repository: RepositoryConfiguration) -> String? {
@@ -396,6 +405,11 @@ final class AppState: ObservableObject {
         inFlightBuilds.remove(repositoryID)
         queuedBuilds.removeValue(forKey: repositoryID)
         queuedBuildOrder.removeAll { $0 == repositoryID }
+        buildVersionsInFlight.removeValue(forKey: repositoryID)
+        logBuffers.removeValue(forKey: repositoryID)
+        logFlushTasks[repositoryID]?.cancel()
+        logFlushTasks.removeValue(forKey: repositoryID)
+        consecutiveBuildFailures[repositoryID] = 0
         if activeBuildRepositoryID == repositoryID {
             activeBuildRepositoryID = nil
         }
@@ -409,6 +423,8 @@ final class AppState: ObservableObject {
     }
 
     private func normalizeConfiguration() {
+        configuration.generatedDataRetentionCount = max(1, configuration.generatedDataRetentionCount)
+        configuration.autoPauseFailureCount = max(1, configuration.autoPauseFailureCount)
         configuration.repositories = configuration.repositories.map { repository in
             var repository = repository
             if var xcode = repository.xcode {
@@ -559,6 +575,10 @@ final class AppState: ObservableObject {
 
             inFlightBuilds.insert(repository.id)
             activeBuildRepositoryID = repository.id
+            buildVersionsInFlight.removeValue(forKey: repository.id)
+            logBuffers[repository.id] = ""
+            logFlushTasks[repository.id]?.cancel()
+            logFlushTasks.removeValue(forKey: repository.id)
             updateState(for: repository.id) {
                 $0.activity = .building
                 $0.buildStartedAt = Date()
@@ -575,6 +595,10 @@ final class AppState: ObservableObject {
                         Task { @MainActor [weak self] in
                             self?.updateBuildStage(stage, for: repository.id, sha: snapshot.sha)
                         }
+                    }, onVersionResolved: { version in
+                        Task { @MainActor [weak self] in
+                            self?.updateResolvedBuildVersion(version, for: repository.id, sha: snapshot.sha)
+                        }
                     }, onOutput: { chunk in
                         Task { @MainActor [weak self] in
                             self?.appendLog(chunk, for: repository.id)
@@ -584,12 +608,13 @@ final class AppState: ObservableObject {
                 await self?.finishBuild(for: repository, snapshot: snapshot, result: result)
             }
         } catch {
-            updateState(for: repository.id) {
-                $0.activity = .failed
-                $0.lastError = error.localizedDescription
-                $0.buildPhase = .idle
-                $0.summary = "GitHub poll failed: \(error.localizedDescription)"
-            }
+            handleFailure(
+                for: repository,
+                snapshot: nil,
+                error: error,
+                summary: "GitHub poll failed: \(error.localizedDescription)",
+                incrementsFailureStreak: false
+            )
         }
     }
 
@@ -599,6 +624,11 @@ final class AppState: ObservableObject {
         result: Result<PipelineOutcome, Error>
     ) {
         inFlightBuilds.remove(repository.id)
+        buildVersionsInFlight.removeValue(forKey: repository.id)
+        flushLogBuffer(for: repository.id)
+        logBuffers.removeValue(forKey: repository.id)
+        logFlushTasks[repository.id]?.cancel()
+        logFlushTasks.removeValue(forKey: repository.id)
         if activeBuildRepositoryID == repository.id {
             activeBuildRepositoryID = nil
         }
@@ -611,11 +641,12 @@ final class AppState: ObservableObject {
                     $0.lastBuiltSHA = outcome.builtSHA
                     $0.buildStartedAt = nil
                     $0.buildPhase = .idle
-                    $0.lastLog = outcome.log
+                    $0.lastLog = tailLines(from: outcome.log, limit: 120)
                     $0.lastLogPath = outcome.logPath
                     $0.lastError = nil
                     $0.summary = outcome.summary
                 }
+                consecutiveBuildFailures[repository.id] = 0
                 startNextQueuedBuildIfPossible()
                 return
             }
@@ -634,25 +665,23 @@ final class AppState: ObservableObject {
                 $0.lastSuccessDate = historyRecord.builtAt
                 $0.buildStartedAt = nil
                 $0.buildPhase = .idle
-                $0.lastLog = outcome.log
+                $0.lastLog = tailLines(from: outcome.log, limit: 120)
                 $0.lastLogPath = outcome.logPath
                 $0.lastError = nil
                 $0.summary = outcome.summary
             }
+            consecutiveBuildFailures[repository.id] = 0
         case let .failure(error):
-            updateState(for: repository.id) {
-                $0.activity = .failed
-                $0.buildStartedAt = nil
-                $0.buildPhase = .idle
-                $0.lastError = error.localizedDescription
-                if $0.lastLog.isEmpty {
-                    $0.lastLog = error.localizedDescription
-                }
-                $0.summary = "Build or publish failed"
-            }
-            postFailureDiscordWebhookIfNeeded(repository: repository, snapshot: snapshot, error: error)
+            handleFailure(
+                for: repository,
+                snapshot: snapshot,
+                error: error,
+                summary: "Build or publish failed",
+                incrementsFailureStreak: true
+            )
         }
 
+        pruneGeneratedData(for: repository)
         startNextQueuedBuildIfPossible()
     }
 
@@ -662,24 +691,93 @@ final class AppState: ObservableObject {
             switch stage {
             case let .syncing(message):
                 $0.buildPhase = .syncing
-                $0.summary = "Syncing \(String(sha.prefix(7))): \(message)"
+                $0.summary = stageSummary(for: .syncing, sha: sha, detail: message, repositoryID: repositoryID)
             case .planningRelease:
                 $0.buildPhase = .planningRelease
-                $0.summary = "Planning release for \(String(sha.prefix(7)))"
+                $0.summary = stageSummary(for: .planningRelease, sha: sha, detail: nil, repositoryID: repositoryID)
             case .archiving:
                 $0.buildPhase = .archiving
-                $0.summary = "Archiving app for \(String(sha.prefix(7)))"
+                $0.summary = stageSummary(for: .archiving, sha: sha, detail: nil, repositoryID: repositoryID)
             case .notarizing:
                 $0.buildPhase = .notarizing
-                $0.summary = "\(ShipHookLocale.notarising) app for \(String(sha.prefix(7)))"
+                $0.summary = stageSummary(for: .notarizing, sha: sha, detail: nil, repositoryID: repositoryID)
             case .publishing:
                 $0.buildPhase = .publishing
-                $0.summary = "Publishing update for \(String(sha.prefix(7)))"
+                $0.summary = stageSummary(for: .publishing, sha: sha, detail: nil, repositoryID: repositoryID)
             }
         }
     }
 
+    private func updateResolvedBuildVersion(_ version: AppVersion, for repositoryID: String, sha: String) {
+        buildVersionsInFlight[repositoryID] = version
+        updateState(for: repositoryID) { state in
+            guard state.activity == .building else {
+                return
+            }
+            state.summary = stageSummary(for: state.buildPhase, sha: sha, detail: nil, repositoryID: repositoryID)
+        }
+    }
+
+    private func stageSummary(for phase: RepositoryBuildPhase, sha: String, detail: String?, repositoryID: String) -> String {
+        let shortSHA = String(sha.prefix(7))
+        let buildContext = buildContextSuffix(for: repositoryID)
+        switch phase {
+        case .idle:
+            return "Building commit \(shortSHA)\(buildContext)"
+        case .queued:
+            return "Queued for build \(shortSHA)\(buildContext)"
+        case .syncing:
+            if let detail, !detail.isEmpty {
+                return "Syncing \(shortSHA)\(buildContext): \(detail)"
+            }
+            return "Syncing \(shortSHA)\(buildContext)"
+        case .planningRelease:
+            return "Planning release for \(shortSHA)\(buildContext)"
+        case .archiving:
+            return "Archiving app for \(shortSHA)\(buildContext)"
+        case .notarizing:
+            return "\(ShipHookLocale.notarising) app for \(shortSHA)\(buildContext)"
+        case .publishing:
+            return "Publishing update for \(shortSHA)\(buildContext)"
+        }
+    }
+
+    private func buildContextSuffix(for repositoryID: String) -> String {
+        guard let version = buildVersionsInFlight[repositoryID] else {
+            return ""
+        }
+        let marketing = version.marketingVersion.trimmingCharacters(in: .whitespacesAndNewlines)
+        let build = version.buildVersion.trimmingCharacters(in: .whitespacesAndNewlines)
+        if marketing.isEmpty && build.isEmpty {
+            return ""
+        }
+        if build.isEmpty {
+            return " (\(marketing))"
+        }
+        if marketing.isEmpty {
+            return " (build \(build))"
+        }
+        return " (\(marketing) • build \(build))"
+    }
+
     private func appendLog(_ chunk: String, for repositoryID: String) {
+        logBuffers[repositoryID, default: ""].append(chunk)
+        guard logFlushTasks[repositoryID] == nil else {
+            return
+        }
+
+        logFlushTasks[repositoryID] = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(200))
+            self?.flushLogBuffer(for: repositoryID)
+            self?.logFlushTasks.removeValue(forKey: repositoryID)
+        }
+    }
+
+    private func flushLogBuffer(for repositoryID: String) {
+        guard let chunk = logBuffers[repositoryID], !chunk.isEmpty else {
+            return
+        }
+        logBuffers[repositoryID] = ""
         updateState(for: repositoryID) {
             $0.lastLog = tailLines(from: $0.lastLog + chunk, limit: 120)
         }
@@ -709,6 +807,77 @@ final class AppState: ObservableObject {
         return ignoredCommitMarkers.contains(where: { message.contains($0) })
     }
 
+    private func handleFailure(
+        for repository: RepositoryConfiguration,
+        snapshot: GitHubBranchSnapshot?,
+        error: Error,
+        summary: String,
+        incrementsFailureStreak: Bool
+    ) {
+        var streak = consecutiveBuildFailures[repository.id] ?? 0
+        if incrementsFailureStreak {
+            streak += 1
+            consecutiveBuildFailures[repository.id] = streak
+        }
+
+        let autoPauseThreshold = max(1, configuration.autoPauseFailureCount)
+        let shouldAutoPause = incrementsFailureStreak && streak >= autoPauseThreshold
+        if shouldAutoPause {
+            setRepositoryEnabled(repository.id, enabled: false)
+            persistConfigurationQuietly()
+        }
+
+        updateState(for: repository.id) {
+            $0.activity = .failed
+            $0.buildStartedAt = nil
+            $0.buildPhase = .idle
+            $0.lastError = error.localizedDescription
+            if $0.lastLog.isEmpty {
+                $0.lastLog = error.localizedDescription
+            }
+            if shouldAutoPause {
+                $0.summary = "Build paused after \(streak) consecutive failures. Last error: \(error.localizedDescription)"
+            } else {
+                $0.summary = summary
+            }
+        }
+
+        postFailureDiscordWebhookIfNeeded(
+            repository: repository,
+            snapshot: snapshot,
+            error: error,
+            failureCount: streak,
+            autoPaused: shouldAutoPause
+        )
+
+        if shouldAutoPause {
+            postAutoPauseDiscordWebhookIfNeeded(
+                repository: repository,
+                snapshot: snapshot,
+                error: error,
+                failureCount: streak
+            )
+        }
+    }
+
+    private func setRepositoryEnabled(_ repositoryID: String, enabled: Bool) {
+        guard let index = configuration.repositories.firstIndex(where: { $0.id == repositoryID }) else {
+            return
+        }
+        configuration.repositories[index].isEnabled = enabled
+    }
+
+    private func persistConfigurationQuietly() {
+        do {
+            try configStore.saveConfiguration(configuration)
+            lastSavedConfiguration = configuration
+            refreshDirtyState()
+            lastGlobalError = nil
+        } catch {
+            lastGlobalError = error.localizedDescription
+        }
+    }
+
     private func updateState(for repositoryID: String, mutate: (inout RepositoryRuntimeState) -> Void) {
         var state = repoStates[repositoryID] ?? .initial(id: repositoryID)
         mutate(&state)
@@ -718,19 +887,187 @@ final class AppState: ObservableObject {
     private func loadBuildHistory() {
         do {
             buildHistory = try buildHistoryStore.loadHistory().sorted { $0.builtAt > $1.builtAt }
+            rebuildBuildHistoryIndex()
         } catch {
             buildHistory = []
+            buildHistoryByRepository = [:]
+            latestBuildByRepository = [:]
             lastGlobalError = error.localizedDescription
         }
     }
 
     private func appendBuildRecord(_ record: BuildRecord) {
         buildHistory.insert(record, at: 0)
+        var records = buildHistoryByRepository[record.repositoryID] ?? []
+        records.insert(record, at: 0)
+        buildHistoryByRepository[record.repositoryID] = records
+        latestBuildByRepository[record.repositoryID] = records.first
         do {
             try buildHistoryStore.saveHistory(buildHistory)
         } catch {
             lastGlobalError = error.localizedDescription
         }
+    }
+
+    private func rebuildBuildHistoryIndex() {
+        var grouped: [String: [BuildRecord]] = [:]
+        for record in buildHistory {
+            grouped[record.repositoryID, default: []].append(record)
+        }
+
+        for key in grouped.keys {
+            grouped[key]?.sort { $0.builtAt > $1.builtAt }
+        }
+
+        buildHistoryByRepository = grouped
+        latestBuildByRepository = grouped.compactMapValues { $0.first }
+    }
+
+    private func pruneGeneratedData(for repository: RepositoryConfiguration) {
+        let retentionCount = max(1, configuration.generatedDataRetentionCount)
+        let checkoutPath = (repository.localCheckoutPath as NSString).expandingTildeInPath
+        let appName = (repository.xcode?.appName.isEmpty == false ? repository.xcode?.appName : repository.name) ?? repository.name
+        let fileManager = FileManager.default
+
+        do {
+            try pruneItems(
+                atDirectory: "\(checkoutPath)/.shiphook/release-notes",
+                retentionCount: retentionCount,
+                include: { item in
+                    item.lastPathComponent.hasPrefix("\(repository.id)-") && item.pathExtension.lowercased() == "html"
+                }
+            )
+
+            try pruneItems(
+                atDirectory: "\(checkoutPath)/.shiphook/logs",
+                retentionCount: retentionCount,
+                include: { item in
+                    item.lastPathComponent.hasPrefix("\(repository.id)-") && item.pathExtension.lowercased() == "log"
+                }
+            )
+
+            try pruneItems(
+                atDirectory: "\(checkoutPath)/.shiphook/notarization",
+                retentionCount: retentionCount,
+                include: { item in
+                    let name = item.lastPathComponent
+                    return name.hasSuffix("-notary.zip")
+                        || (!appName.isEmpty && name.hasPrefix(appName) && name.hasSuffix(".zip"))
+                }
+            )
+
+            try pruneItems(
+                atDirectory: "\(checkoutPath)/.shiphook/archive",
+                retentionCount: retentionCount,
+                include: { $0.pathExtension.lowercased() == "xcarchive" }
+            )
+
+            try pruneItems(
+                atDirectory: "\(checkoutPath)/release-artifacts",
+                retentionCount: retentionCount,
+                include: { item in
+                    let name = item.lastPathComponent
+                    let ext = item.pathExtension.lowercased()
+                    guard ["zip", "dmg", "pkg"].contains(ext) else {
+                        return false
+                    }
+                    if appName.isEmpty {
+                        return true
+                    }
+                    return name.hasPrefix(appName + "-") || name.hasPrefix(appName + "_")
+                }
+            )
+
+            try pruneXcodeArchivesIfNeeded(for: repository, appName: appName, retentionCount: retentionCount, fileManager: fileManager)
+        } catch {
+            lastGlobalError = "Cleanup warning for \(repository.name): \(error.localizedDescription)"
+        }
+    }
+
+    private func pruneItems(
+        atDirectory directoryPath: String,
+        retentionCount: Int,
+        include: (URL) -> Bool
+    ) throws {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: directoryPath) else {
+            return
+        }
+
+        let directoryURL = URL(fileURLWithPath: directoryPath, isDirectory: true)
+        let urls = try fileManager.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )
+        let matching = urls.filter(include)
+        let sorted = matching.sorted { lhs, rhs in
+            modificationDate(for: lhs) > modificationDate(for: rhs)
+        }
+
+        guard sorted.count > retentionCount else {
+            return
+        }
+
+        for url in sorted.dropFirst(retentionCount) {
+            try? fileManager.removeItem(at: url)
+        }
+    }
+
+    private func pruneXcodeArchivesIfNeeded(
+        for repository: RepositoryConfiguration,
+        appName: String,
+        retentionCount: Int,
+        fileManager: FileManager
+    ) throws {
+        guard let archivePath = repository.xcode?.archivePath, !archivePath.isEmpty else {
+            return
+        }
+
+        let expandedArchivePath = (archivePath as NSString).expandingTildeInPath
+        let archivesRoot = ("~/Library/Developer/Xcode/Archives" as NSString).expandingTildeInPath
+        guard expandedArchivePath.hasPrefix(archivesRoot), !appName.isEmpty else {
+            return
+        }
+
+        let rootURL = URL(fileURLWithPath: archivesRoot, isDirectory: true)
+        guard fileManager.fileExists(atPath: rootURL.path) else {
+            return
+        }
+
+        var matchingArchives: [URL] = []
+        let enumerator = fileManager.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )
+
+        while let item = enumerator?.nextObject() as? URL {
+            guard item.pathExtension.lowercased() == "xcarchive" else {
+                continue
+            }
+            let name = item.deletingPathExtension().lastPathComponent
+            guard name.hasPrefix("\(appName) ") else {
+                continue
+            }
+            matchingArchives.append(item)
+        }
+
+        let sorted = matchingArchives.sorted { lhs, rhs in
+            modificationDate(for: lhs) > modificationDate(for: rhs)
+        }
+
+        guard sorted.count > retentionCount else {
+            return
+        }
+
+        for url in sorted.dropFirst(retentionCount) {
+            try? fileManager.removeItem(at: url)
+        }
+    }
+
+    private func modificationDate(for url: URL) -> Date {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
     }
 
     private func refreshPublishedVersions() {
@@ -764,8 +1101,49 @@ final class AppState: ObservableObject {
 
     private func postFailureDiscordWebhookIfNeeded(
         repository: RepositoryConfiguration,
-        snapshot: GitHubBranchSnapshot,
-        error: Error
+        snapshot: GitHubBranchSnapshot?,
+        error: Error,
+        failureCount: Int,
+        autoPaused: Bool
+    ) {
+        guard let notifications = repository.notifications,
+              notifications.postOnFailure,
+              let webhookURL = notifications.discordWebhookURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !webhookURL.isEmpty else {
+            return
+        }
+        guard let url = URL(string: webhookURL) else {
+            appendLog("Skipping Discord failure webhook: invalid URL.\n", for: repository.id)
+            return
+        }
+
+        let fields: [[String: Any]] = [
+            ["name": "Repository", "value": "\(repository.owner)/\(repository.repo)", "inline": true],
+            ["name": "Commit", "value": snapshot.map { String($0.sha.prefix(7)) } ?? "N/A", "inline": true],
+            ["name": "Branch", "value": repository.branch, "inline": true],
+            ["name": "Failure Count", "value": String(max(1, failureCount)), "inline": true],
+            ["name": "Auto-paused", "value": autoPaused ? "Yes" : "No", "inline": true],
+            ["name": "Error", "value": error.localizedDescription, "inline": false],
+        ]
+        let embed: [String: Any] = [
+            "title": "\(repository.name) build failed",
+            "description": snapshot?.message.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Build failed",
+            "url": snapshot?.htmlURL?.absoluteString ?? "",
+            "color": 15_704_317,
+            "fields": fields,
+        ]
+        let payload: [String: Any] = [
+            "content": "ShipHook failure for **\(repository.name)**: \(autoPaused ? "Build paused" : "Build failed").",
+            "embeds": [embed],
+        ]
+        sendDiscordWebhook(url: url, payload: payload, repositoryIDForLogging: repository.id, successLogLine: "Posted Discord failure webhook notification.\n")
+    }
+
+    private func postAutoPauseDiscordWebhookIfNeeded(
+        repository: RepositoryConfiguration,
+        snapshot: GitHubBranchSnapshot?,
+        error: Error,
+        failureCount: Int
     ) {
         guard let notifications = repository.notifications,
               notifications.postOnFailure,
@@ -775,32 +1153,82 @@ final class AppState: ObservableObject {
             return
         }
 
-        let payload: [String: Any] = [
-            "content": "ShipHook failed to build **\(repository.name)**.",
-            "embeds": [[
-                "title": "\(repository.name) build failed",
-                "description": snapshot.message.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Build failed",
-                "url": snapshot.htmlURL?.absoluteString ?? "",
-                "color": 15_704_317,
-                "fields": [
-                    ["name": "Repository", "value": "\(repository.owner)/\(repository.repo)", "inline": true],
-                    ["name": "Commit", "value": String(snapshot.sha.prefix(7)), "inline": true],
-                    ["name": "Branch", "value": repository.branch, "inline": true],
-                    ["name": "Error", "value": error.localizedDescription, "inline": false],
-                ],
-            ]]
+        let fields: [[String: Any]] = [
+            ["name": "Repository", "value": "\(repository.owner)/\(repository.repo)", "inline": true],
+            ["name": "Branch", "value": repository.branch, "inline": true],
+            ["name": "Last Commit", "value": snapshot.map { String($0.sha.prefix(7)) } ?? "N/A", "inline": true],
+            ["name": "Last Error", "value": error.localizedDescription, "inline": false],
         ]
+        let embed: [String: Any] = [
+            "title": "\(repository.name) build paused",
+            "description": "Builds paused after \(failureCount) consecutive failures.",
+            "url": snapshot?.htmlURL?.absoluteString ?? "",
+            "color": 16_667_136,
+            "fields": fields,
+        ]
+        let payload: [String: Any] = [
+            "content": "ShipHook paused **\(repository.name)** after repeated failures.",
+            "embeds": [embed],
+        ]
+        sendDiscordWebhook(url: url, payload: payload, repositoryIDForLogging: repository.id, successLogLine: "Posted Discord auto-pause webhook notification.\n")
+    }
 
+    private func sendDiscordWebhook(
+        url: URL,
+        payload: [String: Any],
+        repositoryIDForLogging: String? = nil,
+        successLogLine: String? = nil
+    ) {
         guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            if let repositoryIDForLogging {
+                appendLog("Skipping Discord webhook: could not encode payload.\n", for: repositoryIDForLogging)
+            }
             return
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = data
+        Task.detached(priority: .utility) {
+            var lastFailureLogLine: String?
+            var attempt = 0
+            while attempt < 2 {
+                attempt += 1
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = data
 
-        URLSession.shared.dataTask(with: request).resume()
+                do {
+                    let (_, response) = try await URLSession.shared.data(for: request)
+                    if let httpResponse = response as? HTTPURLResponse,
+                       (200..<300).contains(httpResponse.statusCode) {
+                        if let repositoryIDForLogging,
+                           let successLogLine {
+                            await MainActor.run {
+                                self.appendLog(successLogLine, for: repositoryIDForLogging)
+                            }
+                        }
+                        return
+                    }
+                    if let httpResponse = response as? HTTPURLResponse {
+                        lastFailureLogLine = "Discord webhook failed with HTTP \(httpResponse.statusCode).\n"
+                    } else {
+                        lastFailureLogLine = "Discord webhook failed: no HTTP response.\n"
+                    }
+                } catch {
+                    lastFailureLogLine = "Discord webhook failed: \(error.localizedDescription)\n"
+                }
+
+                if attempt < 2 {
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
+
+            if let repositoryIDForLogging,
+               let lastFailureLogLine {
+                await MainActor.run {
+                    self.appendLog(lastFailureLogLine, for: repositoryIDForLogging)
+                }
+            }
+        }
     }
 
     private func makeWebDashboardSnapshot() -> WebDashboardSnapshot {
