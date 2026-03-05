@@ -9,7 +9,17 @@ enum AppBuildChannel: String {
     }
 
     static func from(bundle: Bundle) -> AppBuildChannel {
+        if let explicit = bundle.object(forInfoDictionaryKey: "ShipHookIsBetaBuild") as? Bool,
+           explicit {
+            return .beta
+        }
+
         if let explicit = normalizedString(bundle.object(forInfoDictionaryKey: "ShipHookUpdateChannel")),
+           explicit == "beta" {
+            return .beta
+        }
+
+        if let explicit = normalizedString(bundle.object(forInfoDictionaryKey: "ShipHookReleaseChannel")),
            explicit == "beta" {
             return .beta
         }

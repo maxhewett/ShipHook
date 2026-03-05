@@ -81,14 +81,23 @@ struct PipelineRunner {
             synchronizedSHA: synchronizedSHA
         )
 
+        let releaseNotesSource = try resolvedReleaseNotesSource(
+            for: repository,
+            snapshot: effectiveSnapshot,
+            checkoutPath: checkoutPath
+        )
+
         onStageChange?(.planningRelease)
-        let snapshotChannel = releaseChannel(for: effectiveSnapshot)
+        let snapshotChannel = requestedReleaseChannel(
+            snapshotMessage: effectiveSnapshot.message,
+            releaseNotesMessage: releaseNotesSource.message
+        )
         var releasePlan = try releasePlanner.prepareRelease(for: repository, channel: snapshotChannel)
         var resolvedVersion = AppVersion(
             marketingVersion: releasePlan?.version.marketingVersion ?? makeVersion(for: repository, snapshot: effectiveSnapshot),
             buildVersion: releasePlan?.version.buildVersion ?? ""
         )
-        let releaseChannel = resolvedReleaseChannel(for: effectiveSnapshot, version: resolvedVersion)
+        let releaseChannel = resolvedReleaseChannel(requestedChannel: snapshotChannel, version: resolvedVersion)
         if releaseChannel != snapshotChannel {
             try? releasePlanner.restoreProjectVersionIfNeeded(releasePlan, xcode: repository.xcode)
             releasePlan = try releasePlanner.prepareRelease(for: repository, channel: releaseChannel)
@@ -104,11 +113,6 @@ struct PipelineRunner {
         let version = resolvedVersion.marketingVersion
         let buildVersion = resolvedVersion.buildVersion
         onVersionResolved?(resolvedVersion)
-        let releaseNotesSource = try resolvedReleaseNotesSource(
-            for: repository,
-            snapshot: effectiveSnapshot,
-            checkoutPath: checkoutPath
-        )
         let releaseNotesPath = try resolvedReleaseNotesPath(
             for: repository,
             releaseNotesSource: releaseNotesSource,
@@ -138,7 +142,7 @@ struct PipelineRunner {
             combinedLog += "Updated CURRENT_PROJECT_VERSION to \(releasePlan.version.buildVersion) before archive.\n"
         }
         if releaseChannel == .beta {
-            combinedLog += "Detected beta release channel from commit message.\n"
+            combinedLog += "Detected beta release channel from commit/release-notes markers.\n"
         }
         if let releasePlan, releasePlan.shouldSkipPublish {
             let summary = releasePlan.skipReason ?? "Skipped publish because the app version is not newer than the current appcast item."
@@ -193,6 +197,11 @@ struct PipelineRunner {
             repository: repository,
             releaseChannel: releaseChannel,
             checkoutPath: checkoutPath,
+            onOutput: appendOutput
+        )
+        try applyReleaseChannelMetadata(
+            artifactPath: artifactPath,
+            releaseChannel: releaseChannel,
             onOutput: appendOutput
         )
         let expectedTeamID = repository.signing?.developmentTeam
@@ -1049,6 +1058,38 @@ struct PipelineRunner {
         onOutput?("Applied beta icon \(sourceURL.lastPathComponent) to \(URL(fileURLWithPath: artifactPath).lastPathComponent).\n")
     }
 
+    private func applyReleaseChannelMetadata(
+        artifactPath: String,
+        releaseChannel: ReleaseChannel,
+        onOutput: ((String) -> Void)?
+    ) throws {
+        let infoPlistURL = URL(fileURLWithPath: artifactPath).appendingPathComponent("Contents/Info.plist")
+        guard let infoPlist = NSMutableDictionary(contentsOf: infoPlistURL) else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 840,
+                userInfo: [NSLocalizedDescriptionKey: "Could not load app Info.plist to apply release channel metadata at \(infoPlistURL.path)."]
+            )
+        }
+
+        // Persist a single boolean marker for beta builds.
+        if releaseChannel == .beta {
+            infoPlist["ShipHookIsBetaBuild"] = true
+        } else {
+            infoPlist.removeObject(forKey: "ShipHookIsBetaBuild")
+        }
+
+        guard infoPlist.write(to: infoPlistURL, atomically: true) else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 841,
+                userInfo: [NSLocalizedDescriptionKey: "Could not update Info.plist with release channel metadata."]
+            )
+        }
+
+        onOutput?("Embedded release channel metadata in app Info.plist (\(releaseChannel.rawValue)).\n")
+    }
+
     private func prepareBetaSourceIconOverrideIfNeeded(
         repository: RepositoryConfiguration,
         releaseChannel: ReleaseChannel,
@@ -1234,8 +1275,8 @@ struct PipelineRunner {
         return nil
     }
 
-    private func resolvedReleaseChannel(for snapshot: GitHubBranchSnapshot, version: AppVersion) -> ReleaseChannel {
-        if releaseChannel(for: snapshot) == .beta {
+    private func resolvedReleaseChannel(requestedChannel: ReleaseChannel, version: AppVersion) -> ReleaseChannel {
+        if requestedChannel == .beta {
             return .beta
         }
 
@@ -1257,6 +1298,13 @@ struct PipelineRunner {
         }
 
         return trimmed.hasPrefix("b")
+    }
+
+    private func requestedReleaseChannel(snapshotMessage: String, releaseNotesMessage: String) -> ReleaseChannel {
+        if releaseChannel(for: snapshotMessage) == .beta || releaseChannel(for: releaseNotesMessage) == .beta {
+            return .beta
+        }
+        return .stable
     }
 
     private func signingOverrides(for repository: RepositoryConfiguration) -> String {
@@ -1319,7 +1367,11 @@ private extension String {
 }
 
 private func releaseChannel(for snapshot: GitHubBranchSnapshot) -> ReleaseChannel {
-    let lowercasedMessage = snapshot.message.lowercased()
+    releaseChannel(for: snapshot.message)
+}
+
+private func releaseChannel(for message: String) -> ReleaseChannel {
+    let lowercasedMessage = message.lowercased()
     let betaMarkers = ["[beta]", "[shiphook beta]", "[pre-release]", "[prerelease]"]
     return betaMarkers.contains(where: { lowercasedMessage.contains($0) }) ? .beta : .stable
 }
