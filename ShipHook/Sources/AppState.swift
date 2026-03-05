@@ -590,6 +590,12 @@ final class AppState: ObservableObject {
                 $0.buildPhase = .idle
                 $0.summary = "GitHub poll failed: \(error.localizedDescription)"
             }
+            postFailureDiscordWebhookIfNeeded(
+                repository: repository,
+                snapshot: nil,
+                error: error,
+                summary: "GitHub poll failed"
+            )
         }
     }
 
@@ -650,7 +656,12 @@ final class AppState: ObservableObject {
                 }
                 $0.summary = "Build or publish failed"
             }
-            postFailureDiscordWebhookIfNeeded(repository: repository, snapshot: snapshot, error: error)
+            postFailureDiscordWebhookIfNeeded(
+                repository: repository,
+                snapshot: snapshot,
+                error: error,
+                summary: "Build or publish failed"
+            )
         }
 
         startNextQueuedBuildIfPossible()
@@ -764,43 +775,80 @@ final class AppState: ObservableObject {
 
     private func postFailureDiscordWebhookIfNeeded(
         repository: RepositoryConfiguration,
-        snapshot: GitHubBranchSnapshot,
-        error: Error
+        snapshot: GitHubBranchSnapshot?,
+        error: Error,
+        summary: String
     ) {
         guard let notifications = repository.notifications,
               notifications.postOnFailure,
               let webhookURL = notifications.discordWebhookURL?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !webhookURL.isEmpty,
-              let url = URL(string: webhookURL) else {
+              !webhookURL.isEmpty else {
+            return
+        }
+        guard let url = URL(string: webhookURL) else {
+            appendLog("Skipping Discord failure webhook: invalid URL.\n", for: repository.id)
             return
         }
 
+        let commitValue = snapshot.map { String($0.sha.prefix(7)) } ?? "Unknown"
+        let descriptionLine = snapshot?.message.split(whereSeparator: \.isNewline).first.map(String.init) ?? summary
         let payload: [String: Any] = [
-            "content": "ShipHook failed to build **\(repository.name)**.",
+            "content": "ShipHook failure for **\(repository.name)**: \(summary).",
             "embeds": [[
-                "title": "\(repository.name) build failed",
-                "description": snapshot.message.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Build failed",
-                "url": snapshot.htmlURL?.absoluteString ?? "",
+                "title": "\(repository.name) failed",
+                "description": descriptionLine,
+                "url": snapshot?.htmlURL?.absoluteString ?? "",
                 "color": 15_704_317,
                 "fields": [
                     ["name": "Repository", "value": "\(repository.owner)/\(repository.repo)", "inline": true],
-                    ["name": "Commit", "value": String(snapshot.sha.prefix(7)), "inline": true],
+                    ["name": "Commit", "value": commitValue, "inline": true],
                     ["name": "Branch", "value": repository.branch, "inline": true],
+                    ["name": "Failure", "value": summary, "inline": true],
                     ["name": "Error", "value": error.localizedDescription, "inline": false],
                 ],
             ]]
         ]
 
         guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            appendLog("Skipping Discord failure webhook: could not encode payload.\n", for: repository.id)
             return
         }
+        let repositoryID = repository.id
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = data
+        Task.detached(priority: .utility) {
+            var lastErrorMessage: String?
 
-        URLSession.shared.dataTask(with: request).resume()
+            for attempt in 1...2 {
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = data
+
+                do {
+                    let (_, response) = try await URLSession.shared.data(for: request)
+                    let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+                    if (200..<300).contains(statusCode) {
+                        await MainActor.run {
+                            self.appendLog("Posted Discord failure webhook notification.\n", for: repositoryID)
+                        }
+                        return
+                    }
+                    lastErrorMessage = "Discord failure webhook failed with HTTP \(statusCode)."
+                } catch {
+                    lastErrorMessage = "Discord failure webhook failed: \(error.localizedDescription)"
+                }
+
+                if attempt == 1 {
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
+
+            if let lastErrorMessage {
+                await MainActor.run {
+                    self.appendLog("\(lastErrorMessage)\n", for: repositoryID)
+                }
+            }
+        }
     }
 
     private func makeWebDashboardSnapshot() -> WebDashboardSnapshot {
