@@ -57,20 +57,26 @@ struct ReleasePlanner {
 
         let current = try inspectProjectVersion(xcode: xcode)
         let latest = try fetchLatestAppcastVersion(for: repository, channel: channel)
+        let desiredBuild = try computeNextBuild(
+            currentBuild: current.buildVersion,
+            latestAppcast: latest,
+            autoIncrement: repository.sparkle?.autoIncrementBuild ?? true
+        )
+        let candidate = AppVersion(marketingVersion: current.marketingVersion, buildVersion: desiredBuild)
+
         if let latest,
            repository.sparkle?.skipIfVersionIsNotNewer ?? true,
-           !isVersionNewer(current, than: latest) {
+           !isVersionNewer(candidate, than: latest) {
             return ReleasePlan(
-                version: current,
+                version: candidate,
                 appcastURL: resolvedAppcastURL(for: repository, channel: channel),
                 latestAppcastItem: latest,
                 appliedBuildMutation: false,
                 originalVersion: current,
                 shouldSkipPublish: true,
-                skipReason: "Skipping publish because \(current.marketingVersion) (\(current.buildVersion)) is not newer than the current appcast item."
+                skipReason: "Skipping publish because \(candidate.marketingVersion) (\(candidate.buildVersion)) is not newer than the current appcast item."
             )
         }
-        let desiredBuild = try computeNextBuild(currentBuild: current.buildVersion, latestAppcast: latest, autoIncrement: repository.sparkle?.autoIncrementBuild ?? true)
 
         var mutated = false
         if desiredBuild != current.buildVersion {

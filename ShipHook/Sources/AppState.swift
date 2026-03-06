@@ -9,6 +9,9 @@ final class AppState: ObservableObject {
         didSet {
             refreshDirtyState()
             refreshNotarizationProfiles()
+            if oldValue.pollIntervalSeconds != configuration.pollIntervalSeconds {
+                startPollingLoop()
+            }
             if oldValue.webDashboardEnabled != configuration.webDashboardEnabled
                 || oldValue.webDashboardPort != configuration.webDashboardPort {
                 applyWebDashboardConfiguration()
@@ -767,9 +770,12 @@ final class AppState: ObservableObject {
         pollingTask?.cancel()
         pollingTask = Task {
             while !Task.isCancelled {
+                let cycleStartedAt = Date()
                 await checkRepositories(force: false)
                 let interval = max(60, configuration.pollIntervalSeconds)
-                try? await Task.sleep(for: .seconds(interval))
+                let elapsed = Date().timeIntervalSince(cycleStartedAt)
+                let remaining = max(0, interval - elapsed)
+                try? await Task.sleep(for: .seconds(remaining))
             }
         }
     }

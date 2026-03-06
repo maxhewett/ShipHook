@@ -145,8 +145,48 @@ struct PipelineRunner {
             combinedLog += "Detected beta release channel from commit/release-notes markers.\n"
         }
         if let releasePlan, releasePlan.shouldSkipPublish {
-            let summary = releasePlan.skipReason ?? "Skipped publish because the app version is not newer than the current appcast item."
-            combinedLog += "\(summary)\n"
+            let skippedSummary = releasePlan.skipReason ?? "Skipped publish because the app version is not newer than the current appcast item."
+            combinedLog += "\(skippedSummary)\n"
+
+            if try shouldReconcileMissingRelease(
+                repository: repository,
+                version: version,
+                releaseChannel: releaseChannel,
+                workingDirectory: workingDirectory
+            ),
+               let reconcileArtifact = findExistingArtifactForReconcile(
+                   repository: repository,
+                   checkoutPath: checkoutPath,
+                   workingDirectory: workingDirectory,
+                   version: version,
+                   releaseChannel: releaseChannel
+               ) {
+                combinedLog += "Detected missing GitHub release for \(version); reconciling with \(URL(fileURLWithPath: reconcileArtifact).lastPathComponent).\n"
+                var publishEnvironment = baseEnvironment
+                publishEnvironment["SHIPHOOK_ARTIFACT_PATH"] = reconcileArtifact
+                onStageChange?(.publishing)
+                _ = try commandRunner.run(repository.publishCommand, currentDirectory: workingDirectory, environment: publishEnvironment, onOutput: appendOutput)
+                try verifyPublishedAppcast(
+                    repository: repository,
+                    checkoutPath: checkoutPath,
+                    releaseChannel: releaseChannel,
+                    expectedMarketingVersion: version,
+                    expectedBuildVersion: buildVersion
+                )
+                let summary = "Reconciled missing GitHub release for \(version)"
+                combinedLog += "\(summary)\n"
+                return PipelineOutcome(
+                    builtSHA: effectiveSnapshot.sha,
+                    version: version,
+                    artifactPath: reconcileArtifact,
+                    log: combinedLog,
+                    logPath: logPath,
+                    skippedPublish: false,
+                    summary: summary,
+                    releaseChannel: releaseChannel
+                )
+            }
+
             return PipelineOutcome(
                 builtSHA: effectiveSnapshot.sha,
                 version: version,
@@ -154,7 +194,7 @@ struct PipelineRunner {
                 log: combinedLog,
                 logPath: logPath,
                 skippedPublish: true,
-                summary: summary,
+                summary: skippedSummary,
                 releaseChannel: releaseChannel
             )
         }
@@ -1368,6 +1408,92 @@ struct PipelineRunner {
             return .beta
         }
         return .stable
+    }
+
+    private func shouldReconcileMissingRelease(
+        repository: RepositoryConfiguration,
+        version: String,
+        releaseChannel: ReleaseChannel,
+        workingDirectory: String
+    ) throws -> Bool {
+        guard commandExists("gh", currentDirectory: workingDirectory) else {
+            return false
+        }
+        guard (try? commandRunner.run("gh auth status", currentDirectory: workingDirectory, environment: [:])) != nil else {
+            return false
+        }
+
+        let tag = releaseTag(for: version, channel: releaseChannel)
+        do {
+            _ = try commandRunner.run(
+                "gh release view '\(tag)' --repo '\(repository.owner)/\(repository.repo)'",
+                currentDirectory: workingDirectory,
+                environment: [:]
+            )
+            return false
+        } catch {
+            return true
+        }
+    }
+
+    private func findExistingArtifactForReconcile(
+        repository: RepositoryConfiguration,
+        checkoutPath: String,
+        workingDirectory: String,
+        version: String,
+        releaseChannel: ReleaseChannel
+    ) -> String? {
+        let appName = inferredAppName(for: repository)
+        let suffix = releaseChannel == .beta ? "-beta" : ""
+        let expectedZip = "\(appName)-\(version)\(suffix).zip"
+
+        let fm = FileManager.default
+        let candidateDirectories = [
+            "\(checkoutPath)/release-artifacts",
+            "\(workingDirectory)/release-artifacts",
+        ]
+        for directory in candidateDirectories {
+            let path = "\(directory.expandingTildeInPath)/\(expectedZip)"
+            if fm.fileExists(atPath: path) {
+                return path
+            }
+        }
+
+        if let artifactPath = repository.xcode?.artifactPath.expandingTildeInPath,
+           fm.fileExists(atPath: artifactPath) {
+            return artifactPath
+        }
+        if let artifactPath = repository.shell?.artifactPath.expandingTildeInPath,
+           fm.fileExists(atPath: artifactPath) {
+            return artifactPath
+        }
+        return nil
+    }
+
+    private func inferredAppName(for repository: RepositoryConfiguration) -> String {
+        if let appName = repository.xcode?.appName.trimmingCharacters(in: .whitespacesAndNewlines),
+           !appName.isEmpty {
+            return appName
+        }
+        let trimmedName = repository.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedName.isEmpty {
+            return trimmedName
+        }
+        return repository.repo
+    }
+
+    private func releaseTag(for version: String, channel: ReleaseChannel) -> String {
+        let suffix = channel == .beta ? "-beta" : ""
+        return "v\(version)\(suffix)"
+    }
+
+    private func commandExists(_ command: String, currentDirectory: String) -> Bool {
+        do {
+            _ = try commandRunner.run("command -v \(command)", currentDirectory: currentDirectory, environment: [:])
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func signingOverrides(for repository: RepositoryConfiguration) -> String {
