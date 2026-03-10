@@ -37,6 +37,12 @@ enum PipelineStage {
     case publishing
 }
 
+private enum GitHubReleaseLookup {
+    case exists
+    case missing
+    case unknown
+}
+
 struct PipelineRunner {
     private let commandRunner = ShellCommandRunner()
     private let releasePlanner = ReleasePlanner()
@@ -195,6 +201,26 @@ struct PipelineRunner {
                 logPath: logPath,
                 skippedPublish: true,
                 summary: skippedSummary,
+                releaseChannel: releaseChannel
+            )
+        }
+
+        if try githubReleaseExists(
+            repository: repository,
+            version: version,
+            releaseChannel: releaseChannel,
+            workingDirectory: workingDirectory
+        ) {
+            let summary = "Skipping build because GitHub release \(releaseTag(for: version, channel: releaseChannel)) already exists."
+            combinedLog += "\(summary)\n"
+            return PipelineOutcome(
+                builtSHA: effectiveSnapshot.sha,
+                version: version,
+                artifactPath: "",
+                log: combinedLog,
+                logPath: logPath,
+                skippedPublish: true,
+                summary: summary,
                 releaseChannel: releaseChannel
             )
         }
@@ -1416,23 +1442,18 @@ struct PipelineRunner {
         releaseChannel: ReleaseChannel,
         workingDirectory: String
     ) throws -> Bool {
-        guard commandExists("gh", currentDirectory: workingDirectory) else {
+        switch try githubReleaseLookup(
+            repository: repository,
+            version: version,
+            releaseChannel: releaseChannel,
+            workingDirectory: workingDirectory
+        ) {
+        case .exists:
             return false
-        }
-        guard (try? commandRunner.run("gh auth status", currentDirectory: workingDirectory, environment: [:])) != nil else {
-            return false
-        }
-
-        let tag = releaseTag(for: version, channel: releaseChannel)
-        do {
-            _ = try commandRunner.run(
-                "gh release view '\(tag)' --repo '\(repository.owner)/\(repository.repo)'",
-                currentDirectory: workingDirectory,
-                environment: [:]
-            )
-            return false
-        } catch {
+        case .missing:
             return true
+        case .unknown:
+            return false
         }
     }
 
@@ -1485,6 +1506,57 @@ struct PipelineRunner {
     private func releaseTag(for version: String, channel: ReleaseChannel) -> String {
         let suffix = channel == .beta ? "-beta" : ""
         return "v\(version)\(suffix)"
+    }
+
+    private func githubReleaseExists(
+        repository: RepositoryConfiguration,
+        version: String,
+        releaseChannel: ReleaseChannel,
+        workingDirectory: String
+    ) throws -> Bool {
+        switch try githubReleaseLookup(
+            repository: repository,
+            version: version,
+            releaseChannel: releaseChannel,
+            workingDirectory: workingDirectory
+        ) {
+        case .exists:
+            return true
+        case .missing, .unknown:
+            return false
+        }
+    }
+
+    private func githubReleaseLookup(
+        repository: RepositoryConfiguration,
+        version: String,
+        releaseChannel: ReleaseChannel,
+        workingDirectory: String
+    ) throws -> GitHubReleaseLookup {
+        guard commandExists("gh", currentDirectory: workingDirectory) else {
+            return .unknown
+        }
+        guard (try? commandRunner.run("gh auth status", currentDirectory: workingDirectory, environment: [:])) != nil else {
+            return .unknown
+        }
+
+        let tag = releaseTag(for: version, channel: releaseChannel)
+        do {
+            _ = try commandRunner.run(
+                "gh release view '\(tag)' --repo '\(repository.owner)/\(repository.repo)' --json id",
+                currentDirectory: workingDirectory,
+                environment: [:]
+            )
+            return .exists
+        } catch let CommandError.nonZeroExit(result) {
+            let output = result.output.lowercased()
+            if output.contains("not found") || output.contains("http 404") {
+                return .missing
+            }
+            return .unknown
+        } catch {
+            return .unknown
+        }
     }
 
     private func commandExists(_ command: String, currentDirectory: String) -> Bool {
