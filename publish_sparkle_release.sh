@@ -253,12 +253,18 @@ ASSET_NAME="$(basename "$ARCHIVE_PATH")"
 DOWNLOAD_URL="${DOWNLOAD_URL_BASE}/${ASSET_NAME}"
 
 if [[ "$ARCHIVE_PATH" == *.zip ]]; then
-  if ! unzip -p "$ARCHIVE_PATH" "*/Contents/Info.plist" >/dev/null 2>&1; then
+  APP_INFO_PLIST_PATH="$(unzip -Z1 "$ARCHIVE_PATH" '*.app/Contents/Info.plist' 2>/dev/null | grep -E '^[^/]+\.app/Contents/Info\.plist$' | head -n 1 || true)"
+  if [[ -z "${APP_INFO_PLIST_PATH:-}" ]]; then
+    echo "Could not find the top-level app Info.plist inside archive: $ARCHIVE_PATH" >&2
+    exit 1
+  fi
+
+  if ! unzip -p "$ARCHIVE_PATH" "$APP_INFO_PLIST_PATH" >/dev/null 2>&1; then
     echo "Could not inspect Info.plist inside archive: $ARCHIVE_PATH" >&2
     exit 1
   fi
 
-  BUNDLE_VERSION="$(unzip -p "$ARCHIVE_PATH" "*/Contents/Info.plist" | plutil -extract CFBundleVersion raw -o - - 2>/dev/null || true)"
+  BUNDLE_VERSION="$(unzip -p "$ARCHIVE_PATH" "$APP_INFO_PLIST_PATH" | plutil -extract CFBundleVersion raw -o - - 2>/dev/null || true)"
   if [[ -z "${BUNDLE_VERSION:-}" ]]; then
     echo "Archive is missing CFBundleVersion. Sparkle requires a numeric build version." >&2
     exit 1
