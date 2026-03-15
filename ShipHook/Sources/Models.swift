@@ -551,6 +551,7 @@ struct RepositoryRuntimeState: Identifiable {
     var buildStartedAt: Date?
     var activity: RepositoryActivity
     var buildPhase: RepositoryBuildPhase
+    var buildDetail: String?
     var summary: String
     var lastLog: String
     var lastLogPath: String?
@@ -570,6 +571,7 @@ struct RepositoryRuntimeState: Identifiable {
             buildStartedAt: nil,
             activity: .idle,
             buildPhase: .idle,
+            buildDetail: nil,
             summary: "Waiting for first poll",
             lastLog: "",
             lastLogPath: nil,

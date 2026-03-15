@@ -695,6 +695,7 @@ final class AppState: ObservableObject {
             $0.activity = .idle
             $0.buildStartedAt = nil
             $0.buildPhase = .idle
+            $0.buildDetail = nil
             $0.summary = "Build state reset. Ready to check again."
         }
         startNextQueuedBuildIfPossible()
@@ -794,18 +795,35 @@ final class AppState: ObservableObject {
             updateState(for: repository.id) {
                 $0.activity = .idle
                 $0.buildPhase = .idle
+                $0.buildDetail = nil
                 $0.summary = "Repository is paused"
                 $0.lastCheckDate = Date()
             }
             return
         }
 
-            updateState(for: repository.id) {
-                $0.activity = .polling
-                $0.buildPhase = .idle
-                $0.summary = "Checking GitHub branch \(repository.branch)"
-                $0.lastCheckDate = Date()
+        if inFlightBuilds.contains(repository.id) {
+            updateState(for: repository.id) { state in
+                state.lastCheckDate = Date()
+                if activeBuildRepositoryID != repository.id {
+                    state.activity = .building
+                    state.buildPhase = .queued
+                    state.buildDetail = nil
+                    if state.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        state.summary = "Build already in progress"
+                    }
+                }
             }
+            return
+        }
+
+        updateState(for: repository.id) {
+            $0.activity = .polling
+            $0.buildPhase = .idle
+            $0.buildDetail = nil
+            $0.summary = "Checking GitHub branch \(repository.branch)"
+            $0.lastCheckDate = Date()
+        }
 
         do {
             let token = githubToken(for: repository)
@@ -821,6 +839,7 @@ final class AppState: ObservableObject {
                 $0.lastSeenSHA = snapshot.sha
                 $0.summary = "Latest GitHub commit \(snapshot.sha.prefix(7))"
                 $0.activity = .idle
+                $0.buildDetail = nil
                 $0.lastError = nil
                 $0.lastCommitAuthorLogin = snapshot.authorLogin
                 $0.lastCommitAuthorAvatarURL = snapshot.authorAvatarURL
@@ -834,6 +853,7 @@ final class AppState: ObservableObject {
                 updateState(for: repository.id) {
                     $0.activity = .idle
                     $0.buildPhase = .idle
+                    $0.buildDetail = nil
                     $0.summary = "Ignoring ShipHook-managed commit \(snapshot.sha.prefix(7))"
                     $0.lastError = nil
                 }
@@ -854,15 +874,6 @@ final class AppState: ObservableObject {
                 return
             }
 
-            if inFlightBuilds.contains(repository.id) {
-                if activeBuildRepositoryID != repository.id {
-                    updateState(for: repository.id) {
-                        $0.summary = "Build already in progress"
-                    }
-                }
-                return
-            }
-
             if let activeBuildRepositoryID, activeBuildRepositoryID != repository.id {
                 queuedBuilds[repository.id] = (repository, snapshot)
                 if !queuedBuildOrder.contains(repository.id) {
@@ -872,6 +883,7 @@ final class AppState: ObservableObject {
                 updateState(for: repository.id) {
                     $0.activity = .building
                     $0.buildPhase = .queued
+                    $0.buildDetail = nil
                     $0.summary = "Queued behind \(activeName)"
                     $0.lastSeenSHA = snapshot.sha
                     $0.lastCommitAuthorLogin = snapshot.authorLogin
@@ -892,6 +904,7 @@ final class AppState: ObservableObject {
                 $0.activity = .building
                 $0.buildStartedAt = Date()
                 $0.buildPhase = .syncing
+                $0.buildDetail = nil
                 $0.summary = "Building commit \(snapshot.sha.prefix(7))"
                 $0.lastLogPath = "\((repository.localCheckoutPath as NSString).expandingTildeInPath)/.shiphook/logs/\(repository.id)-latest.log"
                 $0.lastLog = ""
@@ -954,6 +967,7 @@ final class AppState: ObservableObject {
                     $0.lastBuiltSHA = outcome.builtSHA
                     $0.buildStartedAt = nil
                     $0.buildPhase = .idle
+                    $0.buildDetail = nil
                     $0.lastLog = tailLines(from: outcome.log, limit: 120)
                     $0.lastLogPath = outcome.logPath
                     $0.lastError = nil
@@ -985,6 +999,7 @@ final class AppState: ObservableObject {
                 $0.lastSuccessDate = historyRecord.builtAt
                 $0.buildStartedAt = nil
                 $0.buildPhase = .idle
+                $0.buildDetail = nil
                 $0.lastLog = tailLines(from: outcome.log, limit: 120)
                 $0.lastLogPath = outcome.logPath
                 $0.lastError = nil
@@ -1025,18 +1040,23 @@ final class AppState: ObservableObject {
             switch stage {
             case let .syncing(message):
                 $0.buildPhase = .syncing
+                $0.buildDetail = nil
                 $0.summary = stageSummary(for: .syncing, sha: sha, detail: message, repositoryID: repositoryID)
             case .planningRelease:
                 $0.buildPhase = .planningRelease
+                $0.buildDetail = nil
                 $0.summary = stageSummary(for: .planningRelease, sha: sha, detail: nil, repositoryID: repositoryID)
             case .archiving:
                 $0.buildPhase = .archiving
+                $0.buildDetail = nil
                 $0.summary = stageSummary(for: .archiving, sha: sha, detail: nil, repositoryID: repositoryID)
             case .notarizing:
                 $0.buildPhase = .notarizing
+                $0.buildDetail = nil
                 $0.summary = stageSummary(for: .notarizing, sha: sha, detail: nil, repositoryID: repositoryID)
             case .publishing:
                 $0.buildPhase = .publishing
+                $0.buildDetail = nil
                 $0.summary = stageSummary(for: .publishing, sha: sha, detail: nil, repositoryID: repositoryID)
             }
         }
@@ -1048,7 +1068,7 @@ final class AppState: ObservableObject {
             guard state.activity == .building else {
                 return
             }
-            state.summary = stageSummary(for: state.buildPhase, sha: sha, detail: nil, repositoryID: repositoryID)
+            state.summary = stageSummary(for: state.buildPhase, sha: sha, detail: state.buildDetail, repositoryID: repositoryID)
         }
     }
 
@@ -1096,6 +1116,7 @@ final class AppState: ObservableObject {
 
     private func appendLog(_ chunk: String, for repositoryID: String) {
         logBuffers[repositoryID, default: ""].append(chunk)
+        updateBuildDetailFromLogChunk(chunk, for: repositoryID)
         guard logFlushTasks[repositoryID] == nil else {
             return
         }
@@ -1105,6 +1126,104 @@ final class AppState: ObservableObject {
             self?.flushLogBuffer(for: repositoryID)
             self?.logFlushTasks.removeValue(forKey: repositoryID)
         }
+    }
+
+    private func updateBuildDetailFromLogChunk(_ chunk: String, for repositoryID: String) {
+        let lines = chunk.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard let detail = lines.reversed().compactMap(Self.derivedBuildDetail(from:)).first else {
+            return
+        }
+
+        updateState(for: repositoryID) { state in
+            guard state.activity == .building else {
+                return
+            }
+
+            switch detail {
+            case let .archive(label):
+                if state.buildPhase != .archiving {
+                    state.buildPhase = .archiving
+                }
+                state.buildDetail = label
+                if let sha = state.lastSeenSHA {
+                    state.summary = stageSummary(for: .archiving, sha: sha, detail: label, repositoryID: repositoryID)
+                }
+            case let .notarize(label):
+                state.buildPhase = .notarizing
+                state.buildDetail = label
+                if let sha = state.lastSeenSHA {
+                    state.summary = stageSummary(for: .notarizing, sha: sha, detail: label, repositoryID: repositoryID)
+                }
+            case let .publish(label):
+                state.buildPhase = .publishing
+                state.buildDetail = label
+                if let sha = state.lastSeenSHA {
+                    state.summary = stageSummary(for: .publishing, sha: sha, detail: label, repositoryID: repositoryID)
+                }
+            }
+        }
+    }
+
+    private static func derivedBuildDetail(from line: String) -> DerivedBuildDetail? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        let archivePrefixes: [(String, String)] = [
+            ("SwiftCompile ", "Compiling Swift"),
+            ("CompileSwift ", "Compiling Swift"),
+            ("CompileC ", "Compiling Sources"),
+            ("CompileAssetCatalog ", "Compiling Assets"),
+            ("Ld ", "Linking"),
+            ("Libtool ", "Linking Libraries"),
+            ("ProcessInfoPlistFile ", "Processing Info.plist"),
+            ("CopySwiftLibs ", "Copying Swift Libraries"),
+            ("ExtractAppIntentsMetadata ", "Extracting App Intents Metadata"),
+            ("Strip ", "Stripping Binary"),
+            ("CodeSign ", "Code Signing"),
+            ("Validate ", "Validating Archive"),
+            ("RegisterWithLaunchServices ", "Registering with Launch Services"),
+            ("Touch ", "Finalizing App Bundle"),
+        ]
+
+        for (prefix, label) in archivePrefixes where trimmed.hasPrefix(prefix) {
+            return .archive(label)
+        }
+
+        if trimmed == "** ARCHIVE SUCCEEDED **" {
+            return .archive("Archive Succeeded")
+        }
+
+        if trimmed.contains("notary service")
+            || trimmed.hasPrefix("Conducting pre-submission checks")
+            || trimmed.hasPrefix("Waiting for processing to complete")
+            || trimmed.hasPrefix("Current status:")
+            || trimmed.hasPrefix("The staple and validate action worked")
+            || trimmed.hasPrefix("The validate action worked")
+            || (trimmed.hasPrefix("Processing:") && trimmed.contains(".app")) {
+            return .notarize("Submitting for \(ShipHookLocale.notarising)")
+        }
+
+        if trimmed.hasPrefix("Packaging exported app into ") {
+            return .publish("Packaging Release Artifact")
+        }
+        if trimmed.hasPrefix("Wrote ")
+            || trimmed.hasPrefix("Creating GitHub Release ")
+            || trimmed.hasPrefix("Uploading ")
+            || trimmed.hasPrefix("Updated appcast:")
+            || trimmed.hasPrefix("Release asset URL:")
+            || trimmed.hasPrefix("Posted Discord webhook notification") {
+            return .publish("Publishing Release")
+        }
+
+        return nil
+    }
+
+    private enum DerivedBuildDetail {
+        case archive(String)
+        case notarize(String)
+        case publish(String)
     }
 
     private func flushLogBuffer(for repositoryID: String) {
@@ -1205,6 +1324,7 @@ final class AppState: ObservableObject {
             $0.activity = .failed
             $0.buildStartedAt = nil
             $0.buildPhase = .idle
+            $0.buildDetail = nil
             $0.lastError = error.localizedDescription
             if let snapshot {
                 $0.releaseChannel = releaseChannel(for: snapshot)
@@ -1814,7 +1934,7 @@ final class AppState: ObservableObject {
     }
 
     private func progressSnapshot(for state: RepositoryRuntimeState) -> WebDashboardSnapshot.Progress? {
-        let steps = progressStep(for: state.buildPhase)
+        let steps = progressStep(for: state.buildPhase, detail: state.buildDetail)
         guard let steps else {
             return nil
         }
@@ -1827,7 +1947,7 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func progressStep(for phase: RepositoryBuildPhase) -> (current: Int, total: Int, label: String)? {
+    private func progressStep(for phase: RepositoryBuildPhase, detail: String?) -> (current: Int, total: Int, label: String)? {
         switch phase {
         case .idle:
             return nil
@@ -1838,11 +1958,11 @@ final class AppState: ObservableObject {
         case .planningRelease:
             return (3, 5, "Planning Release")
         case .archiving:
-            return (4, 5, "Archiving")
+            return (4, 5, detail ?? "Archiving")
         case .notarizing:
-            return (5, 6, ShipHookLocale.notarising)
+            return (5, 6, detail ?? ShipHookLocale.notarising)
         case .publishing:
-            return (6, 6, "Publishing")
+            return (6, 6, detail ?? "Publishing")
         }
     }
 

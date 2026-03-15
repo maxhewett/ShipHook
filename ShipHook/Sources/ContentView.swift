@@ -266,7 +266,7 @@ struct ContentView: View {
                 .font(.caption)
 
                 if state.activity == .building && !isDisabled {
-                    let progress = phaseProgress(for: state.buildPhase)
+                    let progress = phaseProgress(for: state.buildPhase, detail: state.buildDetail)
                     VStack(alignment: .leading, spacing: 4) {
                         ProgressView(value: progress.current, total: progress.total)
                             .tint(statusColor)
@@ -411,7 +411,7 @@ struct ContentView: View {
         }
     }
 
-    private func phaseProgress(for phase: RepositoryBuildPhase) -> (current: Double, total: Double, label: String) {
+    private func phaseProgress(for phase: RepositoryBuildPhase, detail: String?) -> (current: Double, total: Double, label: String) {
         switch phase {
         case .idle:
             return (0, 5, "Idle")
@@ -422,11 +422,11 @@ struct ContentView: View {
         case .planningRelease:
             return (2, 5, "Planning")
         case .archiving:
-            return (3, 5, "Archiving")
+            return (3, 5, detail ?? "Archiving")
         case .notarizing:
-            return (4, 5, ShipHookLocale.notarising)
+            return (4, 5, detail ?? ShipHookLocale.notarising)
         case .publishing:
-            return (5, 5, "Publishing")
+            return (5, 5, detail ?? "Publishing")
         }
     }
 
@@ -1325,7 +1325,7 @@ private struct RepositoryEditor: View {
     }
 
     private var statusPanel: some View {
-        let progress = phaseProgress(for: runtimeState.buildPhase)
+        let progress = phaseProgress(for: runtimeState.buildPhase, detail: runtimeState.buildDetail)
         let latestBuild = appState.latestBuildRecord(for: repository.id)
         let displayedVersion = appState.displayedVersion(for: repository)
         let releaseChannel = runtimeState.releaseChannel ?? latestBuild?.releaseChannel
@@ -2194,7 +2194,7 @@ private struct RepositoryEditor: View {
         }
     }
 
-    private func phaseProgress(for phase: RepositoryBuildPhase) -> (current: Double, total: Double, label: String) {
+    private func phaseProgress(for phase: RepositoryBuildPhase, detail: String?) -> (current: Double, total: Double, label: String) {
         switch phase {
         case .idle:
             return (0, 5, "Idle")
@@ -2205,11 +2205,11 @@ private struct RepositoryEditor: View {
         case .planningRelease:
             return (2, 5, "Planning")
         case .archiving:
-            return (3, 5, "Archiving")
+            return (3, 5, detail ?? "Archiving")
         case .notarizing:
-            return (4, 5, ShipHookLocale.notarising)
+            return (4, 5, detail ?? ShipHookLocale.notarising)
         case .publishing:
-            return (5, 5, "Publishing")
+            return (5, 5, detail ?? "Publishing")
         }
     }
 
