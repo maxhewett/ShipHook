@@ -1032,7 +1032,6 @@ private struct SigningOverridesEditor: View {
                     .transition(.opacity.combined(with: .move(edge: .leading)))
                 }
             }
-            .rotation3DEffect(.degrees(showSigningConfiguration ? 2 : 0), axis: (x: 0, y: 1, z: 0))
             .frame(minHeight: 120, alignment: .topLeading)
         }
         .glassSection()
@@ -1079,13 +1078,6 @@ private struct SigningOverridesEditor: View {
                     signing.developmentTeam = teamID
                 }
             }
-        )
-    }
-
-    private var notarizationProfileBinding: Binding<String> {
-        Binding(
-            get: { signing.notarizationProfile ?? "" },
-            set: { signing.notarizationProfile = $0.isEmpty ? nil : $0 }
         )
     }
 
@@ -1831,7 +1823,6 @@ private struct RepositoryEditor: View {
                     .transition(.opacity.combined(with: .move(edge: .leading)))
                 }
             }
-            .rotation3DEffect(.degrees(showRepositorySetup ? -2 : 0), axis: (x: 0, y: 1, z: 0))
             .frame(minHeight: 120, alignment: .topLeading)
         }
         .glassSection()
@@ -1901,7 +1892,6 @@ private struct RepositoryEditor: View {
                     .transition(.opacity.combined(with: .move(edge: .leading)))
                 }
             }
-            .rotation3DEffect(.degrees(showBuildAutomation ? 2 : 0), axis: (x: 0, y: 1, z: 0))
             .frame(minHeight: 130, alignment: .topLeading)
         }
         .glassSection()
@@ -1946,7 +1936,6 @@ private struct RepositoryEditor: View {
                     .transition(.opacity.combined(with: .move(edge: .leading)))
                 }
             }
-            .rotation3DEffect(.degrees(showWebhooks ? 2 : 0), axis: (x: 0, y: 1, z: 0))
             .frame(minHeight: 120, alignment: .topLeading)
         }
         .glassSection()
@@ -2006,7 +1995,6 @@ private struct RepositoryEditor: View {
                     .transition(.opacity.combined(with: .move(edge: .leading)))
                 }
             }
-            .rotation3DEffect(.degrees(showSparkleSettings ? -2 : 0), axis: (x: 0, y: 1, z: 0))
             .frame(minHeight: 130, alignment: .topLeading)
 
             if let betaIconSelectionError, !betaIconSelectionError.isEmpty {
@@ -3048,6 +3036,7 @@ extension View {
             .overlay {
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
                     .strokeBorder(.white.opacity(0.1))
+                    .allowsHitTesting(false)
             }
             .shadow(color: .black.opacity(0.08), radius: 18, y: 10)
     }
@@ -3066,6 +3055,7 @@ struct GlassActionButtonStyle: ButtonStyle {
             .overlay {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .strokeBorder(.white.opacity(configuration.isPressed ? 0.26 : 0.14))
+                    .allowsHitTesting(false)
             }
             .shadow(color: .black.opacity(configuration.isPressed ? 0.04 : 0.1), radius: 10, y: 6)
             .scaleEffect(configuration.isPressed ? 0.985 : 1)
@@ -3099,6 +3089,7 @@ private struct GlassSegmentedControl<Selection: Hashable>: View {
                 .overlay {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .strokeBorder(isSelected ? .white.opacity(0.34) : .white.opacity(0.08))
+                        .allowsHitTesting(false)
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .onTapGesture {
@@ -3113,6 +3104,7 @@ private struct GlassSegmentedControl<Selection: Hashable>: View {
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(.white.opacity(0.08))
+                .allowsHitTesting(false)
         }
     }
 }

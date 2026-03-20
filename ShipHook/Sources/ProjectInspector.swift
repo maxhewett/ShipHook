@@ -47,7 +47,12 @@ struct ProjectInspector {
         let branch = try? commandRunner.run("git -C '\(root)' rev-parse --abbrev-ref HEAD", currentDirectory: root, environment: [:]).output.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let parsedRemote = remote.flatMap(parseGitHubRemote(_:))
-        let suggestedScheme = schemes.first
+        let suggestedScheme = suggestScheme(
+            from: schemes,
+            workspacePath: workspacePath,
+            projectPath: projectPath,
+            root: root
+        )
         let releaseNotesPath = findReleaseNotesPath(under: root)
 
         return ProjectInspectionResult(
@@ -76,6 +81,134 @@ struct ProjectInspector {
         let data = try extractJSON(from: output)
         let decoded = try JSONDecoder().decode(XcodeListResponse.self, from: data)
         return decoded.schemes
+    }
+
+    private func suggestScheme(
+        from schemes: [String],
+        workspacePath: String?,
+        projectPath: String?,
+        root: String
+    ) -> String? {
+        guard !schemes.isEmpty else {
+            return nil
+        }
+
+        let preferredNames = Set([
+            rootName(for: root),
+            rootName(for: workspacePath),
+            rootName(for: projectPath),
+        ].compactMap(normalizeName(_:)))
+
+        let metadataByName = sharedSchemeMetadata(
+            workspacePath: workspacePath,
+            projectPath: projectPath
+        )
+
+        return schemes.max { lhs, rhs in
+            score(for: lhs, preferredNames: preferredNames, metadata: metadataByName[lhs])
+                < score(for: rhs, preferredNames: preferredNames, metadata: metadataByName[rhs])
+        }
+    }
+
+    private func sharedSchemeMetadata(
+        workspacePath: String?,
+        projectPath: String?
+    ) -> [String: SchemeMetadata] {
+        let candidateDirectories = [
+            workspacePath.map { "\($0)/xcshareddata/xcschemes" },
+            projectPath.map { "\($0)/xcshareddata/xcschemes" },
+        ].compactMap { $0 }
+
+        var metadata: [String: SchemeMetadata] = [:]
+        for directory in candidateDirectories {
+            guard let enumerator = fileManager.enumerator(atPath: directory) else {
+                continue
+            }
+
+            while let next = enumerator.nextObject() as? String {
+                guard (next as NSString).pathExtension == "xcscheme" else {
+                    continue
+                }
+
+                let fullPath = (directory as NSString).appendingPathComponent(next)
+                let schemeName = ((next as NSString).lastPathComponent as NSString).deletingPathExtension
+                guard metadata[schemeName] == nil else {
+                    continue
+                }
+
+                metadata[schemeName] = parseSchemeMetadata(at: fullPath)
+            }
+        }
+
+        return metadata
+    }
+
+    private func parseSchemeMetadata(at path: String) -> SchemeMetadata {
+        guard let data = fileManager.contents(atPath: path),
+              let parser = XMLParser(data: data) as XMLParser? else {
+            return .empty
+        }
+
+        let delegate = SchemeMetadataParser()
+        parser.delegate = delegate
+        parser.parse()
+        return delegate.metadata
+    }
+
+    private func score(
+        for scheme: String,
+        preferredNames: Set<String>,
+        metadata: SchemeMetadata?
+    ) -> Int {
+        let normalizedScheme = normalizeName(scheme) ?? ""
+        let normalizedBlueprint = normalizeName(metadata?.primaryBlueprintName)
+        let normalizedBuildable = normalizeName(metadata?.primaryBuildableName)
+
+        var score = 0
+        if preferredNames.contains(normalizedScheme) {
+            score += 100
+        }
+        if let normalizedBlueprint, preferredNames.contains(normalizedBlueprint) {
+            score += 90
+        }
+        if let normalizedBuildable, preferredNames.contains(normalizedBuildable) {
+            score += 80
+        }
+        if metadata?.buildableNameHasAppSuffix == true {
+            score += 40
+        }
+        if normalizedScheme.hasSuffix("tests") {
+            score -= 50
+        }
+        if normalizedScheme.hasSuffix("cli") {
+            score -= 15
+        }
+        return score
+    }
+
+    private func rootName(for path: String?) -> String? {
+        guard let path, !path.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+    }
+
+    private func normalizeName(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        let withoutExtension = (trimmed as NSString).deletingPathExtension
+        let stripped = withoutExtension.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }
+        guard !stripped.isEmpty else {
+            return nil
+        }
+        return String(String.UnicodeScalarView(stripped)).lowercased()
     }
 
     private func findReleaseNotesPath(under root: String) -> String? {
@@ -148,6 +281,59 @@ struct ProjectInspector {
         }
 
         throw CocoaError(.coderReadCorrupt)
+    }
+}
+
+private struct SchemeMetadata {
+    var primaryBlueprintName: String?
+    var primaryBuildableName: String?
+
+    static let empty = SchemeMetadata(primaryBlueprintName: nil, primaryBuildableName: nil)
+
+    var buildableNameHasAppSuffix: Bool {
+        primaryBuildableName?.hasSuffix(".app") == true
+    }
+}
+
+private final class SchemeMetadataParser: NSObject, XMLParserDelegate {
+    private(set) var metadata = SchemeMetadata.empty
+    private var hasCapturedPrimaryBuildActionEntry = false
+    private var isInsidePrimaryBuildActionEntry = false
+
+    func parser(
+        _ parser: XMLParser,
+        didStartElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?,
+        attributes attributeDict: [String: String] = [:]
+    ) {
+        guard !hasCapturedPrimaryBuildActionEntry else {
+            return
+        }
+
+        if elementName == "BuildActionEntry" {
+            isInsidePrimaryBuildActionEntry = true
+            return
+        }
+
+        guard elementName == "BuildableReference", isInsidePrimaryBuildActionEntry else {
+            return
+        }
+
+        metadata.primaryBlueprintName = attributeDict["BlueprintName"]
+        metadata.primaryBuildableName = attributeDict["BuildableName"]
+        hasCapturedPrimaryBuildActionEntry = true
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didEndElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?
+    ) {
+        if elementName == "BuildActionEntry" {
+            isInsidePrimaryBuildActionEntry = false
+        }
     }
 }
 

@@ -706,6 +706,21 @@ final class AppState: ObservableObject {
         configuration.autoPauseFailureCount = max(1, configuration.autoPauseFailureCount)
         configuration.repositories = configuration.repositories.map { repository in
             var repository = repository
+            if repository.buildMode == .xcodeArchive && repository.xcode == nil {
+                repository.xcode = .default
+            }
+            if repository.buildMode == .shell && repository.shell == nil {
+                repository.shell = .default
+            }
+            if repository.sparkle == nil {
+                repository.sparkle = .default
+            }
+            if repository.notifications == nil {
+                repository.notifications = .default
+            }
+            if repository.signing == nil {
+                repository.signing = .default
+            }
             if var xcode = repository.xcode {
                 xcode.workspacePath = xcode.sanitizedWorkspacePath
                 repository.xcode = xcode
