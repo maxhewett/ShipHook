@@ -438,11 +438,32 @@ final class WebDashboardServer {
             return self.handlePasswordChange(request: request)
         }
 
+        server.POST["/api/auth/invite/accept"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleInviteAcceptance(request: request)
+        }
+
         server.POST["/api/auth/admins/invite"] = { [weak self] request in
             guard let self else {
                 return .internalServerError
             }
             return self.handleAdminInvite(request: request)
+        }
+
+        server.POST["/api/auth/admins/reset"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleAdminReset(request: request)
+        }
+
+        server.POST["/api/auth/admins/delete"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleAdminDelete(request: request)
         }
 
         server.POST["/api/auth/passkeys/register/begin"] = { [weak self] request in
@@ -610,13 +631,15 @@ final class WebDashboardServer {
         }
 
         let inviteToken = request.queryParams.first(where: { $0.0 == "invite" })?.1
-        let inviteUsername = securityController.usernameForInviteToken(inviteToken)
+        if let inviteToken,
+           let inviteUsername = securityController.usernameForPasswordSetupToken(inviteToken) {
+            return htmlResponse(
+                securityController.inviteAcceptancePageHTML(username: inviteUsername, token: inviteToken),
+                request: request
+            )
+        }
         return htmlResponse(
-            securityController.loginPageHTML(
-                passkeysAvailable: securityController.hasRegisteredPasskeys,
-                inviteUsername: inviteUsername,
-                inviteToken: inviteToken
-            ),
+            securityController.loginPageHTML(passkeysAvailable: securityController.hasRegisteredPasskeys),
             request: request
         )
     }
@@ -679,11 +702,50 @@ final class WebDashboardServer {
         }
     }
 
+    private func handleInviteAcceptance(request: HttpRequest) -> HttpResponse {
+        do {
+            let payload = try decodeInviteAcceptanceRequest(from: request)
+            let result = try securityController.acceptInvite(using: payload, request: request)
+            if isURLEncodedForm(request) {
+                return redirectResponse(to: "/", request: request)
+            }
+            return jsonResponse(for: result, request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
     private func handleAdminInvite(request: HttpRequest) -> HttpResponse {
         do {
             let payload = try decodeRequest(WebDashboardAdminInviteRequest.self, from: request)
             let response = try securityController.inviteAdmin(username: payload.username, request: request)
             return jsonResponse(for: response, request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func handleAdminReset(request: HttpRequest) -> HttpResponse {
+        do {
+            let payload = try decodeRequest(WebDashboardAdminResetRequest.self, from: request)
+            let response = try securityController.createPasswordResetLink(for: payload.username, request: request)
+            return jsonResponse(for: response, request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func handleAdminDelete(request: HttpRequest) -> HttpResponse {
+        do {
+            let payload = try decodeRequest(WebDashboardAdminDeleteRequest.self, from: request)
+            try securityController.deleteAdmin(username: payload.username, request: request)
+            return jsonResponse(for: WebDashboardAuthMessageResponse(ok: true, message: "Administrator removed."), request: request)
         } catch let error as WebDashboardSecurityController.SecurityError {
             return authErrorResponse(error, request: request)
         } catch {
@@ -789,6 +851,17 @@ final class WebDashboardServer {
             )
         }
         return try decodeRequest(WebDashboardPasswordChangeRequest.self, from: request)
+    }
+
+    private func decodeInviteAcceptanceRequest(from request: HttpRequest) throws -> WebDashboardInviteAcceptanceRequest {
+        if isURLEncodedForm(request) {
+            let form = Dictionary(uniqueKeysWithValues: request.parseUrlencodedForm())
+            return WebDashboardInviteAcceptanceRequest(
+                token: form["token"] ?? "",
+                newPassword: form["newPassword"] ?? ""
+            )
+        }
+        return try decodeRequest(WebDashboardInviteAcceptanceRequest.self, from: request)
     }
 
     private func isURLEncodedForm(_ request: HttpRequest) -> Bool {
@@ -3534,7 +3607,20 @@ private struct WebDashboardPasswordChangeRequest: Codable {
     var newPassword: String
 }
 
+private struct WebDashboardInviteAcceptanceRequest: Codable {
+    var token: String
+    var newPassword: String
+}
+
 private struct WebDashboardAdminInviteRequest: Codable {
+    var username: String
+}
+
+private struct WebDashboardAdminResetRequest: Codable {
+    var username: String
+}
+
+private struct WebDashboardAdminDeleteRequest: Codable {
     var username: String
 }
 
@@ -3554,10 +3640,9 @@ private struct WebDashboardAuthMessageResponse: Codable {
     }
 }
 
-private struct WebDashboardAdminInviteResponse: Codable {
+private struct WebDashboardAdminLinkResponse: Codable {
     var ok: Bool
     var username: String
-    var temporaryPassword: String
     var loginURL: String
     var message: String
 }
@@ -3602,6 +3687,11 @@ private struct WebDashboardFinishPasskeyAuthenticationRequest: Codable {
 }
 
 private final class WebDashboardSecurityController {
+    private enum PasswordAlgorithm: String, Codable {
+        case legacyIteratedSHA256 = "iterated-sha256"
+        case pbkdf2SHA256 = "pbkdf2-sha256"
+    }
+
     enum SecurityError: LocalizedError {
         case bootstrapUnavailable
         case invalidInput(String)
@@ -3661,11 +3751,40 @@ private final class WebDashboardSecurityController {
 
     struct StoredSettings: Codable {
         struct Passkey: Codable {
+            var username: String
             var credentialID: String
             var name: String
             var publicKeyX963: String
             var signCount: UInt32
             var addedAt: Date
+
+            enum CodingKeys: String, CodingKey {
+                case username
+                case credentialID
+                case name
+                case publicKeyX963
+                case signCount
+                case addedAt
+            }
+
+            init(username: String, credentialID: String, name: String, publicKeyX963: String, signCount: UInt32, addedAt: Date) {
+                self.username = username
+                self.credentialID = credentialID
+                self.name = name
+                self.publicKeyX963 = publicKeyX963
+                self.signCount = signCount
+                self.addedAt = addedAt
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                username = try container.decodeIfPresent(String.self, forKey: .username) ?? ""
+                credentialID = try container.decode(String.self, forKey: .credentialID)
+                name = try container.decode(String.self, forKey: .name)
+                publicKeyX963 = try container.decode(String.self, forKey: .publicKeyX963)
+                signCount = try container.decode(UInt32.self, forKey: .signCount)
+                addedAt = try container.decode(Date.self, forKey: .addedAt)
+            }
         }
 
         struct Admin: Codable {
@@ -3673,8 +3792,9 @@ private final class WebDashboardSecurityController {
             var passwordSalt: String?
             var passwordHash: String?
             var passwordIterations: Int?
+            var passwordAlgorithm: String?
             var mustChangePassword: Bool
-            var inviteToken: String?
+            var passwordSetupToken: String?
             var createdAt: Date
         }
 
@@ -3685,6 +3805,7 @@ private final class WebDashboardSecurityController {
         var passwordSalt: String?
         var passwordHash: String?
         var passwordIterations: Int?
+        var passwordAlgorithm: String?
         var admins: [Admin]
         var passkeys: [Passkey]
 
@@ -3696,6 +3817,7 @@ private final class WebDashboardSecurityController {
             case passwordSalt
             case passwordHash
             case passwordIterations
+            case passwordAlgorithm
             case admins
             case passkeys
         }
@@ -3708,6 +3830,7 @@ private final class WebDashboardSecurityController {
             passwordSalt: nil,
             passwordHash: nil,
             passwordIterations: nil,
+            passwordAlgorithm: nil,
             admins: [],
             passkeys: []
         )
@@ -3720,6 +3843,7 @@ private final class WebDashboardSecurityController {
             passwordSalt: String?,
             passwordHash: String?,
             passwordIterations: Int?,
+            passwordAlgorithm: String?,
             admins: [Admin],
             passkeys: [Passkey]
         ) {
@@ -3730,21 +3854,31 @@ private final class WebDashboardSecurityController {
             self.passwordSalt = passwordSalt
             self.passwordHash = passwordHash
             self.passwordIterations = passwordIterations
+            self.passwordAlgorithm = passwordAlgorithm
             self.admins = admins
             self.passkeys = passkeys
         }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
-            username = try container.decodeIfPresent(String.self, forKey: .username) ?? "admin"
+            let decodedUsername = try container.decodeIfPresent(String.self, forKey: .username) ?? "admin"
+            let decodedPasskeys = (try container.decodeIfPresent([Passkey].self, forKey: .passkeys) ?? []).map { passkey in
+                var passkey = passkey
+                if passkey.username.isEmpty {
+                    passkey.username = decodedUsername
+                }
+                return passkey
+            }
+            username = decodedUsername
             publicBaseURL = try container.decodeIfPresent(String.self, forKey: .publicBaseURL)
             sessionDurationHours = try container.decodeIfPresent(Int.self, forKey: .sessionDurationHours) ?? 12
             passwordConfigured = try container.decodeIfPresent(Bool.self, forKey: .passwordConfigured) ?? false
             passwordSalt = try container.decodeIfPresent(String.self, forKey: .passwordSalt)
             passwordHash = try container.decodeIfPresent(String.self, forKey: .passwordHash)
             passwordIterations = try container.decodeIfPresent(Int.self, forKey: .passwordIterations)
+            passwordAlgorithm = try container.decodeIfPresent(String.self, forKey: .passwordAlgorithm)
             admins = try container.decodeIfPresent([Admin].self, forKey: .admins) ?? []
-            passkeys = try container.decodeIfPresent([Passkey].self, forKey: .passkeys) ?? []
+            passkeys = decodedPasskeys
         }
     }
 
@@ -3752,6 +3886,7 @@ private final class WebDashboardSecurityController {
         var salt: String
         var hash: String
         var iterations: Int
+        var algorithm: PasswordAlgorithm
     }
 
     private struct Session {
@@ -3761,7 +3896,7 @@ private final class WebDashboardSecurityController {
     }
 
     private enum ChallengeKind {
-        case register(sessionID: String)
+        case register(sessionID: String, username: String)
         case authenticate
     }
 
@@ -3859,7 +3994,7 @@ private final class WebDashboardSecurityController {
             settings.username = username
             settings.publicBaseURL = normalizedBaseURL(payload.publicBaseURL)
             settings.sessionDurationHours = max(1, payload.sessionDurationHours ?? 12)
-            try storePasswordLocked(password, for: username, mustChangePassword: false, inviteToken: nil)
+            try storePasswordLocked(password, for: username, mustChangePassword: false, passwordSetupToken: nil)
             settings.passwordConfigured = true
             try persistSettingsLocked()
             didBootstrapThisLaunch = true
@@ -3905,18 +4040,38 @@ private final class WebDashboardSecurityController {
             throw SecurityError.weakPassword
         }
         try queue.sync {
-            guard let username = currentUsername(request: request),
+            guard let username = currentUsernameUnlocked(request: request),
                   let record = try? loadPasswordRecordLocked(for: username),
                   verifyPassword(payload.currentPassword, record: record) else {
                 throw SecurityError.invalidCredential
             }
-            try storePasswordLocked(payload.newPassword, for: username, mustChangePassword: false, inviteToken: nil)
+            try storePasswordLocked(payload.newPassword, for: username, mustChangePassword: false, passwordSetupToken: nil)
             settings.passwordConfigured = true
             try persistSettingsLocked()
         }
     }
 
-    func inviteAdmin(username rawUsername: String, request: HttpRequest) throws -> WebDashboardAdminInviteResponse {
+    func acceptInvite(using payload: WebDashboardInviteAcceptanceRequest, request: HttpRequest) throws -> WebDashboardAuthMessageResponse {
+        let token = payload.token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else {
+            throw SecurityError.invalidCredential
+        }
+        guard payload.newPassword.count >= 14 else {
+            throw SecurityError.weakPassword
+        }
+        return try queue.sync {
+            guard let admin = settings.admins.first(where: { $0.passwordSetupToken == token }) else {
+                throw SecurityError.invalidCredential
+            }
+            try storePasswordLocked(payload.newPassword, for: admin.username, mustChangePassword: false, passwordSetupToken: nil)
+            settings.passwordConfigured = true
+            try persistSettingsLocked()
+            _ = createSessionLocked(username: admin.username, secure: isSecureRequest(request))
+            return WebDashboardAuthMessageResponse(ok: true, message: "Password set. Signed in.", passkeysAvailable: !settings.passkeys.isEmpty)
+        }
+    }
+
+    func inviteAdmin(username rawUsername: String, request: HttpRequest) throws -> WebDashboardAdminLinkResponse {
         guard isAuthorized(request: request) else {
             throw SecurityError.unauthorized
         }
@@ -3928,26 +4083,76 @@ private final class WebDashboardSecurityController {
             guard adminLocked(username: username) == nil else {
                 throw SecurityError.invalidInput("That username already exists.")
             }
-            let temporaryPassword = generateTemporaryPassword()
-            let inviteToken = randomData(length: 24).base64URLEncodedString()
-            try storePasswordLocked(temporaryPassword, for: username, mustChangePassword: true, inviteToken: inviteToken)
+            let setupToken = randomData(length: 24).base64URLEncodedString()
+            try storePasswordLocked("", for: username, mustChangePassword: true, passwordSetupToken: setupToken, generatePasswordHash: false)
             try persistSettingsLocked()
-            return WebDashboardAdminInviteResponse(
+            return WebDashboardAdminLinkResponse(
                 ok: true,
                 username: username,
-                temporaryPassword: temporaryPassword,
-                loginURL: inviteURL(for: inviteToken, request: request),
+                loginURL: inviteURLLocked(for: setupToken, request: request),
                 message: "Administrator invite created."
             )
         }
     }
 
+    func createPasswordResetLink(for rawUsername: String, request: HttpRequest) throws -> WebDashboardAdminLinkResponse {
+        guard isAuthorized(request: request) else {
+            throw SecurityError.unauthorized
+        }
+        let username = rawUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try queue.sync {
+            guard adminLocked(username: username) != nil else {
+                throw SecurityError.invalidInput("That administrator does not exist.")
+            }
+            let setupToken = randomData(length: 24).base64URLEncodedString()
+            try storePasswordSetupTokenLocked(setupToken, for: username, mustChangePassword: true)
+            sessions = sessions.filter { $0.value.username.caseInsensitiveCompare(username) != .orderedSame }
+            try persistSettingsLocked()
+            return WebDashboardAdminLinkResponse(
+                ok: true,
+                username: username,
+                loginURL: inviteURLLocked(for: setupToken, request: request),
+                message: "Password reset link created."
+            )
+        }
+    }
+
+    func deleteAdmin(username rawUsername: String, request: HttpRequest) throws {
+        guard isAuthorized(request: request) else {
+            throw SecurityError.unauthorized
+        }
+        let username = rawUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        try queue.sync {
+            guard let currentUsername = currentUsernameUnlocked(request: request) else {
+                throw SecurityError.unauthorized
+            }
+            guard currentUsername.caseInsensitiveCompare(username) != .orderedSame else {
+                throw SecurityError.invalidInput("You cannot delete the currently signed-in administrator.")
+            }
+            guard settings.admins.contains(where: { $0.username.caseInsensitiveCompare(username) == .orderedSame }) else {
+                throw SecurityError.invalidInput("That administrator does not exist.")
+            }
+            guard settings.admins.count > 1 else {
+                throw SecurityError.invalidInput("ShipHook must keep at least one administrator.")
+            }
+            settings.admins.removeAll { $0.username.caseInsensitiveCompare(username) == .orderedSame }
+            settings.passkeys.removeAll { $0.username.caseInsensitiveCompare(username) == .orderedSame }
+            sessions = sessions.filter { $0.value.username.caseInsensitiveCompare(username) != .orderedSame }
+            try persistSettingsLocked()
+        }
+    }
+
     func beginPasskeyRegistration(request: HttpRequest) throws -> WebDashboardPasskeyRegistrationOptionsResponse {
-        guard let sessionID = queue.sync(execute: { sessionID(from: request) }), isAuthorized(request: request) else {
+        guard isAuthorized(request: request) else {
             throw SecurityError.unauthorized
         }
         let rp = try relyingParty(for: request)
-        return queue.sync {
+        return try queue.sync {
+            guard let sessionID = sessionID(from: request),
+                  let username = currentUsernameUnlocked(request: request),
+                  let admin = adminLocked(username: username) else {
+                throw SecurityError.unauthorized
+            }
             let challenge = randomData(length: 32)
             let challengeID = UUID().uuidString.lowercased()
             challenges[challengeID] = PendingChallenge(
@@ -3956,7 +4161,7 @@ private final class WebDashboardSecurityController {
                 createdAt: Date(),
                 rpID: rp.id,
                 origin: rp.origin,
-                kind: .register(sessionID: sessionID)
+                kind: .register(sessionID: sessionID, username: username)
             )
             return WebDashboardPasskeyRegistrationOptionsResponse(
                 ok: true,
@@ -3964,10 +4169,10 @@ private final class WebDashboardSecurityController {
                 challenge: challenge.base64URLEncodedString(),
                 rpID: rp.id,
                 rpName: "ShipHook",
-                userID: Data(settings.username.utf8).base64URLEncodedString(),
-                userName: settings.username,
-                userDisplayName: settings.username,
-                excludeCredentialIDs: settings.passkeys.map(\.credentialID),
+                userID: Data(admin.username.utf8).base64URLEncodedString(),
+                userName: admin.username,
+                userDisplayName: admin.username,
+                excludeCredentialIDs: settings.passkeys.filter { $0.username.caseInsensitiveCompare(username) == .orderedSame }.map(\.credentialID),
                 timeoutMilliseconds: 60_000
             )
         }
@@ -3981,7 +4186,7 @@ private final class WebDashboardSecurityController {
             guard let challenge = challenges.removeValue(forKey: payload.challengeID) else {
                 throw SecurityError.invalidCredential
             }
-            guard case let .register(expectedSessionID) = challenge.kind,
+            guard case let .register(expectedSessionID, username) = challenge.kind,
                   expectedSessionID == sessionID(from: request) else {
                 throw SecurityError.invalidCredential
             }
@@ -3993,6 +4198,7 @@ private final class WebDashboardSecurityController {
             settings.passkeys.removeAll { $0.credentialID == registration.credentialID.base64URLEncodedString() }
             settings.passkeys.append(
                 StoredSettings.Passkey(
+                    username: username,
                     credentialID: registration.credentialID.base64URLEncodedString(),
                     name: (payload.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? payload.name! : "Passkey"),
                     publicKeyX963: registration.publicKeyX963.base64URLEncodedString(),
@@ -4055,7 +4261,7 @@ private final class WebDashboardSecurityController {
                 settings.passkeys[index].signCount = signCount
                 try persistSettingsLocked()
             }
-            _ = createSessionLocked(username: settings.username, secure: isSecureRequest(request))
+            _ = createSessionLocked(username: settings.passkeys[index].username, secure: isSecureRequest(request))
             return WebDashboardAuthMessageResponse(ok: true, message: "Signed in with passkey.", passkeysAvailable: true)
         }
     }
@@ -4122,11 +4328,51 @@ private final class WebDashboardSecurityController {
         )
     }
 
-    func loginPageHTML(passkeysAvailable: Bool, inviteUsername: String?, inviteToken: String?) -> String {
+    func inviteAcceptancePageHTML(username: String, token: String) -> String {
+        pageHTML(
+            title: "ShipHook Invite",
+            body: """
+            <div class="card auth-card">
+              \(mastheadHTML())
+              <div class="auth-copy">
+                <div class="auth-eyebrow">Administrator Invite</div>
+                <h1>Set your password</h1>
+                <p class="auth-lead">Finish account setup for @\(escapeHTML(username)) and continue straight to the dashboard.</p>
+              </div>
+              <section class="auth-section auth-section-accent">
+                <form id="invite-accept-form" method="post" action="/api/auth/invite/accept">
+                  <input type="hidden" name="token" value="\(escapeHTML(token))">
+                  <label>Username<input value="\(escapeHTML(username))" disabled></label>
+                  <label>New Password<input type="password" name="newPassword" autocomplete="new-password"></label>
+                  <button type="submit">Set Password</button>
+                </form>
+              </section>
+              <div id="status" class="status"></div>
+            </div>
+            <script>
+              const statusNode = document.getElementById('status');
+              document.getElementById('invite-accept-form').addEventListener('submit', async event => {
+                event.preventDefault();
+                const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+                const response = await fetch('/api/auth/invite/accept', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+                if (!response.ok || result.ok === false) {
+                  statusNode.textContent = result.error || 'Could not complete setup.';
+                  return;
+                }
+                window.location.href = '/';
+              });
+            </script>
+            """
+        )
+    }
+
+    func loginPageHTML(passkeysAvailable: Bool) -> String {
         let passkeyButton = passkeysAvailable ? "<button type=\"button\" id=\"passkey-button\" class=\"secondary\">Sign In With Passkey</button>" : ""
-        let inviteNotice = inviteUsername.map { username in
-            "<p class=\"note strong\">Invite for @\(escapeHTML(username)). Sign in with the temporary password, then set a new one immediately.</p>"
-        } ?? ""
         return pageHTML(
             title: "ShipHook Login",
             body: """
@@ -4136,11 +4382,10 @@ private final class WebDashboardSecurityController {
                 <div class="auth-eyebrow">Authentication</div>
                 <h1>Login</h1>
                 <p class="auth-lead">Sign in to manage repositories, releases, and build automation.</p>
-                \(inviteNotice)
               </div>
               <section class="auth-section auth-section-accent">
                 <form id="login-form" method="post" action="/api/auth/login">
-                  <label>Username<input name="username" value="\(escapeHTML(inviteUsername ?? settings.username))" autocomplete="username"></label>
+                  <label>Username<input name="username" value="" autocomplete="username"></label>
                   <label>Password<input type="password" name="password" autocomplete="current-password"></label>
                   <div class="auth-actions">
                     <button type="submit">Sign In</button>
@@ -4225,9 +4470,32 @@ private final class WebDashboardSecurityController {
     func securityPageHTML(forcePassword: Bool, currentUsername: String) -> String {
         let passkeyList = settings.passkeys.isEmpty
             ? "<p class=\"note\">No passkeys registered yet.</p>"
-            : "<ul>" + settings.passkeys.map { "<li>\(escapeHTML($0.name))</li>" }.joined() + "</ul>"
+            : "<ul>" + settings.passkeys
+                .sorted {
+                    if $0.username.caseInsensitiveCompare($1.username) == .orderedSame {
+                        return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+                    }
+                    return $0.username.localizedCaseInsensitiveCompare($1.username) == .orderedAscending
+                }
+                .map { "<li>@\(escapeHTML($0.username)) <span class=\"note\">· \(escapeHTML($0.name))</span></li>" }
+                .joined() + "</ul>"
         let adminList = settings.admins
-            .map { admin in "<li>@\(escapeHTML(admin.username))\(admin.mustChangePassword ? " <span class=\"note\">needs password reset</span>" : "")</li>" }
+            .sorted { $0.username.localizedCaseInsensitiveCompare($1.username) == .orderedAscending }
+            .map { admin in
+                let resetButton = "<button type=\"button\" class=\"secondary\" data-admin-reset=\"\(escapeHTML(admin.username))\">Reset Password</button>"
+                let deleteButton = currentUsername.caseInsensitiveCompare(admin.username) == .orderedSame
+                    ? ""
+                    : "<button type=\"button\" class=\"secondary warn\" data-admin-delete=\"\(escapeHTML(admin.username))\">Delete</button>"
+                return """
+                <li class="admin-row">
+                  <div class="admin-row-copy">
+                    <strong>@\(escapeHTML(admin.username))</strong>
+                    \(admin.mustChangePassword ? "<span class=\"note\">needs password setup</span>" : "")
+                  </div>
+                  <div class="admin-row-actions">\(resetButton)\(deleteButton)</div>
+                </li>
+                """
+            }
             .joined()
         let forceNote = forcePassword ? "<p class=\"note strong\">This account must set a new password before returning to the dashboard.</p>" : ""
         return pageHTML(
@@ -4258,7 +4526,7 @@ private final class WebDashboardSecurityController {
               </section>
               <section class="auth-section">
                 <h2>Administrators</h2>
-                <ul>\(adminList)</ul>
+                <ul class="admin-list">\(adminList)</ul>
                 <form id="invite-admin-form">
                   <label>Username<input name="username" autocomplete="off" placeholder="teammate"></label>
                   <button type="submit">Add Administrator</button>
@@ -4304,12 +4572,52 @@ private final class WebDashboardSecurityController {
                 inviteOutputNode.innerHTML = `
                   <div class="invite-card">
                     <div><strong>@${escapeHTML(result.username)}</strong></div>
-                    <div>Temporary password: <code>${escapeHTML(result.temporaryPassword)}</code></div>
-                    <div>Login URL: <a href="${escapeAttribute(result.loginURL)}">${escapeHTML(result.loginURL)}</a></div>
+                    <div>Password setup link: <a href="${escapeAttribute(result.loginURL)}">${escapeHTML(result.loginURL)}</a></div>
                   </div>
                 `;
                 event.currentTarget.reset();
                 statusNode.textContent = result.message || '';
+              });
+              document.querySelectorAll('[data-admin-reset]').forEach(button => {
+                button.addEventListener('click', async event => {
+                  const username = event.currentTarget.dataset.adminReset;
+                  const response = await fetch('/api/auth/admins/reset', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username })
+                  });
+                  const result = await response.json();
+                  if (!response.ok || result.ok === false) {
+                    statusNode.textContent = result.error || 'Failed to create reset link.';
+                    return;
+                  }
+                  inviteOutputNode.innerHTML = `
+                    <div class="invite-card">
+                      <div><strong>@${escapeHTML(result.username)}</strong></div>
+                      <div>Password reset link: <a href="${escapeAttribute(result.loginURL)}">${escapeHTML(result.loginURL)}</a></div>
+                    </div>
+                  `;
+                  statusNode.textContent = result.message || '';
+                });
+              });
+              document.querySelectorAll('[data-admin-delete]').forEach(button => {
+                button.addEventListener('click', async event => {
+                  const username = event.currentTarget.dataset.adminDelete;
+                  if (!window.confirm(`Delete administrator @${username}?`)) {
+                    return;
+                  }
+                  const response = await fetch('/api/auth/admins/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username })
+                  });
+                  const result = await response.json();
+                  if (!response.ok || result.ok === false) {
+                    statusNode.textContent = result.error || 'Failed to delete administrator.';
+                    return;
+                  }
+                  window.location.reload();
+                });
               });
               document.getElementById('register-passkey').addEventListener('click', async () => {
                 if (!window.PublicKeyCredential || !navigator.credentials?.create) {
@@ -4452,6 +4760,7 @@ private final class WebDashboardSecurityController {
             input { border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.05); color: inherit; padding: 12px 14px; }
             button, a { display: inline-flex; align-items: center; justify-content: center; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: linear-gradient(135deg, rgba(255,135,91,0.28), rgba(255,135,91,0.12)); color: inherit; padding: 11px 14px; text-decoration: none; cursor: pointer; }
             button.secondary, a.secondary { background: rgba(255,255,255,0.05); }
+            button.warn, a.warn { border-color: rgba(255,109,122,0.24); background: linear-gradient(135deg, rgba(255,109,122,0.20), rgba(255,109,122,0.08)); }
             .toolbar { display: flex; gap: 10px; margin: -2px 0 4px; }
             .auth-section { padding: 18px; border-radius: 18px; border: 1px solid rgba(255,255,255,0.08); background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02)); }
             .auth-section-accent { background: linear-gradient(180deg, rgba(255,135,91,0.10), rgba(77,184,255,0.04) 68%, rgba(255,255,255,0.02)); }
@@ -4463,6 +4772,11 @@ private final class WebDashboardSecurityController {
             .note.strong { color: rgba(245,247,251,0.88); }
             .invite-output { display: grid; gap: 10px; }
             .invite-card { margin-top: 6px; padding: 14px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.04); display: grid; gap: 6px; word-break: break-word; }
+            .admin-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+            .admin-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.06); background: rgba(255,255,255,0.03); }
+            .admin-row-copy { display: grid; gap: 4px; min-width: 0; }
+            .admin-row-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+            .admin-row-actions button { padding: 9px 12px; }
             ul { padding-left: 18px; }
             @media (prefers-color-scheme: light) {
               body { background: linear-gradient(180deg, #edf2f7, #dfe8f3); color: #132033; }
@@ -4474,9 +4788,11 @@ private final class WebDashboardSecurityController {
               p, li, .note, code { color: rgba(19,32,51,0.70); }
               input { background: rgba(19,32,51,0.04); border-color: rgba(19,32,51,0.12); color: #132033; }
               button.secondary, a.secondary { background: rgba(19,32,51,0.04); }
+              button.warn, a.warn { border-color: rgba(209,78,92,0.20); background: linear-gradient(135deg, rgba(209,78,92,0.16), rgba(209,78,92,0.06)); }
               .auth-section { background: linear-gradient(180deg, rgba(19,32,51,0.03), rgba(19,32,51,0.02)); border-color: rgba(19,32,51,0.08); }
               .auth-section-accent { background: linear-gradient(180deg, rgba(216,106,56,0.10), rgba(34,123,189,0.04) 68%, rgba(19,32,51,0.02)); }
               .invite-card { background: rgba(19,32,51,0.04); border-color: rgba(19,32,51,0.08); }
+              .admin-row { background: rgba(19,32,51,0.03); border-color: rgba(19,32,51,0.08); }
             }
             @media (max-width: 720px) {
               .card { width: min(680px, calc(100vw - 20px)); padding: 18px; border-radius: 20px; }
@@ -4485,6 +4801,8 @@ private final class WebDashboardSecurityController {
               .auth-section { padding: 14px; }
               .toolbar, .auth-actions { grid-template-columns: 1fr; }
               .toolbar, .auth-actions { display: grid; }
+              .admin-row { align-items: stretch; flex-direction: column; }
+              .admin-row-actions { width: 100%; }
             }
           </style>
         </head>
@@ -4531,10 +4849,10 @@ private final class WebDashboardSecurityController {
         throw SecurityError.passkeysUnavailable("Passkeys require localhost access or a matching HTTPS public base URL.")
     }
 
-    func usernameForInviteToken(_ token: String?) -> String? {
+    func usernameForPasswordSetupToken(_ token: String?) -> String? {
         guard let token, !token.isEmpty else { return nil }
         return queue.sync {
-            settings.admins.first(where: { $0.inviteToken == token })?.username
+            settings.admins.first(where: { $0.passwordSetupToken == token })?.username
         }
     }
 
@@ -4636,45 +4954,56 @@ private final class WebDashboardSecurityController {
     }
 
     private func storePasswordLocked(_ password: String) throws {
-        try storePasswordLocked(password, for: settings.username, mustChangePassword: false, inviteToken: nil)
+        try storePasswordLocked(password, for: settings.username, mustChangePassword: false, passwordSetupToken: nil)
     }
 
     private func loadPasswordRecordLocked() throws -> PasswordRecord {
         try loadPasswordRecordLocked(for: settings.username)
     }
 
-    private func storePasswordLocked(_ password: String, for username: String, mustChangePassword: Bool, inviteToken: String?) throws {
+    private func storePasswordLocked(_ password: String, for username: String, mustChangePassword: Bool, passwordSetupToken: String?, generatePasswordHash: Bool = true) throws {
         let salt = randomData(length: 16)
-        let iterations = 200_000
+        let iterations = 310_000
         let saltString = salt.base64URLEncodedString()
-        let hashString = Self.derivePasswordHash(password: password, salt: salt, iterations: iterations).base64URLEncodedString()
+        let hashString = generatePasswordHash ? Self.derivePasswordHash(password: password, salt: salt, iterations: iterations, algorithm: .pbkdf2SHA256).base64URLEncodedString() : nil
 
         if let index = settings.admins.firstIndex(where: { $0.username.caseInsensitiveCompare(username) == .orderedSame }) {
-            settings.admins[index].passwordSalt = saltString
+            settings.admins[index].passwordSalt = generatePasswordHash ? saltString : nil
             settings.admins[index].passwordHash = hashString
-            settings.admins[index].passwordIterations = iterations
+            settings.admins[index].passwordIterations = generatePasswordHash ? iterations : nil
+            settings.admins[index].passwordAlgorithm = generatePasswordHash ? PasswordAlgorithm.pbkdf2SHA256.rawValue : nil
             settings.admins[index].mustChangePassword = mustChangePassword
-            settings.admins[index].inviteToken = inviteToken
+            settings.admins[index].passwordSetupToken = passwordSetupToken
         } else {
             settings.admins.append(
                 StoredSettings.Admin(
                     username: username,
-                    passwordSalt: saltString,
+                    passwordSalt: generatePasswordHash ? saltString : nil,
                     passwordHash: hashString,
-                    passwordIterations: iterations,
+                    passwordIterations: generatePasswordHash ? iterations : nil,
+                    passwordAlgorithm: generatePasswordHash ? PasswordAlgorithm.pbkdf2SHA256.rawValue : nil,
                     mustChangePassword: mustChangePassword,
-                    inviteToken: inviteToken,
+                    passwordSetupToken: passwordSetupToken,
                     createdAt: Date()
                 )
             )
         }
 
-        if settings.username.caseInsensitiveCompare(username) == .orderedSame {
+        if settings.username.caseInsensitiveCompare(username) == .orderedSame, generatePasswordHash {
             settings.passwordSalt = saltString
             settings.passwordHash = hashString
             settings.passwordIterations = iterations
+            settings.passwordAlgorithm = PasswordAlgorithm.pbkdf2SHA256.rawValue
             settings.passwordConfigured = true
         }
+    }
+
+    private func storePasswordSetupTokenLocked(_ token: String, for username: String, mustChangePassword: Bool) throws {
+        guard let index = settings.admins.firstIndex(where: { $0.username.caseInsensitiveCompare(username) == .orderedSame }) else {
+            throw SecurityError.invalidInput("That administrator does not exist.")
+        }
+        settings.admins[index].passwordSetupToken = token
+        settings.admins[index].mustChangePassword = mustChangePassword
     }
 
     private func loadPasswordRecordLocked(for username: String) throws -> PasswordRecord {
@@ -4684,7 +5013,8 @@ private final class WebDashboardSecurityController {
               let iterations = admin.passwordIterations else {
             throw SecurityError.invalidCredential
         }
-        return PasswordRecord(salt: salt, hash: hash, iterations: iterations)
+        let algorithm = PasswordAlgorithm(rawValue: admin.passwordAlgorithm ?? settings.passwordAlgorithm ?? "") ?? .legacyIteratedSHA256
+        return PasswordRecord(salt: salt, hash: hash, iterations: iterations, algorithm: algorithm)
     }
 
     private func adminLocked(username: String) -> StoredSettings.Admin? {
@@ -4724,31 +5054,47 @@ private final class WebDashboardSecurityController {
                     passwordSalt: salt,
                     passwordHash: hash,
                     passwordIterations: iterations,
+                    passwordAlgorithm: settings.passwordAlgorithm ?? PasswordAlgorithm.legacyIteratedSHA256.rawValue,
                     mustChangePassword: false,
-                    inviteToken: nil,
+                    passwordSetupToken: nil,
                     createdAt: Date()
                 )
             ]
             settings.passwordConfigured = true
             try? persistSettingsLocked()
         }
+        if settings.passwordAlgorithm == nil, settings.passwordHash != nil {
+            settings.passwordAlgorithm = PasswordAlgorithm.legacyIteratedSHA256.rawValue
+        }
+        for index in settings.admins.indices {
+            if settings.admins[index].passwordAlgorithm == nil, settings.admins[index].passwordHash != nil {
+                settings.admins[index].passwordAlgorithm = settings.passwordAlgorithm ?? PasswordAlgorithm.legacyIteratedSHA256.rawValue
+            }
+            if settings.passkeys.isEmpty == false, settings.admins[index].passwordSetupToken == "" {
+                settings.admins[index].passwordSetupToken = nil
+            }
+        }
+        for index in settings.passkeys.indices where settings.passkeys[index].username.isEmpty {
+            settings.passkeys[index].username = settings.username
+        }
     }
 
-    private func generateTemporaryPassword() -> String {
-        "ship-" + randomData(length: 12).base64URLEncodedString()
-    }
-
-    private func inviteURL(for token: String, request: HttpRequest) -> String {
-        let origin = resolvedRequestOrigin(for: request) ?? queue.sync(execute: { settings.publicBaseURL }) ?? "http://localhost"
+    private func inviteURLLocked(for token: String, request: HttpRequest) -> String {
+        let origin = resolvedRequestOrigin(for: request) ?? settings.publicBaseURL ?? "http://localhost"
         return "\(origin)/?invite=\(token)"
     }
 
-    private static func derivePasswordHash(password: String, salt: Data, iterations: Int) -> Data {
-        var input = Data(password.utf8) + salt
-        for _ in 0..<iterations {
-            input = Data(SHA256.hash(data: input))
+    private static func derivePasswordHash(password: String, salt: Data, iterations: Int, algorithm: PasswordAlgorithm) -> Data {
+        switch algorithm {
+        case .legacyIteratedSHA256:
+            var input = Data(password.utf8) + salt
+            for _ in 0..<iterations {
+                input = Data(SHA256.hash(data: input))
+            }
+            return input
+        case .pbkdf2SHA256:
+            return pbkdf2SHA256(password: Data(password.utf8), salt: salt, iterations: iterations, keyLength: 32)
         }
-        return input
     }
 
     private func verifyPassword(_ password: String, record: PasswordRecord) -> Bool {
@@ -4756,8 +5102,39 @@ private final class WebDashboardSecurityController {
               let stored = try? Data(base64URLString: record.hash) else {
             return false
         }
-        let candidate = Self.derivePasswordHash(password: password, salt: salt, iterations: record.iterations)
+        let candidate = Self.derivePasswordHash(password: password, salt: salt, iterations: record.iterations, algorithm: record.algorithm)
         return constantTimeEquals(candidate, stored)
+    }
+
+    private static func pbkdf2SHA256(password: Data, salt: Data, iterations: Int, keyLength: Int) -> Data {
+        let hmacLength = 32
+        let blockCount = Int(ceil(Double(keyLength) / Double(hmacLength)))
+        let key = SymmetricKey(data: password)
+        var derived = Data()
+
+        for blockIndex in 1...blockCount {
+            var saltBlock = salt
+            saltBlock.append(UInt8((blockIndex >> 24) & 0xff))
+            saltBlock.append(UInt8((blockIndex >> 16) & 0xff))
+            saltBlock.append(UInt8((blockIndex >> 8) & 0xff))
+            saltBlock.append(UInt8(blockIndex & 0xff))
+
+            var u = Data(HMAC<SHA256>.authenticationCode(for: saltBlock, using: key))
+            var t = u
+
+            if iterations > 1 {
+                for _ in 2...iterations {
+                    u = Data(HMAC<SHA256>.authenticationCode(for: u, using: key))
+                    for index in t.indices {
+                        t[index] ^= u[index]
+                    }
+                }
+            }
+
+            derived.append(t)
+        }
+
+        return derived.prefix(keyLength)
     }
 
     private func constantTimeEquals(_ lhs: Data, _ rhs: Data) -> Bool {
