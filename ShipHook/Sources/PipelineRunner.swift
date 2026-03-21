@@ -71,7 +71,7 @@ struct PipelineRunner {
             combinedLog.append(chunk)
             if let data = chunk.data(using: .utf8),
                let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: logPath)) {
-                try? handle.seekToEnd()
+                _ = try? handle.seekToEnd()
                 try? handle.write(contentsOf: data)
                 try? handle.close()
             }

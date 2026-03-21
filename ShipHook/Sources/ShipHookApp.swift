@@ -172,9 +172,12 @@ private enum MenuBarIconProvider {
             return image
         }
 
-        let image = NSWorkspace.shared.icon(forFileType: "app")
-        image.isTemplate = true
-        image.size = NSSize(width: 16, height: 16)
-        return image
+        if let image = NSImage(named: NSImage.applicationIconName) {
+            image.isTemplate = true
+            image.size = NSSize(width: 16, height: 16)
+            return image
+        }
+
+        return NSImage(size: NSSize(width: 16, height: 16))
     }
 }

@@ -1,6 +1,7 @@
+import AppKit
 import Foundation
 
-struct ProjectInspectionResult {
+struct ProjectInspectionResult: Codable {
     var owner: String?
     var repo: String?
     var branch: String?
@@ -348,4 +349,47 @@ private struct XcodeListResponse: Decodable {
     var schemes: [String] {
         project?.schemes ?? workspace?.schemes ?? []
     }
+}
+
+struct RepositoryIconResolver {
+    private let fileManager = FileManager.default
+
+    func resolveIcon(for repository: RepositoryConfiguration) -> NSImage {
+        if let artifactPath = repository.xcode?.artifactPath {
+            let expandedPath = (artifactPath as NSString).expandingTildeInPath
+            if fileManager.fileExists(atPath: expandedPath) {
+                return NSWorkspace.shared.icon(forFile: expandedPath)
+            }
+        }
+
+        let checkoutPath = (repository.localCheckoutPath as NSString).expandingTildeInPath
+        if fileManager.fileExists(atPath: checkoutPath) {
+            return NSWorkspace.shared.icon(forFile: checkoutPath)
+        }
+
+        if let projectPath = repository.xcode?.projectPath {
+            let expandedProjectPath = (projectPath as NSString).expandingTildeInPath
+            if fileManager.fileExists(atPath: expandedProjectPath) {
+                return NSWorkspace.shared.icon(forFile: expandedProjectPath)
+            }
+        }
+
+        if let workspacePath = repository.xcode?.workspacePath {
+            let expandedWorkspacePath = (workspacePath as NSString).expandingTildeInPath
+            if fileManager.fileExists(atPath: expandedWorkspacePath) {
+                return NSWorkspace.shared.icon(forFile: expandedWorkspacePath)
+            }
+        }
+
+        if #available(macOS 12.0, *) {
+            return NSWorkspace.shared.icon(for: .application)
+        }
+
+        if let image = NSImage(named: NSImage.applicationIconName) {
+            return image
+        }
+
+        return NSImage(size: NSSize(width: 64, height: 64))
+    }
+
 }

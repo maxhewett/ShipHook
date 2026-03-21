@@ -1,35 +1,100 @@
+import CryptoKit
 import Foundation
+import Security
 import Swifter
 
 struct WebDashboardSnapshot: Codable {
     var generatedAt: Date
+    var global: Global
     var repositories: [Repository]
+
+    struct Global: Codable {
+        var pollIntervalSeconds: Double
+        var githubToken: String?
+        var githubTokenEnvVar: String?
+        var generatedDataRetentionCount: Int
+        var autoPauseFailureCount: Int
+        var webDashboardEnabled: Bool
+        var webDashboardPort: Int
+        var configPath: String
+        var hasUnsavedChanges: Bool
+        var lastGlobalError: String?
+        var launchesAtLogin: Bool
+        var launchAtLoginStatusMessage: String?
+        var webDashboardStatusMessage: String
+        var webDashboardURLString: String?
+        var availableNotarizationProfiles: [String]
+        var lastSigningIdentityError: String?
+        var signingDiagnosticsSummary: String?
+        var signingDiagnosticsDetails: [String]
+        var availableSigningIdentities: [SigningIdentityOption]
+
+        static let empty = Global(
+            pollIntervalSeconds: 300,
+            githubToken: nil,
+            githubTokenEnvVar: "GITHUB_TOKEN",
+            generatedDataRetentionCount: 3,
+            autoPauseFailureCount: 3,
+            webDashboardEnabled: false,
+            webDashboardPort: 8787,
+            configPath: "",
+            hasUnsavedChanges: false,
+            lastGlobalError: nil,
+            launchesAtLogin: false,
+            launchAtLoginStatusMessage: nil,
+            webDashboardStatusMessage: "Local web dashboard is turned off.",
+            webDashboardURLString: nil,
+            availableNotarizationProfiles: [],
+            lastSigningIdentityError: nil,
+            signingDiagnosticsSummary: nil,
+            signingDiagnosticsDetails: [],
+            availableSigningIdentities: []
+        )
+    }
+
+    struct SigningIdentityOption: Codable {
+        var fingerprint: String
+        var commonName: String
+        var teamID: String?
+        var kind: String
+        var displayName: String
+        var isRecommendedForSparkle: Bool
+    }
 
     struct Repository: Codable {
         var id: String
         var name: String
         var iconDataURL: String?
-        var isEnabled: Bool
-        var slug: String
-        var branch: String
-        var activity: String
-        var phase: String
-        var summary: String
-        var releaseChannel: String?
+        var configuration: RepositoryConfiguration
+        var runtime: Runtime
         var version: String?
         var publishedVersion: String?
-        var lastSeenSHA: String?
-        var lastBuiltSHA: String?
-        var lastCheckDate: Date?
-        var lastSuccessDate: Date?
-        var buildStartedAt: Date?
         var latestBuild: Build?
         var recentBuilds: [Build]
         var recentReleases: [Release]
         var progress: Progress?
-        var lastCommitAuthorLogin: String?
-        var lastCommitAuthorAvatarURL: String?
-        var lastCommitAuthorProfileURL: String?
+
+        struct Runtime: Codable {
+            var isEnabled: Bool
+            var slug: String
+            var branch: String
+            var activity: String
+            var phase: String
+            var summary: String
+            var releaseChannel: String?
+            var version: String?
+            var publishedVersion: String?
+            var lastSeenSHA: String?
+            var lastBuiltSHA: String?
+            var lastCheckDate: Date?
+            var lastSuccessDate: Date?
+            var buildStartedAt: Date?
+            var lastCommitAuthorLogin: String?
+            var lastCommitAuthorAvatarURL: String?
+            var lastCommitAuthorProfileURL: String?
+            var lastLog: String
+            var lastLogPath: String?
+        }
     }
 
     struct Build: Codable {
@@ -64,6 +129,188 @@ struct WebDashboardSnapshot: Codable {
     }
 }
 
+struct WebDashboardNotarizationProfileInput: Codable {
+    var profileName: String
+    var appleID: String
+    var teamID: String
+    var appSpecificPassword: String
+}
+
+struct WebDashboardRepositoryInspectionRequest: Codable {
+    var localCheckoutPath: String
+    var fallbackOwner: String
+    var fallbackRepo: String
+    var fallbackBranch: String
+}
+
+struct WebDashboardRepositoryInspectionPreview: Codable {
+    var inspection: ProjectInspectionResult
+    var suggestedRepository: RepositoryConfiguration
+}
+
+struct WebDashboardRepositoryInspectionSubmission: Codable {
+    var localCheckoutPath: String
+    var fallbackOwner: String
+    var fallbackRepo: String
+    var fallbackBranch: String
+    var selectedScheme: String?
+}
+
+enum WebDashboardCommand: Codable {
+    case saveConfiguration(AppConfiguration)
+    case reloadConfiguration
+    case addRepository
+    case inspectRepository(WebDashboardRepositoryInspectionRequest)
+    case addRepositoryFromInspection(WebDashboardRepositoryInspectionSubmission)
+    case removeRepository(String)
+    case pollAll
+    case pollRepository(String)
+    case setRepositoryEnabled(repositoryID: String, enabled: Bool)
+    case resetBuildState(String)
+    case refreshReleases(String)
+    case rollbackRelease(repositoryID: String, tagName: String)
+    case setLaunchAtLogin(Bool)
+    case refreshSigningIdentities
+    case storeNotarizationProfile(WebDashboardNotarizationProfileInput)
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case configuration
+        case inspectionRequest
+        case inspectionSubmission
+        case repositoryID
+        case tagName
+        case enabled
+        case notarizationProfile
+    }
+
+    private enum CommandType: String, Codable {
+        case saveConfiguration
+        case reloadConfiguration
+        case addRepository
+        case inspectRepository
+        case addRepositoryFromInspection
+        case removeRepository
+        case pollAll
+        case pollRepository
+        case setRepositoryEnabled
+        case resetBuildState
+        case refreshReleases
+        case rollbackRelease
+        case setLaunchAtLogin
+        case refreshSigningIdentities
+        case storeNotarizationProfile
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decode(CommandType.self, forKey: .type)
+
+        switch type {
+        case .saveConfiguration:
+            self = .saveConfiguration(try container.decode(AppConfiguration.self, forKey: .configuration))
+        case .reloadConfiguration:
+            self = .reloadConfiguration
+        case .addRepository:
+            self = .addRepository
+        case .inspectRepository:
+            self = .inspectRepository(try container.decode(WebDashboardRepositoryInspectionRequest.self, forKey: .inspectionRequest))
+        case .addRepositoryFromInspection:
+            self = .addRepositoryFromInspection(try container.decode(WebDashboardRepositoryInspectionSubmission.self, forKey: .inspectionSubmission))
+        case .removeRepository:
+            self = .removeRepository(try container.decode(String.self, forKey: .repositoryID))
+        case .pollAll:
+            self = .pollAll
+        case .pollRepository:
+            self = .pollRepository(try container.decode(String.self, forKey: .repositoryID))
+        case .setRepositoryEnabled:
+            self = .setRepositoryEnabled(
+                repositoryID: try container.decode(String.self, forKey: .repositoryID),
+                enabled: try container.decode(Bool.self, forKey: .enabled)
+            )
+        case .resetBuildState:
+            self = .resetBuildState(try container.decode(String.self, forKey: .repositoryID))
+        case .refreshReleases:
+            self = .refreshReleases(try container.decode(String.self, forKey: .repositoryID))
+        case .rollbackRelease:
+            self = .rollbackRelease(
+                repositoryID: try container.decode(String.self, forKey: .repositoryID),
+                tagName: try container.decode(String.self, forKey: .tagName)
+            )
+        case .setLaunchAtLogin:
+            self = .setLaunchAtLogin(try container.decode(Bool.self, forKey: .enabled))
+        case .refreshSigningIdentities:
+            self = .refreshSigningIdentities
+        case .storeNotarizationProfile:
+            self = .storeNotarizationProfile(
+                try container.decode(WebDashboardNotarizationProfileInput.self, forKey: .notarizationProfile)
+            )
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .saveConfiguration(configuration):
+            try container.encode(CommandType.saveConfiguration, forKey: .type)
+            try container.encode(configuration, forKey: .configuration)
+        case .reloadConfiguration:
+            try container.encode(CommandType.reloadConfiguration, forKey: .type)
+        case .addRepository:
+            try container.encode(CommandType.addRepository, forKey: .type)
+        case let .inspectRepository(request):
+            try container.encode(CommandType.inspectRepository, forKey: .type)
+            try container.encode(request, forKey: .inspectionRequest)
+        case let .addRepositoryFromInspection(submission):
+            try container.encode(CommandType.addRepositoryFromInspection, forKey: .type)
+            try container.encode(submission, forKey: .inspectionSubmission)
+        case let .removeRepository(repositoryID):
+            try container.encode(CommandType.removeRepository, forKey: .type)
+            try container.encode(repositoryID, forKey: .repositoryID)
+        case .pollAll:
+            try container.encode(CommandType.pollAll, forKey: .type)
+        case let .pollRepository(repositoryID):
+            try container.encode(CommandType.pollRepository, forKey: .type)
+            try container.encode(repositoryID, forKey: .repositoryID)
+        case let .setRepositoryEnabled(repositoryID, enabled):
+            try container.encode(CommandType.setRepositoryEnabled, forKey: .type)
+            try container.encode(repositoryID, forKey: .repositoryID)
+            try container.encode(enabled, forKey: .enabled)
+        case let .resetBuildState(repositoryID):
+            try container.encode(CommandType.resetBuildState, forKey: .type)
+            try container.encode(repositoryID, forKey: .repositoryID)
+        case let .refreshReleases(repositoryID):
+            try container.encode(CommandType.refreshReleases, forKey: .type)
+            try container.encode(repositoryID, forKey: .repositoryID)
+        case let .rollbackRelease(repositoryID, tagName):
+            try container.encode(CommandType.rollbackRelease, forKey: .type)
+            try container.encode(repositoryID, forKey: .repositoryID)
+            try container.encode(tagName, forKey: .tagName)
+        case let .setLaunchAtLogin(enabled):
+            try container.encode(CommandType.setLaunchAtLogin, forKey: .type)
+            try container.encode(enabled, forKey: .enabled)
+        case .refreshSigningIdentities:
+            try container.encode(CommandType.refreshSigningIdentities, forKey: .type)
+        case let .storeNotarizationProfile(profile):
+            try container.encode(CommandType.storeNotarizationProfile, forKey: .type)
+            try container.encode(profile, forKey: .notarizationProfile)
+        }
+    }
+}
+
+struct WebDashboardCommandResponse: Codable {
+    var ok: Bool
+    var message: String?
+    var error: String?
+    var snapshot: WebDashboardSnapshot
+    var inspectionPreview: WebDashboardRepositoryInspectionPreview?
+}
+
+private struct WebDashboardErrorResponse: Encodable {
+    var ok: Bool
+    var error: String
+}
+
 final class WebDashboardServer {
     enum Status: Equatable {
         case stopped
@@ -92,13 +339,19 @@ final class WebDashboardServer {
     }
 
     private let snapshotProvider: @MainActor () -> WebDashboardSnapshot
+    private let commandHandler: @MainActor (WebDashboardCommand) -> WebDashboardCommandResponse
     private let server = HttpServer()
+    private let securityController = WebDashboardSecurityController()
     private var isConfigured = false
     private var currentPort: in_port_t?
     private var status: Status = .stopped
 
-    init(snapshotProvider: @escaping @MainActor () -> WebDashboardSnapshot) {
+    init(
+        snapshotProvider: @escaping @MainActor () -> WebDashboardSnapshot,
+        commandHandler: @escaping @MainActor (WebDashboardCommand) -> WebDashboardCommandResponse
+    ) {
         self.snapshotProvider = snapshotProvider
+        self.commandHandler = commandHandler
     }
 
     func configure(enabled: Bool, port: Int) -> Status {
@@ -120,7 +373,7 @@ final class WebDashboardServer {
         do {
             try server.start(resolvedPort, forceIPv4: true)
             currentPort = resolvedPort
-            status = .running(url: "http://127.0.0.1:\(resolvedPort)")
+            status = .running(url: "http://localhost:\(resolvedPort)")
         } catch {
             currentPort = nil
             status = .failed(message: "Web dashboard failed to start: \(error.localizedDescription)")
@@ -144,18 +397,134 @@ final class WebDashboardServer {
         }
         isConfigured = true
 
-        server["/api/state"] = { [weak self] _ in
+        server["/robots.txt"] = { [weak self] request in
             guard let self else {
                 return .internalServerError
             }
-            return self.jsonResponse(for: self.currentSnapshot())
+            return self.textResponse(
+                "User-agent: *\nDisallow: /\n",
+                statusCode: 200,
+                reason: "OK",
+                request: request,
+                contentType: "text/plain; charset=utf-8"
+            )
         }
 
-        server["/"] = { [weak self] _ in
+        server.POST["/api/auth/setup"] = { [weak self] request in
             guard let self else {
                 return .internalServerError
             }
-            return .ok(.html(self.htmlDocument(for: self.currentSnapshot())))
+            return self.handleAuthSetup(request: request)
+        }
+
+        server.POST["/api/auth/login"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handlePasswordLogin(request: request)
+        }
+
+        server.POST["/api/auth/logout"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleLogout(request: request)
+        }
+
+        server.POST["/api/auth/change-password"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handlePasswordChange(request: request)
+        }
+
+        server.POST["/api/auth/admins/invite"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleAdminInvite(request: request)
+        }
+
+        server.POST["/api/auth/passkeys/register/begin"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleBeginPasskeyRegistration(request: request)
+        }
+
+        server.POST["/api/auth/passkeys/register/finish"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleFinishPasskeyRegistration(request: request)
+        }
+
+        server.POST["/api/auth/passkeys/authenticate/begin"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleBeginPasskeyAuthentication(request: request)
+        }
+
+        server.POST["/api/auth/passkeys/authenticate/finish"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleFinishPasskeyAuthentication(request: request)
+        }
+
+        server["/api/state"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            guard self.securityController.isAuthorized(request: request) else {
+                return self.unauthorizedJSONResponse(request: request)
+            }
+            return self.jsonResponse(for: self.currentSnapshot(), request: request)
+        }
+
+        server.POST["/api/command"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            guard self.securityController.isAuthorized(request: request) else {
+                return self.unauthorizedJSONResponse(request: request)
+            }
+            do {
+                let command = try self.decodeCommand(from: request)
+                let response = self.perform(command)
+                return self.jsonResponse(for: response, request: request)
+            } catch {
+                return self.errorResponse(message: error.localizedDescription, request: request)
+            }
+        }
+
+        server["/security"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.securityPageResponse(for: request)
+        }
+
+        server["/"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.rootResponse(for: request)
+        }
+
+        server["/assets/glyph-dark.png"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.bundleImageResponse(named: "shiphoookglyphwhite", ext: "png", request: request)
+        }
+
+        server["/assets/glyph-light.png"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.bundleImageResponse(named: "shiphoookglyphblack", ext: "png", request: request)
         }
     }
 
@@ -167,20 +536,353 @@ final class WebDashboardServer {
         }
     }
 
-    private func jsonResponse(for snapshot: WebDashboardSnapshot) -> HttpResponse {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.sortedKeys]
+    private func perform(_ command: WebDashboardCommand) -> WebDashboardCommandResponse {
+        DispatchQueue.main.sync {
+            MainActor.assumeIsolated {
+                commandHandler(command)
+            }
+        }
+    }
+
+    private func decodeCommand(from request: HttpRequest) throws -> WebDashboardCommand {
+        let data = Data(request.body)
+        return try JSONDecoder.webDashboard.decode(WebDashboardCommand.self, from: data)
+    }
+
+    private func jsonResponse<T: Encodable>(for value: T, request: HttpRequest) -> HttpResponse {
+        let encoder = JSONEncoder.webDashboard
         do {
-            let data = try encoder.encode(snapshot)
-            return .ok(.data(data, contentType: "application/json; charset=utf-8"))
+            let data = try encoder.encode(value)
+            return rawResponse(
+                statusCode: 200,
+                reason: "OK",
+                body: data,
+                contentType: "application/json; charset=utf-8",
+                request: request
+            )
         } catch {
             return .internalServerError
         }
     }
 
-    private func htmlDocument(for _: WebDashboardSnapshot) -> String {
+    private func errorResponse(message: String, request: HttpRequest) -> HttpResponse {
+        let payload = WebDashboardErrorResponse(ok: false, error: message)
+        return jsonResponse(for: payload, request: request)
+    }
+
+    private func unauthorizedJSONResponse(request: HttpRequest) -> HttpResponse {
+        let payload = WebDashboardErrorResponse(ok: false, error: "Authentication required.")
+        let encoder = JSONEncoder.webDashboard
+        guard let data = try? encoder.encode(payload) else {
+            return .unauthorized
+        }
+        return rawResponse(
+            statusCode: 401,
+            reason: "Unauthorized",
+            body: data,
+            contentType: "application/json; charset=utf-8",
+            request: request
+        )
+    }
+
+    private func htmlDocument() -> String {
         Self.htmlTemplate
+    }
+
+    private func rootResponse(for request: HttpRequest) -> HttpResponse {
+        if securityController.isAuthorized(request: request) {
+            if securityController.requiresPasswordChange(request: request) {
+                return redirectResponse(to: "/security?force-password=1", request: request)
+            }
+            return htmlResponse(htmlDocument(), request: request)
+        }
+
+        if securityController.requiresBootstrap {
+            if securityController.isBootstrapRequestAllowed(request: request) {
+                return htmlResponse(securityController.setupPageHTML(), request: request)
+            }
+            return htmlResponse(
+                securityController.bootstrapLockedPageHTML(),
+                statusCode: 403,
+                reason: "Forbidden",
+                request: request
+            )
+        }
+
+        let inviteToken = request.queryParams.first(where: { $0.0 == "invite" })?.1
+        let inviteUsername = securityController.usernameForInviteToken(inviteToken)
+        return htmlResponse(
+            securityController.loginPageHTML(
+                passkeysAvailable: securityController.hasRegisteredPasskeys,
+                inviteUsername: inviteUsername,
+                inviteToken: inviteToken
+            ),
+            request: request
+        )
+    }
+
+    private func securityPageResponse(for request: HttpRequest) -> HttpResponse {
+        guard securityController.isAuthorized(request: request) else {
+            return redirectResponse(to: "/", request: request)
+        }
+        let forcePassword = request.queryParams.contains { $0.0 == "force-password" && $0.1 == "1" }
+        return htmlResponse(securityController.securityPageHTML(forcePassword: forcePassword, currentUsername: securityController.currentUsername(request: request) ?? ""), request: request)
+    }
+
+    private func handleAuthSetup(request: HttpRequest) -> HttpResponse {
+        do {
+            let payload = try decodeAuthSetupRequest(from: request)
+            let result = try securityController.completeBootstrap(using: payload, request: request)
+            if isURLEncodedForm(request) {
+                return redirectResponse(to: "/", request: request)
+            }
+            return jsonResponse(for: result, request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func handlePasswordLogin(request: HttpRequest) -> HttpResponse {
+        do {
+            let payload = try decodePasswordLoginRequest(from: request)
+            let result = try securityController.login(using: payload, request: request)
+            if isURLEncodedForm(request) {
+                return redirectResponse(to: result.requiresPasswordChange == true ? "/security?force-password=1" : "/", request: request)
+            }
+            return jsonResponse(for: result, request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func handleLogout(request: HttpRequest) -> HttpResponse {
+        securityController.logout(request: request)
+        return jsonResponse(for: WebDashboardAuthMessageResponse(ok: true, message: "Signed out."), request: request)
+    }
+
+    private func handlePasswordChange(request: HttpRequest) -> HttpResponse {
+        do {
+            let payload = try decodePasswordChangeRequest(from: request)
+            try securityController.changePassword(using: payload, request: request)
+            if isURLEncodedForm(request) {
+                return redirectResponse(to: "/security", request: request)
+            }
+            return jsonResponse(for: WebDashboardAuthMessageResponse(ok: true, message: "Password updated."), request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func handleAdminInvite(request: HttpRequest) -> HttpResponse {
+        do {
+            let payload = try decodeRequest(WebDashboardAdminInviteRequest.self, from: request)
+            let response = try securityController.inviteAdmin(username: payload.username, request: request)
+            return jsonResponse(for: response, request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func handleBeginPasskeyRegistration(request: HttpRequest) -> HttpResponse {
+        do {
+            let response = try securityController.beginPasskeyRegistration(request: request)
+            return jsonResponse(for: response, request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func handleFinishPasskeyRegistration(request: HttpRequest) -> HttpResponse {
+        do {
+            let payload = try decodeRequest(WebDashboardFinishPasskeyRegistrationRequest.self, from: request)
+            let response = try securityController.finishPasskeyRegistration(using: payload, request: request)
+            return jsonResponse(for: response, request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func handleBeginPasskeyAuthentication(request: HttpRequest) -> HttpResponse {
+        do {
+            let response = try securityController.beginPasskeyAuthentication(request: request)
+            return jsonResponse(for: response, request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func handleFinishPasskeyAuthentication(request: HttpRequest) -> HttpResponse {
+        do {
+            let payload = try decodeRequest(WebDashboardFinishPasskeyAuthenticationRequest.self, from: request)
+            let response = try securityController.finishPasskeyAuthentication(using: payload, request: request)
+            return jsonResponse(for: response, request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func authErrorResponse(_ error: WebDashboardSecurityController.SecurityError, request: HttpRequest) -> HttpResponse {
+        let response = WebDashboardAuthMessageResponse(ok: false, message: nil, error: error.userMessage, passkeysAvailable: securityController.hasRegisteredPasskeys)
+        let encoder = JSONEncoder.webDashboard
+        guard let data = try? encoder.encode(response) else {
+            return .internalServerError
+        }
+        return rawResponse(
+            statusCode: error.statusCode,
+            reason: error.reasonPhrase,
+            body: data,
+            contentType: "application/json; charset=utf-8",
+            request: request
+        )
+    }
+
+    private func decodeRequest<T: Decodable>(_ type: T.Type, from request: HttpRequest) throws -> T {
+        try JSONDecoder.webDashboard.decode(T.self, from: Data(request.body))
+    }
+
+    private func decodeAuthSetupRequest(from request: HttpRequest) throws -> WebDashboardAuthSetupRequest {
+        if isURLEncodedForm(request) {
+            let form = Dictionary(uniqueKeysWithValues: request.parseUrlencodedForm())
+            return WebDashboardAuthSetupRequest(
+                username: form["username"] ?? "",
+                password: form["password"] ?? "",
+                publicBaseURL: emptyToNil(form["publicBaseURL"]),
+                sessionDurationHours: Int(form["sessionDurationHours"] ?? "")
+            )
+        }
+        return try decodeRequest(WebDashboardAuthSetupRequest.self, from: request)
+    }
+
+    private func decodePasswordLoginRequest(from request: HttpRequest) throws -> WebDashboardPasswordLoginRequest {
+        if isURLEncodedForm(request) {
+            let form = Dictionary(uniqueKeysWithValues: request.parseUrlencodedForm())
+            return WebDashboardPasswordLoginRequest(
+                username: form["username"] ?? "",
+                password: form["password"] ?? ""
+            )
+        }
+        return try decodeRequest(WebDashboardPasswordLoginRequest.self, from: request)
+    }
+
+    private func decodePasswordChangeRequest(from request: HttpRequest) throws -> WebDashboardPasswordChangeRequest {
+        if isURLEncodedForm(request) {
+            let form = Dictionary(uniqueKeysWithValues: request.parseUrlencodedForm())
+            return WebDashboardPasswordChangeRequest(
+                currentPassword: form["currentPassword"] ?? "",
+                newPassword: form["newPassword"] ?? ""
+            )
+        }
+        return try decodeRequest(WebDashboardPasswordChangeRequest.self, from: request)
+    }
+
+    private func isURLEncodedForm(_ request: HttpRequest) -> Bool {
+        request.headers["content-type"]?.lowercased().contains("application/x-www-form-urlencoded") == true
+    }
+
+    private func emptyToNil(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private func htmlResponse(
+        _ html: String,
+        statusCode: Int = 200,
+        reason: String = "OK",
+        request: HttpRequest
+    ) -> HttpResponse {
+        rawResponse(
+            statusCode: statusCode,
+            reason: reason,
+            body: Data(html.utf8),
+            contentType: "text/html; charset=utf-8",
+            request: request
+        )
+    }
+
+    private func textResponse(
+        _ text: String,
+        statusCode: Int,
+        reason: String,
+        request: HttpRequest,
+        contentType: String
+    ) -> HttpResponse {
+        rawResponse(
+            statusCode: statusCode,
+            reason: reason,
+            body: Data(text.utf8),
+            contentType: contentType,
+            request: request
+        )
+    }
+
+    private func redirectResponse(to location: String, request: HttpRequest) -> HttpResponse {
+        var headers = securityHeaders(for: request)
+        headers["Location"] = location
+        return .raw(303, "See Other", headers, nil)
+    }
+
+    private func rawResponse(
+        statusCode: Int,
+        reason: String,
+        body: Data,
+        contentType: String,
+        request: HttpRequest
+    ) -> HttpResponse {
+        var headers = securityHeaders(for: request)
+        headers["Content-Type"] = contentType
+        headers["Content-Length"] = "\(body.count)"
+        if let cookie = securityController.pendingCookieHeader(for: request) {
+            headers["Set-Cookie"] = cookie
+        }
+        return .raw(statusCode, reason, headers, { writer in
+            try writer.write(body)
+        })
+    }
+
+    private func securityHeaders(for request: HttpRequest) -> [String: String] {
+        [
+            "X-Robots-Tag": "noindex, nofollow, noarchive",
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "Cross-Origin-Resource-Policy": "same-origin",
+            "Cross-Origin-Opener-Policy": "same-origin",
+            "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=(), publickey-credentials-get=(self), publickey-credentials-create=(self)",
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; font-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'"
+        ]
+    }
+
+    private func bundleImageResponse(named name: String, ext: String, request: HttpRequest) -> HttpResponse {
+        guard let url = Bundle.main.url(forResource: name, withExtension: ext),
+              let data = try? Data(contentsOf: url) else {
+            return .notFound
+        }
+        return rawResponse(
+            statusCode: 200,
+            reason: "OK",
+            body: data,
+            contentType: "image/png",
+            request: request
+        )
     }
 
     private static let htmlTemplate = """
@@ -189,601 +891,4138 @@ final class WebDashboardServer {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ShipHook Dashboard</title>
+  <title>ShipHook Control Room</title>
   <style>
     :root {
       color-scheme: light dark;
-      --bg: radial-gradient(circle at 18% -10%, rgba(31,185,255,.20), transparent 36%), radial-gradient(circle at 100% 0%, rgba(52,211,153,.14), transparent 32%), linear-gradient(180deg,#0d1522 0%,#0b1118 100%);
-      --surface: rgba(255,255,255,.08);
-      --surface-2: rgba(255,255,255,.05);
-      --border: rgba(255,255,255,.16);
-      --text: rgba(255,255,255,.94);
-      --muted: rgba(255,255,255,.64);
-      --green: #36d39e;
-      --orange: #ff9e4d;
-      --red: #ff6f80;
-      --blue: #63c9ff;
-      --cyan: #52d8ff;
+      --bg: #101218;
+      --bg-2: #171a22;
+      --panel: rgba(19, 23, 31, 0.92);
+      --panel-2: rgba(25, 31, 42, 0.92);
+      --panel-3: rgba(14, 18, 26, 0.96);
+      --line: rgba(255,255,255,0.08);
+      --line-strong: rgba(255,255,255,0.18);
+      --text: #f3efe6;
+      --muted: #a7adbb;
+      --accent: #ff875b;
+      --accent-2: #4db8ff;
+      --accent-3: #ffe082;
+      --success: #52d49f;
+      --warning: #ffbe55;
+      --danger: #ff6d7a;
+      --shadow: 0 20px 60px rgba(0, 0, 0, 0.34);
+      --radius: 22px;
+      --radius-sm: 16px;
+      --font-body: "Avenir Next", "Segoe UI", sans-serif;
+      --font-display: "Iowan Old Style", "Palatino Linotype", serif;
+      --font-mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #eef3f8;
+        --bg-2: #f7fafc;
+        --panel: rgba(255, 255, 255, 0.88);
+        --panel-2: rgba(252, 253, 255, 0.94);
+        --panel-3: rgba(244, 248, 252, 0.95);
+        --line: rgba(33, 49, 76, 0.10);
+        --line-strong: rgba(33, 49, 76, 0.20);
+        --text: #182233;
+        --muted: #66758b;
+        --accent: #d86a38;
+        --accent-2: #227bbd;
+        --accent-3: #936b10;
+        --success: #1f9f6e;
+        --warning: #b97b12;
+        --danger: #d14e5c;
+        --shadow: 0 18px 46px rgba(72, 95, 130, 0.14);
+      }
+      body {
+        background:
+          radial-gradient(circle at top left, rgba(216,106,56,0.14), transparent 28%),
+          radial-gradient(circle at 88% 10%, rgba(34,123,189,0.12), transparent 26%),
+          linear-gradient(180deg, #f7fafc 0%, #edf3f8 44%, #e7eef5 100%);
+      }
+      .summary-pill,
+      .badge,
+      .button,
+      .toggle,
+      input[type="text"],
+      input[type="number"],
+      input[type="password"],
+      textarea,
+      select,
+      .summary-row,
+      .item,
+      .log-panel,
+      .topnav,
+      .toast,
+      .modal-card,
+      .repo-subhead-icon,
+      .avatar {
+        border-color: rgba(33, 49, 76, 0.10);
+      }
+      .summary-pill,
+      .badge {
+        background: rgba(24, 34, 51, 0.04);
+        color: var(--text);
+      }
+      .summary-pill .muted,
+      .repo-meta,
+      .muted,
+      .tiny,
+      .panel h2,
+      .editor-section h3,
+      label.field,
+      .summary-row-label {
+        color: var(--muted);
+      }
+      .stack,
+      .repo-card,
+      .panel,
+      .editor-section,
+      .card,
+      .summary-row,
+      .item,
+      .modal-card {
+        background: rgba(255,255,255,0.78);
+      }
+      .hero {
+        background:
+          linear-gradient(135deg, rgba(216,106,56,0.12), rgba(34,123,189,0.05) 52%, rgba(147,107,16,0.06)),
+          rgba(255,255,255,0.90);
+      }
+      .hero::after {
+        background: linear-gradient(90deg, rgba(216,106,56,0), rgba(216,106,56,0.16), rgba(34,123,189,0));
+      }
+      .repo-card {
+        background:
+          linear-gradient(180deg, rgba(24,34,51,0.02), rgba(24,34,51,0)),
+          rgba(255,255,255,0.82);
+      }
+      .repo-card.active {
+        background:
+          linear-gradient(180deg, rgba(216,106,56,0.12), rgba(216,106,56,0.03)),
+          rgba(255,250,247,0.96);
+      }
+      .repo-icon {
+        border-color: rgba(33,49,76,0.10);
+        background: linear-gradient(135deg, rgba(216,106,56,0.18), rgba(34,123,189,0.16));
+      }
+      .button {
+        background: rgba(24, 34, 51, 0.04);
+      }
+      .button:hover {
+        border-color: rgba(33, 49, 76, 0.18);
+      }
+      .button.primary {
+        background: linear-gradient(135deg, rgba(216,106,56,0.18), rgba(216,106,56,0.08));
+        border-color: rgba(216,106,56,0.34);
+      }
+      .button.secondary {
+        background: linear-gradient(135deg, rgba(34,123,189,0.16), rgba(34,123,189,0.06));
+        border-color: rgba(34,123,189,0.30);
+      }
+      .button.warn {
+        background: linear-gradient(135deg, rgba(209,78,92,0.16), rgba(209,78,92,0.06));
+        border-color: rgba(209,78,92,0.28);
+      }
+      .workspace-sticky::before {
+        background: linear-gradient(180deg, rgba(247,250,252,0.88) 0%, rgba(240,245,250,0.74) 82%, rgba(240,245,250,0.45) 100%);
+        border-color: rgba(33,49,76,0.08);
+      }
+      .topnav {
+        background: rgba(255,255,255,0.64);
+        border-color: rgba(33,49,76,0.10);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.70);
+      }
+      .tab.active {
+        border-color: rgba(33,49,76,0.10);
+        background: rgba(24,34,51,0.06);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.78);
+      }
+      .log-panel {
+        background: rgba(244,248,252,0.95);
+      }
+      .toggle,
+      input[type="text"],
+      input[type="number"],
+      input[type="password"],
+      textarea,
+      select {
+        background: rgba(24,34,51,0.03);
+      }
+      .toast {
+        background: rgba(255,255,255,0.95);
+      }
+      .modal-backdrop {
+        background: rgba(232, 238, 245, 0.72);
+      }
     }
     * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; height: 100%; }
     body {
-      margin: 0;
-      min-height: 100vh;
-      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-      background: var(--bg);
+      font: 14px/1.45 var(--font-body);
       color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(255,135,91,0.16), transparent 28%),
+        radial-gradient(circle at 88% 10%, rgba(77,184,255,0.14), transparent 26%),
+        linear-gradient(180deg, #0e1015 0%, #161922 42%, #0f1218 100%);
+      letter-spacing: 0.01em;
     }
-    .wrap { max-width: 1500px; margin: 0 auto; padding: 20px; }
-    .hero {
-      display: flex; justify-content: space-between; align-items: flex-end; gap: 16px;
-      margin-bottom: 14px; padding: 14px;
-      border-radius: 16px; border: 1px solid var(--border);
-      background: rgba(255,255,255,.08);
-      backdrop-filter: blur(20px) saturate(160%);
-      -webkit-backdrop-filter: blur(20px) saturate(160%);
-    }
-    .hero h1 { margin: 0; font-size: 26px; letter-spacing: -.03em; }
-    .hero p { margin: 4px 0 0; color: var(--muted); }
-    .badge {
-      border-radius: 999px; padding: 8px 12px;
-      border: 1px solid var(--border); background: var(--surface-2); color: var(--muted);
-    }
-    .layout {
-      display: grid;
-      grid-template-columns: 320px minmax(0, 1fr);
-      gap: 14px;
-      min-height: calc(100vh - 130px);
-    }
-    .panel {
-      border-radius: 16px; border: 1px solid var(--border);
-      background: var(--surface);
-      backdrop-filter: blur(20px) saturate(160%);
-      -webkit-backdrop-filter: blur(20px) saturate(160%);
-      box-shadow: 0 16px 40px rgba(0,0,0,.22);
-    }
-    .sidebar { padding: 12px; overflow: auto; }
-    .repo-item {
-      width: 100%; text-align: left; cursor: pointer;
-      border: 1px solid rgba(255,255,255,.10);
-      background: rgba(255,255,255,.04);
-      border-radius: 12px; padding: 10px; margin-bottom: 8px;
-      color: inherit;
-    }
-    .repo-item.active {
-      border-color: rgba(99,201,255,.42);
-      background: rgba(99,201,255,.14);
-    }
-    .repo-name { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: -.01em; }
-    .repo-sub { color: var(--muted); font-size: 12px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .repo-top { display:flex; align-items: center; gap: 8px; }
-    .repo-icon {
-      width: 22px; height: 22px; border-radius: 8px;
-      display:inline-flex; align-items: center; justify-content: center;
-      font-size: 12px;
-      border: 1px solid rgba(255,255,255,.16);
-      background: rgba(255,255,255,.07);
-      color: var(--text);
-      flex-shrink: 0;
-      object-fit: cover;
+    button, input, textarea, select { font: inherit; }
+    a { color: inherit; }
+    .shell {
+      max-width: 1680px;
+      margin: 0 auto;
+      padding: 28px;
+      height: 100vh;
       overflow: hidden;
     }
-    .repo-meta { display:flex; justify-content: space-between; gap: 8px; margin-top: 8px; align-items: center; }
-    .status {
-      display: inline-flex; align-items: center; gap: 6px;
-      border-radius: 999px; padding: 4px 8px;
-      border: 1px solid rgba(255,255,255,.18);
-      font-size: 11px; font-weight: 700;
+    .hero, .panel, .card, .repo-card, .editor-section, .stack {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: var(--shadow);
     }
-    .status.idle, .status.succeeded { color: var(--green); background: rgba(54,211,158,.14); }
-    .status.polling, .status.building { color: var(--blue); background: rgba(99,201,255,.14); }
-    .status.failed { color: var(--red); background: rgba(255,111,128,.16); }
-    .status.queued { color: var(--orange); background: rgba(255,158,77,.15); }
-    .status.paused { color: var(--orange); background: rgba(255,158,77,.19); }
-    .dot { width: 7px; height: 7px; border-radius: 999px; background: currentColor; }
-    .version-chip {
-      font-size: 11px; color: var(--muted);
-      padding: 2px 7px; border-radius: 999px; border: 1px solid rgba(255,255,255,.14);
-      background: rgba(255,255,255,.06);
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border-radius: 24px;
+      padding: 16px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      background:
+        linear-gradient(135deg, rgba(255,135,91,0.14), rgba(77,184,255,0.05) 52%, rgba(255,224,130,0.06)),
+        var(--panel-2);
     }
-    .detail { padding: 14px; overflow: auto; }
-    .detail-header { display:flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 10px; }
-    .detail-title-wrap { display:flex; align-items:center; gap: 10px; }
-    .detail-icon {
-      width: 28px; height: 28px; border-radius: 9px;
-      border: 1px solid rgba(255,255,255,.16);
-      background: rgba(255,255,255,.07);
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -8% -36% 34%;
+      height: 180px;
+      background: linear-gradient(90deg, rgba(255,135,91,0), rgba(255,135,91,0.25), rgba(77,184,255,0));
+      transform: rotate(-8deg);
+      filter: blur(18px);
+      pointer-events: none;
+    }
+    .hero-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: flex-start;
+    }
+    .hero-brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .hero-glyph {
+      width: 34px;
+      height: 34px;
+      object-fit: contain;
+      flex: none;
+    }
+    .hero h1 {
+      margin: 0;
+      font: 600 32px/0.92 var(--font-display);
+      letter-spacing: -0.03em;
+      max-width: 10ch;
+    }
+    .hero-subtitle { display: none; }
+    .panel h2, .editor-section h3 {
+      margin: 0 0 12px;
+      font: 700 20px/1.1 var(--font-body);
+      letter-spacing: -0.02em;
+      color: var(--text);
+    }
+    .section-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      line-height: 1.1;
+      color: var(--text);
+    }
+    .section-title span {
+      color: var(--text);
+    }
+    .section-title .icon {
+      width: 18px;
+      height: 18px;
+      color: var(--muted);
+    }
+    .status-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 24px;
+      line-height: 1.05;
+    }
+    .status-title .icon {
+      width: 20px;
+      height: 20px;
+      color: var(--muted);
+      flex: none;
+      align-self: center;
+    }
+    .hero-stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 0;
+      justify-content: flex-end;
+    }
+    .summary-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 38px;
+      border-radius: 999px;
+      padding: 8px 12px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: rgba(255,255,255,0.96);
+      font: 12px/1 var(--font-mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .summary-pill .divider {
+      color: var(--muted);
+      opacity: 0.7;
+    }
+    button.summary-pill {
+      appearance: none;
+      -webkit-appearance: none;
+      cursor: pointer;
+      font: inherit;
+    }
+    .summary-pill .muted {
+      color: rgba(255,255,255,0.66);
+    }
+    .mobile-sidebar-toggle {
+      display: none;
+    }
+    .mobile-sidebar-overlay {
+      display: none;
+    }
+    .main-grid {
+      display: grid;
+      grid-template-columns: 372px minmax(0, 1fr);
+      gap: 18px;
+      align-items: stretch;
+      height: calc(100vh - 56px);
+    }
+    .stack {
+      border-radius: 24px;
+      padding: 18px;
+      background: rgba(16, 20, 28, 0.92);
+      height: 100%;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    main {
+      min-height: 0;
+      overflow: hidden;
+    }
+    .stack-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .stack-header .title {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font: 600 22px/1 var(--font-display);
+      letter-spacing: -0.03em;
+    }
+    .stack-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-left: auto;
+    }
+    .repo-list {
+      display: grid;
+      gap: 10px;
+      align-content: start;
+      align-items: start;
+      grid-auto-rows: max-content;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+      padding-right: 4px;
+    }
+    .stack-footer {
+      padding-top: 14px;
+      margin-top: 14px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      display: flex;
+      justify-content: center;
+    }
+    .repo-card {
+      border-radius: 18px;
+      padding: 8px 10px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0)),
+        rgba(17, 21, 30, 0.92);
+      cursor: pointer;
+      transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+      min-width: 0;
+      width: 100%;
+    }
+    .repo-card:hover { transform: translateY(-1px); border-color: var(--line-strong); }
+    .repo-card.active {
+      border-color: rgba(255,135,91,0.52);
+      background:
+        linear-gradient(180deg, rgba(255,135,91,0.16), rgba(255,135,91,0.04)),
+        rgba(24, 20, 20, 0.94);
+    }
+    .repo-head {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      padding: 2px 2px 0;
+    }
+    .repo-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, rgba(255,135,91,0.26), rgba(77,184,255,0.24));
+      border: 1px solid rgba(255,255,255,0.1);
       object-fit: cover;
-      flex-shrink: 0;
+      flex: none;
     }
-    .title { margin: 0; font-size: 23px; letter-spacing: -.03em; }
-    .slug { color: var(--muted); font-size: 12px; margin-top: 3px; }
-    .summary { margin: 10px 0 12px; }
-    .author { display:flex; align-items:center; gap:8px; color: var(--muted); font-size: 12px; margin-bottom: 10px; }
-    .avatar { width: 18px; height: 18px; border-radius: 999px; object-fit: cover; background: rgba(255,255,255,.12); }
-    .tabs { display:flex; gap: 8px; margin-bottom: 12px; }
+    .repo-name {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.2;
+      font-weight: 700;
+    }
+    .repo-meta, .muted {
+      color: var(--muted);
+    }
+    .repo-meta {
+      font-size: 11px;
+      margin-top: 2px;
+      line-height: 1.25;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .repo-status-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 6px;
+      padding: 0 2px 2px;
+      min-width: 0;
+    }
+    .repo-card .badge {
+      padding: 4px 7px;
+      font-size: 10px;
+    }
+    .repo-status-row .repo-meta {
+      margin-top: 0;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1 1 auto;
+    }
+    .repo-status-row .badge {
+      flex: 0 1 auto;
+      min-width: 0;
+      max-width: 48%;
+    }
+    .repo-card .badge.icon-only {
+      width: 24px;
+      height: 24px;
+      padding: 4px;
+      justify-content: center;
+      max-width: none;
+    }
+    .repo-card .badge.icon-only span:last-child {
+      display: none;
+    }
+    .repo-status-row .badge span:last-child {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .badges, .toolbar, .row, .metrics, .inline-icon {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .badges { margin-top: 10px; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 5px 9px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.04);
+      color: var(--muted);
+      font: 11px/1 var(--font-mono);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .icon {
+      width: 16px;
+      height: 16px;
+      flex: none;
+      display: inline-block;
+      vertical-align: middle;
+    }
+    .icon svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .badge.success { color: var(--success); }
+    .badge.warning { color: var(--warning); }
+    .badge.danger { color: var(--danger); }
+    .badge.live { color: var(--accent-2); }
+    .toolbar {
+      margin-top: 14px;
+      gap: 10px;
+    }
+    .button {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+      border-radius: 14px;
+      padding: 10px 14px;
+      cursor: pointer;
+      transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+    }
+    .button:hover { transform: translateY(-1px); border-color: rgba(255,255,255,0.22); }
+    .button.primary {
+      background: linear-gradient(135deg, rgba(255,135,91,0.28), rgba(255,135,91,0.12));
+      border-color: rgba(255,135,91,0.46);
+    }
+    .button.secondary {
+      background: linear-gradient(135deg, rgba(77,184,255,0.22), rgba(77,184,255,0.08));
+      border-color: rgba(77,184,255,0.42);
+    }
+    .button.warn {
+      background: linear-gradient(135deg, rgba(255,109,122,0.26), rgba(255,109,122,0.08));
+      border-color: rgba(255,109,122,0.42);
+    }
+    .panel {
+      border-radius: 24px;
+      padding: 22px;
+      background: rgba(16, 20, 28, 0.9);
+    }
+    .panel + .panel { margin-top: 18px; }
+    .workspace {
+      display: grid;
+      gap: 22px;
+      height: 100%;
+      overflow: auto;
+      padding-right: 6px;
+      align-content: start;
+      background: transparent;
+    }
+    .workspace-sticky {
+      position: sticky;
+      top: 0;
+      z-index: 8;
+      display: grid;
+      gap: 14px;
+      padding: 0;
+      background: none;
+      border-bottom: none;
+      border-radius: 24px;
+      isolation: isolate;
+      overflow: visible;
+    }
+    .workspace-sticky::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      background: linear-gradient(180deg, rgba(16,20,28,0.82) 0%, rgba(16,20,28,0.7) 82%, rgba(16,20,28,0.38) 100%);
+      backdrop-filter: blur(14px);
+      border: 1px solid rgba(255,255,255,0.04);
+      pointer-events: none;
+      z-index: -1;
+    }
+    .topnav, .subnav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 0;
+    }
+    .topnav {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      padding: 3px;
+      margin: 0 14px 0 19px;
+      margin-bottom: 20px;
+      border-radius: 16px;
+      background: rgba(8, 10, 15, 0.78);
+      border: 1px solid rgba(255,255,255,0.07);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+      width: auto;
+      max-width: 100%;
+    }
     .tab {
-      cursor: pointer; border: 1px solid rgba(255,255,255,.16);
-      background: rgba(255,255,255,.05); color: var(--muted);
-      border-radius: 10px; padding: 7px 12px; font-size: 12px; font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      border-radius: 9px;
+      padding: 7px 10px;
+      cursor: pointer;
+      font: 600 12px/1 var(--font-body);
+      letter-spacing: -0.01em;
     }
     .tab.active {
       color: var(--text);
-      border-color: rgba(99,201,255,.42);
-      background: rgba(99,201,255,.16);
+      border-color: rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.09);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.07);
     }
-    .card-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
-    .metric {
-      border-radius: 12px; border: 1px solid rgba(255,255,255,.12);
-      background: var(--surface-2); padding: 10px;
+    .tab-pane[hidden] { display: none; }
+    .hero-brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
     }
-    .metric strong { display:block; color: var(--muted); font-size: 11px; margin-bottom: 2px; font-weight: 600; }
-    .metric span { font-weight: 700; }
-    .row { display:flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; margin-bottom: 8px; }
-    .channel {
-      display:inline-flex; align-items:center; gap:6px;
-      font-size: 11px; font-weight: 700;
-      padding: 2px 8px; border-radius: 999px;
-      border: 1px solid rgba(255,158,77,.36); color: var(--orange); background: rgba(255,158,77,.16);
-      margin-left: 6px;
+    .hero-brand h1 {
+      margin: 0;
+      line-height: 0.95;
     }
-    .progress-wrap { margin: 10px 0 14px; }
-    .progress-label { display:flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-    .progress { height: 8px; border-radius: 999px; overflow: hidden; background: rgba(255,255,255,.10); }
-    .bar { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--cyan), var(--green)); }
-    .split { display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .pane {
-      border-radius: 12px; border: 1px solid rgba(255,255,255,.11);
-      background: rgba(255,255,255,.04); padding: 10px;
-      min-height: 220px;
+    .hero-glyph {
+      width: 30px;
+      height: 30px;
+      flex: 0 0 auto;
+      display: block;
+      object-fit: contain;
+      filter: drop-shadow(0 8px 18px rgba(0,0,0,0.22));
     }
-    .stack { display:grid; grid-template-columns: 1fr; gap: 10px; }
-    .explorer-head {
-      display:flex; justify-content: space-between; gap: 10px; align-items: center;
+    .repo-subhead {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      min-width: 0;
+      padding: 2px 14px 0 19px;
+    }
+    .repo-subhead-main {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+    .repo-subhead-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-left: auto;
+    }
+    .repo-subhead-copy {
+      min-width: 0;
+      display: grid;
+      gap: 4px;
+    }
+    .repo-subhead-copy strong {
+      font: 600 20px/1.05 var(--font-display);
+      letter-spacing: -0.02em;
+      color: var(--text);
+    }
+    .repo-subhead-copy .tiny {
+      line-height: 1.2;
+    }
+    .repo-subhead-icon {
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      object-fit: cover;
+      flex: none;
+      background: rgba(255,255,255,0.05);
+    }
+    .panel-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+    .panel-title h2 {
+      margin: 0;
+      font: 600 24px/1.05 var(--font-display);
+      color: var(--text);
+      letter-spacing: -0.03em;
+    }
+    .grid {
+      display: grid;
+      gap: 12px;
+    }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card {
+      border-radius: 18px;
+      padding: 18px;
+      background: rgba(255,255,255,0.03);
+    }
+    .card strong {
+      display: block;
+      font-size: 21px;
+      margin-top: 6px;
+    }
+    .progress {
+      margin-top: 10px;
+      height: 9px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(255,255,255,0.06);
+    }
+    .progress > span {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      border-radius: inherit;
+    }
+    .collection {
+      display: grid;
+      gap: 10px;
+    }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 12px;
+    }
+    .item {
+      border-radius: 16px;
+      padding: 14px;
+      border: 1px solid rgba(255,255,255,0.06);
+      background: rgba(255,255,255,0.03);
+    }
+    .item h4 {
+      margin: 0 0 6px;
+      font-size: 14px;
+    }
+    .item p {
+      margin: 6px 0 0;
+      color: var(--muted);
+    }
+    .editor {
+      display: grid;
+      gap: 20px;
+    }
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .section-header h3 {
+      margin: 0;
+    }
+    .section-toggle {
+      padding: 8px 12px;
+      border-radius: 999px;
+      font: 600 12px/1 var(--font-body);
+    }
+    .summary-list {
+      display: grid;
+      gap: 10px;
+    }
+    .summary-row {
+      display: grid;
+      gap: 3px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.05);
+    }
+    .summary-row-label {
+      font: 11px/1.1 var(--font-mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .summary-row-value {
+      color: var(--text);
+      word-break: break-word;
+    }
+    .log-panel {
+      border-radius: 16px;
+      min-height: 190px;
+      max-height: 260px;
+      overflow: auto;
+      background: rgba(8, 10, 15, 0.72);
+      border: 1px solid rgba(255,255,255,0.06);
+      padding: 12px;
+      font: 12px/1.45 var(--font-mono);
+      white-space: pre-wrap;
+      color: var(--text);
+    }
+    .avatar-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+    .avatar {
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(255,255,255,0.08);
+      flex: none;
+    }
+    .avatar img {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: cover;
+    }
+    .avatar-row a,
+    .avatar-row span {
+      color: inherit;
+      text-decoration: none;
+    }
+    .status-card-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
       margin-bottom: 8px;
     }
-    .explore-btn {
-      cursor: pointer;
-      border: 1px solid rgba(255,255,255,.16);
-      background: rgba(255,255,255,.08);
-      color: var(--text);
-      border-radius: 9px;
-      font-size: 12px;
-      font-weight: 700;
-      padding: 5px 10px;
-    }
-    .section-title { color: var(--muted); text-transform: uppercase; letter-spacing: .08em; font-size: 11px; margin: 0 0 8px; }
-    .section-icon { margin-right: 6px; opacity: .9; }
-    .list-item {
-      border-radius: 10px; border: 1px solid rgba(255,255,255,.09);
-      background: rgba(255,255,255,.03); padding: 9px; margin-bottom: 7px; font-size: 12px;
-    }
-    .list-title { font-weight: 700; }
-    .list-meta { color: var(--muted); margin-top: 2px; }
-    .list-body { color: var(--muted); margin-top: 4px; white-space: pre-wrap; max-height: 72px; overflow: auto; }
-    .notes-html { white-space: normal; line-height: 1.36; max-height: 84px; }
-    .notes-html * { margin: 0 0 6px 0; font-size: 12px; max-width: 100%; }
-    .notes-html img { max-width: 100%; height: auto; }
-    .modal .notes-html { max-height: 220px; }
-    .more-label { color: var(--muted); font-size: 12px; margin-top: 4px; }
-    .modal-backdrop {
-      position: fixed; inset: 0; z-index: 100;
-      background: rgba(7,11,18,.56);
-      backdrop-filter: blur(4px);
-      display: none;
-      align-items: center; justify-content: center;
+    .editor-section {
+      border-radius: 24px;
       padding: 20px;
+      background: rgba(14, 18, 26, 0.94);
     }
-    .modal {
-      width: min(980px, 96vw);
-      max-height: 88vh;
-      overflow: auto;
-      border-radius: 16px; border: 1px solid var(--border);
-      background: rgba(18,28,42,.86);
-      padding: 14px;
-      box-shadow: 0 24px 54px rgba(0,0,0,.35);
+    .editor-section h3 {
+      color: var(--accent-3);
     }
-    .modal-head {
-      position: sticky; top: 0;
-      display:flex; justify-content: space-between; align-items: center; gap: 10px;
-      padding-bottom: 10px; margin-bottom: 10px;
-      background: rgba(18,28,42,.86);
-      border-bottom: 1px solid rgba(255,255,255,.10);
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
     }
-    .modal-actions { display:flex; gap: 8px; align-items: center; }
-    .modal-btn {
-      cursor: pointer;
-      border: 1px solid rgba(255,255,255,.16);
-      background: rgba(255,255,255,.08);
-      color: var(--text);
-      border-radius: 9px;
+    .field-grid.single { grid-template-columns: 1fr; }
+    label.field {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
       font-size: 12px;
-      font-weight: 700;
-      padding: 6px 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      font-family: var(--font-mono);
     }
-    .modal-btn[disabled] { opacity: .45; cursor: default; }
-    .empty { color: var(--muted); font-size: 13px; }
-    a { color: inherit; }
-    @media (max-width: 980px) {
-      .layout { grid-template-columns: 1fr; min-height: auto; }
-      .card-grid { grid-template-columns: 1fr; }
-      .split { grid-template-columns: 1fr; }
+    input[type="text"], input[type="number"], input[type="password"], textarea, select {
+      width: 100%;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+      padding: 11px 12px;
+      min-height: 44px;
+    }
+    textarea {
+      min-height: 120px;
+      resize: vertical;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 14px;
+      min-height: 48px;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+      font-size: 13px;
+      text-transform: none;
+      letter-spacing: 0;
+      font-family: var(--font-body);
+    }
+    .toggle input { width: 18px; height: 18px; }
+    .toast-region {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      z-index: 26;
+      display: grid;
+      gap: 10px;
+      width: min(360px, calc(100vw - 32px));
+      pointer-events: none;
+    }
+    .toast {
+      border-radius: 16px;
+      padding: 13px 14px;
+      font-weight: 600;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(18, 22, 30, 0.96);
+      box-shadow: 0 18px 40px rgba(0,0,0,0.32);
+      pointer-events: auto;
+      animation: toast-in 180ms ease-out;
+    }
+    .toast.ok { border-color: rgba(82,212,159,0.28); color: var(--success); }
+    .toast.error { border-color: rgba(255,109,122,0.36); color: var(--danger); }
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateY(-8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .floating-save {
+      position: fixed;
+      right: 28px;
+      bottom: 28px;
+      z-index: 25;
+    }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(7, 9, 13, 0.72);
+      backdrop-filter: blur(8px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      z-index: 30;
+    }
+    .modal-card {
+      width: min(920px, 100%);
+      max-height: calc(100vh - 48px);
+      overflow: auto;
+      border-radius: 24px;
+      border: 1px solid var(--line-strong);
+      background: rgba(16, 20, 28, 0.98);
+      box-shadow: 0 28px 70px rgba(0,0,0,0.44);
+      padding: 22px;
+    }
+    .modal-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .modal-title h2 {
+      margin: 0;
+      font: 600 30px/1 var(--font-display);
+      color: var(--text);
+      letter-spacing: -0.03em;
+    }
+    .dim { opacity: 0.68; }
+    .empty {
+      padding: 24px;
+      text-align: center;
+      color: var(--muted);
+      border: 1px dashed rgba(255,255,255,0.12);
+      border-radius: 18px;
+    }
+    .tiny {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .link-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 8px;
+    }
+    .link-row a {
+      color: var(--accent-2);
+      text-decoration: none;
+    }
+    .mono { font-family: var(--font-mono); }
+    @media (prefers-color-scheme: light) {
+      body {
+        background:
+          radial-gradient(circle at top left, rgba(216,106,56,0.14), transparent 28%),
+          radial-gradient(circle at 88% 10%, rgba(34,123,189,0.12), transparent 26%),
+          linear-gradient(180deg, #f7fafc 0%, #edf3f8 44%, #e7eef5 100%);
+      }
+      .hero,
+      .panel,
+      .card,
+      .repo-card,
+      .editor-section,
+      .stack,
+      .summary-row,
+      .item,
+      .modal-card {
+        border-color: rgba(33, 49, 76, 0.10);
+        box-shadow: var(--shadow);
+      }
+      .hero {
+        background:
+          linear-gradient(135deg, rgba(216,106,56,0.12), rgba(34,123,189,0.05) 52%, rgba(147,107,16,0.06)),
+          rgba(255,255,255,0.90);
+      }
+      .hero::after {
+        background: linear-gradient(90deg, rgba(216,106,56,0), rgba(216,106,56,0.16), rgba(34,123,189,0));
+      }
+      .summary-pill {
+        background: rgba(24,34,51,0.04);
+        border-color: rgba(33,49,76,0.10);
+        color: var(--text);
+      }
+      .summary-pill .muted {
+        color: var(--muted);
+      }
+      .stack {
+        background: rgba(255,255,255,0.78);
+      }
+      .stack-footer {
+        border-top-color: rgba(33,49,76,0.10);
+      }
+      .repo-card {
+        background:
+          linear-gradient(180deg, rgba(24,34,51,0.02), rgba(24,34,51,0)),
+          rgba(255,255,255,0.82);
+      }
+      .repo-card.active {
+        border-color: rgba(216,106,56,0.34);
+        background:
+          linear-gradient(180deg, rgba(216,106,56,0.12), rgba(216,106,56,0.03)),
+          rgba(255,250,247,0.96);
+      }
+      .repo-icon,
+      .repo-subhead-icon {
+        border-color: rgba(33,49,76,0.10);
+        background: linear-gradient(135deg, rgba(216,106,56,0.18), rgba(34,123,189,0.16));
+      }
+      .repo-subhead-icon,
+      .avatar {
+        background-color: rgba(24,34,51,0.06);
+      }
+      .badge {
+        background: rgba(24,34,51,0.04);
+        border-color: rgba(33,49,76,0.10);
+        color: var(--muted);
+      }
+      .button {
+        background: rgba(24,34,51,0.04);
+        border-color: rgba(33,49,76,0.12);
+      }
+      .button:hover {
+        border-color: rgba(33,49,76,0.18);
+      }
+      .button.primary {
+        background: linear-gradient(135deg, rgba(216,106,56,0.18), rgba(216,106,56,0.08));
+        border-color: rgba(216,106,56,0.34);
+      }
+      .button.secondary {
+        background: linear-gradient(135deg, rgba(34,123,189,0.16), rgba(34,123,189,0.06));
+        border-color: rgba(34,123,189,0.30);
+      }
+      .button.warn {
+        background: linear-gradient(135deg, rgba(209,78,92,0.16), rgba(209,78,92,0.06));
+        border-color: rgba(209,78,92,0.28);
+      }
+      .workspace-sticky::before {
+        background: linear-gradient(180deg, rgba(247,250,252,0.88) 0%, rgba(240,245,250,0.74) 82%, rgba(240,245,250,0.45) 100%);
+        border-color: rgba(33,49,76,0.08);
+      }
+      .topnav {
+        background: rgba(255,255,255,0.64);
+        border-color: rgba(33,49,76,0.10);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.70);
+      }
+      .tab.active {
+        border-color: rgba(33,49,76,0.10);
+        background: rgba(24,34,51,0.06);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.78);
+      }
+      .card,
+      .item,
+      .summary-row {
+        background: rgba(255,255,255,0.72);
+        border-color: rgba(33,49,76,0.08);
+      }
+      .panel,
+      .editor-section,
+      .stack {
+        background: rgba(255,255,255,0.80);
+      }
+      .progress {
+        background: rgba(24,34,51,0.08);
+      }
+      .editor-section {
+        background: rgba(244,248,252,0.95);
+      }
+      .editor-section h3,
+      .modal-title h2 {
+        color: var(--text);
+      }
+      .log-panel {
+        background: rgba(244,248,252,0.95);
+        border-color: rgba(33,49,76,0.08);
+      }
+      .section-title .icon,
+      .status-title .icon {
+        color: var(--muted);
+      }
+      .avatar {
+        background: rgba(24,34,51,0.08);
+      }
+      input[type="text"],
+      input[type="number"],
+      input[type="password"],
+      textarea,
+      select,
+      .toggle {
+        background: rgba(24,34,51,0.03);
+        border-color: rgba(33,49,76,0.10);
+      }
+      .toast {
+        background: rgba(255,255,255,0.95);
+        border-color: rgba(33,49,76,0.10);
+      }
+      .modal-backdrop {
+        background: rgba(232,238,245,0.72);
+      }
+      .modal-card {
+        background: rgba(255,255,255,0.94);
+      }
+      .empty {
+        border-color: rgba(33,49,76,0.16);
+        background: rgba(255,255,255,0.48);
+      }
+    }
+    @media (max-width: 1440px) {
+      .main-grid { grid-template-columns: 344px minmax(0, 1fr); }
+    }
+    @media (max-width: 1040px) {
+      .masthead, .grid.two, .grid.three, .field-grid, .summary-grid, .hero-stats { grid-template-columns: 1fr; }
+      .shell { padding: 16px; }
+      .shell { height: auto; overflow: visible; }
+      .main-grid { display: block; height: auto; }
+      .workspace { overflow: visible; }
+      .workspace-sticky {
+        position: sticky;
+        top: 12px;
+        z-index: 12;
+        background: none;
+        padding-bottom: 0;
+        border-bottom: none;
+      }
+      .topnav { margin: 0 0 20px; width: 100%; }
+      .stack {
+        position: fixed;
+        top: 16px;
+        left: 16px;
+        bottom: 16px;
+        width: min(344px, calc(100vw - 56px));
+        max-height: none;
+        z-index: 40;
+        transform: translateX(calc(-100% - 18px));
+        transition: transform 180ms ease;
+        box-shadow: 0 28px 70px rgba(0,0,0,0.44);
+      }
+      body.sidebar-open .stack {
+        transform: translateX(0);
+      }
+      .mobile-sidebar-overlay {
+        display: block;
+        position: fixed;
+        inset: 0;
+        background: rgba(7, 9, 13, 0);
+        backdrop-filter: none;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 180ms ease, background 180ms ease, backdrop-filter 180ms ease;
+        z-index: 35;
+      }
+      body.sidebar-open .mobile-sidebar-overlay {
+        background: rgba(7, 9, 13, 0.48);
+        backdrop-filter: blur(4px);
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .mobile-sidebar-toggle {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        border: 1px solid rgba(255,255,255,0.10);
+        background: rgba(255,255,255,0.05);
+        color: var(--text);
+        border-radius: 14px;
+        padding: 10px 12px;
+      }
+      .hero-header { flex-direction: column; }
+      .hero { display: grid; justify-content: stretch; gap: 10px; }
+      .hero-header {
+        flex-direction: row;
+        align-items: center;
+      }
+      .hero h1 { font-size: 34px; }
+      .hero-stats { justify-content: flex-start; }
+      .repo-subhead {
+        padding-left: 14px;
+        padding-right: 14px;
+      }
+      .repo-subhead-actions {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+      .floating-save {
+        right: 16px;
+        bottom: 16px;
+      }
+      .toast-region {
+        top: 12px;
+        right: 12px;
+      }
     }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <header class="hero">
-      <div>
-        <h1>ShipHook Dashboard</h1>
-        <p>Repo-focused view with status and explorers.</p>
-      </div>
-      <div class="badge" id="updatedAt">Waiting for first refresh</div>
-    </header>
-    <div class="layout">
-      <aside class="panel sidebar" id="repoList"></aside>
-      <section class="panel detail" id="repoDetail"></section>
-    </div>
-    <div class="modal-backdrop" id="explorerModal"></div>
-  </div>
-  <script>
-    var dashboardState = { repositories: [] };
-    var selectedRepoID = null;
-    var selectedTab = "status";
-    var explorerType = null;
-    var explorerPage = 0;
+  <div class="mobile-sidebar-overlay" data-action="close-sidebar"></div>
+  <div class="shell">
+    <section class="main-grid">
+      <aside class="stack" id="repo-sidebar">
+        <div class="stack-header">
+          <div class="title"><span class="icon"><svg viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v16H6.5A2.5 2.5 0 0 0 4 22z"/><path d="M8 8h8"/><path d="M8 12h8"/></svg></span><span>Repositories</span></div>
+          <div class="stack-actions">
+            <button class="button secondary" data-action="poll-all"><span class="icon"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg></span><span>Check All</span></button>
+          </div>
+        </div>
+        <div id="repo-list" class="repo-list"></div>
+        <div class="stack-footer">
+          <button class="button primary" data-action="open-add-repo"><span class="icon"><svg viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg></span><span>Add Repository</span></button>
+        </div>
+      </aside>
 
-    function escapeHtml(value) {
-      return String(value == null ? "" : value)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
+      <main>
+        <div class="workspace">
+          <div class="workspace-sticky">
+            <section class="masthead">
+              <div class="hero">
+                <div class="hero-header">
+                  <button class="mobile-sidebar-toggle" type="button" data-action="open-sidebar"><span class="icon"><svg viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v16H6.5A2.5 2.5 0 0 0 4 22z"/><path d="M8 8h8"/><path d="M8 12h8"/></svg></span><span>Repositories</span></button>
+                  <div class="hero-brand">
+                    <picture>
+                      <source media="(prefers-color-scheme: dark)" srcset="/assets/glyph-dark.png">
+                      <img class="hero-glyph" src="/assets/glyph-light.png" alt="">
+                    </picture>
+                    <h1>ShipHook</h1>
+                  </div>
+                </div>
+                <div id="overview-stats" class="hero-stats"></div>
+              </div>
+            </section>
+            <div id="repo-subhead" class="repo-subhead"></div>
+            <div class="topnav" id="top-nav"></div>
+          </div>
+          <section class="tab-pane" id="pane-status"></section>
+          <section class="tab-pane" id="pane-builds"></section>
+          <section class="tab-pane" id="pane-configuration"></section>
+        </div>
+      </main>
+    </section>
+  </div>
+  <div id="toast-root" class="toast-region"></div>
+  <div id="floating-save-root"></div>
+  <div id="modal-root"></div>
+
+  <script>
+    const state = {
+      snapshot: null,
+      draftConfig: null,
+      selectedRepoId: null,
+      activePane: 'status',
+      configSections: {
+        repoSetup: false,
+        buildAutomation: false,
+        sparkle: false,
+        webhooks: false,
+        advanced: false
+      },
+      addRepoWizardOpen: false,
+      settingsModalOpen: false,
+      explorerModal: null,
+      mobileSidebarOpen: false,
+      addRepoInspectionPreview: null,
+      toasts: [],
+      toastTimerId: null,
+      saving: false,
+      refreshTimerId: null,
+      refreshInFlight: false
+    };
+
+    const globalDefaults = {
+      pollIntervalSeconds: 300,
+      githubToken: '',
+      githubTokenEnvVar: 'GITHUB_TOKEN',
+      generatedDataRetentionCount: 3,
+      autoPauseFailureCount: 3,
+      webDashboardEnabled: false,
+      webDashboardPort: 8787
+    };
+
+    const repositoryDefaults = {
+      id: '',
+      name: 'New Repository',
+      isEnabled: true,
+      owner: '',
+      repo: '',
+      branch: 'main',
+      localCheckoutPath: '',
+      workingDirectory: '',
+      buildOnFirstSeen: false,
+      buildMode: 'xcodeArchive',
+      xcode: {
+        projectPath: '',
+        workspacePath: '',
+        scheme: '',
+        appName: '',
+        configuration: 'Release',
+        archivePath: '',
+        artifactPath: ''
+      },
+      shell: {
+        command: '',
+        artifactPath: ''
+      },
+      publishCommand: '',
+      releaseNotesPath: '',
+      githubTokenEnvVar: '',
+      environment: {},
+      versionStrategy: 'shortSHATimestamp',
+      sparkle: {
+        appcastURL: '',
+        autoIncrementBuild: false,
+        skipIfVersionIsNotNewer: true,
+        betaIconPath: ''
+      },
+      notifications: {
+        discordWebhookURL: '',
+        postOnSuccess: false,
+        postOnFailure: false
+      },
+      signing: {
+        developmentTeam: '',
+        codeSignIdentity: '',
+        codeSignStyle: 'automatic',
+        notarizationProfile: ''
+      }
+    };
+
+    const notarizationDraft = {
+      profileName: '',
+      appleID: '',
+      teamID: '',
+      appSpecificPassword: ''
+    };
+
+    const addRepoDraft = {
+      localCheckoutPath: '',
+      fallbackOwner: '',
+      fallbackRepo: '',
+      fallbackBranch: 'main',
+      selectedScheme: ''
+    };
+
+    async function fetchState({ preserveDraft = true, clearStatus = true } = {}) {
+      const response = await fetch('/api/state');
+      if (response.status === 401) {
+        window.location.href = '/';
+        return;
+      }
+      const snapshot = await response.json();
+      applySnapshot(snapshot, { preserveDraft });
+      if (clearStatus) {
+        setStatus(null);
+      }
+    }
+
+    function applySnapshot(snapshot, { preserveDraft = true } = {}) {
+      const shouldPreserveDraft = preserveDraft && !!state.snapshot?.global?.hasUnsavedChanges && !!state.draftConfig;
+      state.snapshot = snapshot;
+      if (!shouldPreserveDraft) {
+        state.draftConfig = makeDraftConfig(snapshot);
+      }
+      if (!state.selectedRepoId || !state.draftConfig.repositories.some(repo => repo.id === state.selectedRepoId)) {
+        state.selectedRepoId = state.draftConfig.repositories[0]?.id ?? null;
+      }
+      render();
+    }
+
+    function makeDraftConfig(snapshot) {
+      return {
+        pollIntervalSeconds: snapshot.global.pollIntervalSeconds ?? globalDefaults.pollIntervalSeconds,
+        githubToken: snapshot.global.githubToken ?? '',
+        githubTokenEnvVar: snapshot.global.githubTokenEnvVar ?? globalDefaults.githubTokenEnvVar,
+        generatedDataRetentionCount: snapshot.global.generatedDataRetentionCount ?? globalDefaults.generatedDataRetentionCount,
+        autoPauseFailureCount: snapshot.global.autoPauseFailureCount ?? globalDefaults.autoPauseFailureCount,
+        webDashboardEnabled: !!snapshot.global.webDashboardEnabled,
+        webDashboardPort: snapshot.global.webDashboardPort ?? globalDefaults.webDashboardPort,
+        repositories: snapshot.repositories.map(repo => normalizeRepository(repo.configuration))
+      };
+    }
+
+    function normalizeRepository(repository) {
+      const merged = structuredClone(repositoryDefaults);
+      const next = { ...merged, ...repository };
+      next.workingDirectory = repository.workingDirectory ?? '';
+      next.releaseNotesPath = repository.releaseNotesPath ?? '';
+      next.githubTokenEnvVar = repository.githubTokenEnvVar ?? '';
+      next.xcode = { ...merged.xcode, ...(repository.xcode ?? {}) };
+      next.shell = { ...merged.shell, ...(repository.shell ?? {}) };
+      next.sparkle = { ...merged.sparkle, ...(repository.sparkle ?? {}) };
+      next.notifications = { ...merged.notifications, ...(repository.notifications ?? {}) };
+      next.signing = { ...merged.signing, ...(repository.signing ?? {}) };
+      next.environment = repository.environment ?? {};
+      return next;
+    }
+
+    async function runCommand(payload, successMessage) {
+      const response = await fetch('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (response.status === 401) {
+        window.location.href = '/';
+        return;
+      }
+      const data = await response.json();
+      if (data.snapshot) {
+        applySnapshot(data.snapshot);
+      }
+      if (!response.ok || data.ok === false) {
+        throw new Error(data.error || 'Request failed.');
+      }
+      state.addRepoInspectionPreview = data.inspectionPreview || null;
+      setStatus({ kind: 'ok', message: data.message || successMessage || 'Done.' });
+      return data;
+    }
+
+    function refreshIntervalMillis() {
+      const snapshot = state.snapshot;
+      if (!snapshot) return 2000;
+      const busy = snapshot.repositories.some(repo => ['building', 'polling'].includes(repo.runtime.activity));
+      return busy ? 1500 : 4000;
+    }
+
+    function scheduleAutoRefresh() {
+      if (state.refreshTimerId) {
+        window.clearTimeout(state.refreshTimerId);
+        state.refreshTimerId = null;
+      }
+      state.refreshTimerId = window.setTimeout(runAutoRefresh, refreshIntervalMillis());
+    }
+
+    async function runAutoRefresh() {
+      if (document.hidden || state.refreshInFlight) {
+        scheduleAutoRefresh();
+        return;
+      }
+      state.refreshInFlight = true;
+      try {
+        await fetchState({ preserveDraft: true, clearStatus: false });
+      } catch {
+        // Keep the last known UI state; a later refresh can recover.
+      } finally {
+        state.refreshInFlight = false;
+        scheduleAutoRefresh();
+      }
+    }
+
+    function setStatus(status) {
+      if (!status) {
+        state.toasts = [];
+        scheduleToastDismiss();
+        renderStatus();
+        return;
+      }
+
+      const toast = {
+        id: `toast-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        kind: status.kind,
+        message: status.message,
+        hovered: false
+      };
+      state.toasts = [...state.toasts, toast].slice(-3);
+      scheduleToastDismiss();
+      renderStatus();
+    }
+
+    function render() {
+      document.body.classList.toggle('sidebar-open', !!state.mobileSidebarOpen);
+      renderStatus();
+      renderOverview();
+      renderRepoList();
+      renderRepoSubhead();
+      renderTopNav();
+      renderStatusPane();
+      renderBuildsPane();
+      renderConfigurationPane();
+      renderFloatingSave();
+      renderModal();
+      wireActionButtons();
+    }
+
+    function openSettingsModal() {
+      state.settingsModalOpen = true;
+      state.addRepoWizardOpen = false;
+      state.explorerModal = null;
+      render();
+    }
+
+    function openExplorerModal(kind) {
+      state.explorerModal = kind;
+      state.settingsModalOpen = false;
+      state.addRepoWizardOpen = false;
+      render();
+    }
+
+    function wireActionButtons() {
+      const settingsButton = document.querySelector('[data-action="open-settings"]');
+      if (settingsButton) {
+        settingsButton.onclick = event => {
+          event.preventDefault();
+          openSettingsModal();
+        };
+      }
+
+      const securityButton = document.querySelector('[data-action="open-security"]');
+      if (securityButton) {
+        securityButton.onclick = event => {
+          event.preventDefault();
+          window.location.href = '/security';
+        };
+      }
+
+      document.querySelectorAll('[data-action="open-explorer"]').forEach(button => {
+        button.onclick = event => {
+          event.preventDefault();
+          openExplorerModal(button.dataset.explorer);
+        };
+      });
+    }
+
+    function renderStatus() {
+      const node = document.getElementById('toast-root');
+      if (!state.toasts.length) {
+        node.innerHTML = '';
+        return;
+      }
+      node.innerHTML = state.toasts.map(toast => `
+        <div class="toast ${toast.kind}" data-toast-id="${toast.id}">
+          ${escapeHtml(toast.message)}
+        </div>
+      `).join('');
+    }
+
+    function renderFloatingSave() {
+      const node = document.getElementById('floating-save-root');
+      if (!state.snapshot?.global?.hasUnsavedChanges) {
+        node.innerHTML = '';
+        return;
+      }
+
+      node.innerHTML = `
+        <div class="floating-save">
+          <button class="button primary" data-action="save">${icon('save')}<span>Save Changes</span></button>
+        </div>
+      `;
+    }
+
+    function renderOverview() {
+      const statsNode = document.getElementById('overview-stats');
+      const snapshot = state.snapshot;
+      if (!snapshot) {
+        statsNode.innerHTML = '';
+        return;
+      }
+
+      const total = snapshot.repositories.length;
+      const enabled = snapshot.repositories.filter(repo => repo.configuration.isEnabled).length;
+      const building = snapshot.repositories.filter(repo => repo.runtime.activity === 'building').length;
+      const polling = snapshot.repositories.filter(repo => repo.runtime.activity === 'polling').length;
+      const failures = snapshot.repositories.filter(repo => repo.runtime.activity === 'failed').length;
+      const queued = snapshot.repositories.filter(repo => repo.runtime.phase === 'queued').length;
+      const activeLabel = building > 0
+        ? `${building} building`
+        : polling > 0
+          ? `${polling} checking`
+          : failures > 0
+            ? `${failures} failing`
+            : 'idle';
+
+      const detailParts = [];
+      if (queued > 0) detailParts.push(`${queued} queued`);
+      if (failures > 0 && building > 0) detailParts.push(`${failures} failing`);
+
+      statsNode.innerHTML = [
+        summaryPill('repos', `Repos ${total}`, `${enabled} enabled`),
+        summaryPill('activity', `Activity ${activeLabel}`, detailParts.join(' • ')),
+        `<button class="summary-pill" type="button" data-action="open-security" title="Account & Security" aria-label="Open Account & Security">${icon('user')}</button>`,
+        `<button class="summary-pill" type="button" data-action="open-settings" title="ShipHook Settings" aria-label="Open ShipHook Settings">${icon('gear')}</button>`
+      ].join('');
+
+    }
+
+    function renderRepoList() {
+      const node = document.getElementById('repo-list');
+      const repositories = state.snapshot?.repositories ?? [];
+      if (!repositories.length) {
+        node.innerHTML = '<div class="empty">No repositories configured yet.</div>';
+        return;
+      }
+
+      node.innerHTML = repositories.map(repo => {
+        const active = repo.id === state.selectedRepoId ? 'active' : '';
+        const icon = repo.iconDataURL ? `<img class="repo-icon" src="${repo.iconDataURL}" alt="">` : '<div class="repo-icon"></div>';
+        return `
+          <article class="repo-card ${active}" data-select-repo="${repo.id}">
+            <div class="repo-head">
+              ${icon}
+              <div style="min-width: 0;">
+                <h3 class="repo-name">${escapeHtml(repo.name || repo.id)}</h3>
+                <div class="repo-meta">${escapeHtml(repo.runtime.slug)} @ ${escapeHtml(repo.runtime.branch)}</div>
+              </div>
+            </div>
+            <div class="repo-status-row">
+              ${repoStatusBadge(repo)}
+              <div class="repo-meta">${escapeHtml(repo.runtime.summary || 'No summary')}</div>
+            </div>
+          </article>
+        `;
+      }).join('');
+    }
+
+    function renderTopNav() {
+      const node = document.getElementById('top-nav');
+      node.innerHTML = [
+        paneTab('status', 'Status'),
+        paneTab('builds', 'Builds & Releases'),
+        paneTab('configuration', 'Configuration')
+      ].join('');
+
+      document.getElementById('pane-status').hidden = state.activePane !== 'status';
+      document.getElementById('pane-builds').hidden = state.activePane !== 'builds';
+      document.getElementById('pane-configuration').hidden = state.activePane !== 'configuration';
+    }
+
+    function renderRepoSubhead() {
+      const node = document.getElementById('repo-subhead');
+      const repo = selectedRepoSnapshot();
+      if (!repo) {
+        node.innerHTML = '';
+        node.hidden = true;
+        return;
+      }
+
+      const repoIcon = repo.iconDataURL
+        ? `<img class="repo-subhead-icon" src="${repo.iconDataURL}" alt="">`
+        : '<div class="repo-subhead-icon"></div>';
+
+      node.hidden = false;
+      node.innerHTML = `
+        <div class="repo-subhead-main">
+          ${repoIcon}
+          <div class="repo-subhead-copy">
+            <strong>${escapeHtml(repo.name || repo.id)}</strong>
+            <div class="tiny">${escapeHtml(repo.runtime.slug)} @ ${escapeHtml(repo.runtime.branch)}</div>
+          </div>
+        </div>
+        <div class="repo-subhead-actions">
+          <button class="button secondary" data-action="poll-repo" data-repo-id="${repo.id}">${icon('refresh')}<span>Check Now</span></button>
+          <button class="button" data-action="set-repo-enabled" data-repo-id="${repo.id}" data-enabled="${repo.configuration.isEnabled ? 'false' : 'true'}" title="${repo.configuration.isEnabled ? 'Pause repository' : 'Resume repository'}">${icon(repo.configuration.isEnabled ? 'pause' : 'play')}</button>
+        </div>
+      `;
+    }
+
+    function renderModal() {
+      const node = document.getElementById('modal-root');
+      if (state.settingsModalOpen) {
+        node.innerHTML = `
+          <div class="modal-backdrop">
+            <div class="modal-card">
+              <div class="modal-title">
+                <h2>ShipHook Settings</h2>
+                <button class="button" data-action="close-settings">${icon('close')}<span>Close</span></button>
+              </div>
+              ${renderGlobalForm()}
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      if (state.explorerModal) {
+        const repo = selectedRepoSnapshot();
+        if (!repo) {
+          state.explorerModal = null;
+          node.innerHTML = '';
+          return;
+        }
+
+        const builds = repo.recentBuilds.map(build => `
+          <div class="item">
+            <div class="row" style="justify-content: space-between;">
+              <h4>${escapeHtml(build.version)}</h4>
+              <div class="tiny">${escapeHtml(formatDate(build.builtAt))}</div>
+            </div>
+            <div class="tiny">Commit ${escapeHtml(shortSha(build.sha))}</div>
+            <p>${escapeHtml(build.summary || 'No summary')}</p>
+            ${authorLine(build.authorLogin, build.authorAvatarURL, build.authorProfileURL, 'built this release')}
+            ${build.logPath ? `<div class="tiny mono" style="margin-top: 8px;">${escapeHtml(build.logPath)}</div>` : ''}
+          </div>
+        `).join('');
+
+        const releases = repo.recentReleases.map(release => `
+          <div class="item">
+            <div class="row" style="justify-content: space-between;">
+              <h4>${escapeHtml(release.tagName)}</h4>
+              <button class="button ${release.isPrerelease ? '' : 'secondary'}" data-action="rollback" data-repo-id="${repo.id}" data-tag-name="${escapeHtmlAttr(release.tagName)}">Rollback</button>
+            </div>
+            <div class="tiny">${escapeHtml(release.isPrerelease ? 'Beta' : 'Stable')} · ${escapeHtml(formatDate(release.publishedAt) || 'Unknown date')}</div>
+            <p>${escapeHtml(release.name || 'No release title')}</p>
+            ${authorLine(release.authorLogin, release.authorAvatarURL, release.authorProfileURL, 'published this release')}
+          </div>
+        `).join('');
+
+        const isBuilds = state.explorerModal === 'builds';
+        node.innerHTML = `
+          <div class="modal-backdrop">
+            <div class="modal-card">
+              <div class="modal-title">
+                <h2>${isBuilds ? 'Build Explorer' : 'Release Explorer'}</h2>
+                <button class="button" data-action="close-explorer">${icon('close')}<span>Close</span></button>
+              </div>
+              <div class="collection">
+                ${isBuilds ? (builds || '<div class="empty">No builds recorded yet.</div>') : (releases || '<div class="empty">No releases loaded yet.</div>')}
+              </div>
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      if (!state.addRepoWizardOpen) {
+        node.innerHTML = '';
+        return;
+      }
+
+      const preview = state.addRepoInspectionPreview;
+      const schemes = preview?.inspection?.schemes || [];
+      if (!addRepoDraft.selectedScheme && schemes.length) {
+        addRepoDraft.selectedScheme = preview.inspection.suggestedScheme || schemes[0];
+      }
+
+      node.innerHTML = `
+        <div class="modal-backdrop">
+          <div class="modal-card">
+            <div class="modal-title">
+              <h2>Add Repository</h2>
+              <button class="button" data-action="close-add-repo">${icon('close')}<span>Close</span></button>
+            </div>
+            <div class="grid two">
+              <div class="card">
+                <div class="field-grid single">
+                  ${textInput('Local Checkout Path', 'addRepo.localCheckoutPath', addRepoDraft.localCheckoutPath)}
+                  ${textInput('Fallback Owner', 'addRepo.fallbackOwner', addRepoDraft.fallbackOwner)}
+                  ${textInput('Fallback Repo', 'addRepo.fallbackRepo', addRepoDraft.fallbackRepo)}
+                  ${textInput('Fallback Branch', 'addRepo.fallbackBranch', addRepoDraft.fallbackBranch)}
+                </div>
+                <div class="toolbar">
+                  <button class="button secondary" data-action="inspect-repo">${icon('search')}<span>Inspect Checkout</span></button>
+                </div>
+              </div>
+              <div class="card">
+                ${preview ? `
+                  <div class="tiny">Inspection result</div>
+                  <strong>${escapeHtml(preview.suggestedRepository.name || preview.suggestedRepository.id)}</strong>
+                  <p>${escapeHtml((preview.inspection.owner || addRepoDraft.fallbackOwner || '') + '/' + (preview.inspection.repo || addRepoDraft.fallbackRepo || ''))}</p>
+                  <div class="field-grid single" style="margin-top: 12px;">
+                    ${schemes.length ? selectInput('Build Scheme', 'addRepo.selectedScheme', addRepoDraft.selectedScheme, schemes.map(scheme => [scheme, scheme])) : readOnlyInput('Build Scheme', addRepoDraft.selectedScheme || preview.inspection.suggestedScheme || 'None found')}
+                  </div>
+                  <div class="link-row tiny">
+                    <span>Workspace: ${escapeHtml(preview.inspection.workspacePath || 'None')}</span>
+                    <span>Project: ${escapeHtml(preview.inspection.projectPath || 'None')}</span>
+                  </div>
+                  <div class="toolbar">
+                    <button class="button primary" data-action="confirm-add-repo">${icon('plus')}<span>Add Repository</span></button>
+                  </div>
+                ` : `
+                  <div class="empty">Point ShipHook at a local checkout, inspect it, then add the generated repository configuration.</div>
+                `}
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function paneTab(id, label) {
+      const iconName = id === 'status' ? 'activity' : (id === 'builds' ? 'history' : 'gear');
+      return `<button class="tab ${state.activePane === id ? 'active' : ''}" data-action="set-pane" data-pane="${id}">${icon(iconName)}<span>${escapeHtml(label)}</span></button>`;
+    }
+
+    function sectionTitle(iconName, label, level = 'h3') {
+      return `<${level} class="section-title">${icon(iconName)}<span>${escapeHtml(label)}</span></${level}>`;
+    }
+
+    function authorLine(login, avatarURL, profileURL, suffix) {
+      if (!login) return '';
+      const label = `@${login}`;
+      const identity = profileURL
+        ? `<a href="${escapeHtmlAttr(profileURL)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`
+        : `<span>${escapeHtml(label)}</span>`;
+      return `
+        <div class="avatar-row" style="margin-top: 8px;">
+          ${avatarURL ? `<span class="avatar"><img src="${escapeHtmlAttr(avatarURL)}" alt=""></span>` : '<span class="avatar"></span>'}
+          ${identity}
+          <span class="tiny">${escapeHtml(suffix)}</span>
+        </div>
+      `;
+    }
+
+    function renderGlobalForm() {
+      const snapshot = state.snapshot;
+      const config = state.draftConfig;
+      if (!snapshot || !config) {
+        return '';
+      }
+
+      const identities = snapshot.global.availableSigningIdentities;
+      const identitySummary = identities.length
+        ? identities.map(identity => `<span class="badge ${identity.isRecommendedForSparkle ? 'success' : ''}">${escapeHtml(identity.displayName)}</span>`).join('')
+        : '<span class="tiny">No signing identities detected.</span>';
+      const profileOptions = snapshot.global.availableNotarizationProfiles.length
+        ? snapshot.global.availableNotarizationProfiles.map(profile => `<span class="badge">${escapeHtml(profile)}</span>`).join('')
+        : '<span class="tiny">No notarization profiles stored yet.</span>';
+
+      return `
+        <div class="grid two">
+          <div class="card">
+            <div class="field-grid">
+              ${textInput('Poll Interval (Seconds)', 'global.pollIntervalSeconds', config.pollIntervalSeconds, 'number')}
+              ${textInput('GitHub Token Env Var', 'global.githubTokenEnvVar', config.githubTokenEnvVar)}
+              ${textInput('Builds To Keep', 'global.generatedDataRetentionCount', config.generatedDataRetentionCount, 'number')}
+              ${textInput('Auto Pause After Fails', 'global.autoPauseFailureCount', config.autoPauseFailureCount, 'number')}
+              ${textInput('GitHub Token', 'global.githubToken', config.githubToken, 'password')}
+            </div>
+            <div class="field-grid" style="margin-top: 12px;">
+              <label class="field toggle">
+                <input type="checkbox" ${snapshot.global.launchesAtLogin ? 'checked' : ''} data-launch-toggle>
+                <span>Launch ShipHook at login</span>
+              </label>
+            </div>
+            <div class="link-row tiny">
+              <span>${escapeHtml(snapshot.global.launchAtLoginStatusMessage || 'Use Account & Security to manage dashboard sign-in and passkeys.')}</span>
+              <a href="/security">Account &amp; Security</a>
+            </div>
+            <div class="toolbar">
+              <button class="button primary" data-action="save">${icon('save')}<span>Save Configuration</span></button>
+              <button class="button" data-action="reload">${icon('refresh')}<span>Reload From Disk</span></button>
+            </div>
+          </div>
+          <div class="card">
+            <div class="tiny">Signing readiness</div>
+            <strong>${escapeHtml(snapshot.global.signingDiagnosticsSummary || 'Refresh identities to inspect this Mac.')}</strong>
+            <p>${escapeHtml(snapshot.global.lastSigningIdentityError || '')}</p>
+            <div class="badges">${identitySummary}</div>
+            <div class="link-row">
+              <button class="button secondary" data-action="refresh-signing">${icon('shield')}<span>Refresh Signing Identities</span></button>
+            </div>
+            ${snapshot.global.signingDiagnosticsDetails.length ? `<p class="tiny">${snapshot.global.signingDiagnosticsDetails.map(escapeHtml).join('<br>')}</p>` : ''}
+          </div>
+        </div>
+
+        <div class="grid two" style="margin-top: 12px;">
+          <div class="card">
+            <div class="tiny">Stored notarization profiles</div>
+            <div class="badges" style="margin-top: 10px;">${profileOptions}</div>
+          </div>
+          <div class="card">
+            <div class="tiny">Add notarization profile</div>
+            <div class="field-grid">
+              ${textInput('Profile Name', 'notary.profileName', notarizationDraft.profileName)}
+              ${textInput('Apple ID', 'notary.appleID', notarizationDraft.appleID)}
+              ${textInput('Team ID', 'notary.teamID', notarizationDraft.teamID)}
+              ${textInput('App-Specific Password', 'notary.appSpecificPassword', notarizationDraft.appSpecificPassword, 'password')}
+            </div>
+            <div class="toolbar">
+              <button class="button secondary" data-action="store-profile">${icon('key')}<span>Store Profile</span></button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderStatusPane() {
+      const node = document.getElementById('pane-status');
+      const repo = selectedRepoSnapshot();
+      if (!repo) {
+        node.innerHTML = '<div class="empty">Select a repository to inspect runtime state.</div>';
+        return;
+      }
+
+      const progress = repo.progress ? `
+        <div class="progress"><span style="width:${Math.max(4, repo.progress.fractionComplete * 100)}%"></span></div>
+        <div class="tiny" style="margin-top:8px;">Step ${repo.progress.currentStep} of ${repo.progress.totalSteps}: ${escapeHtml(repo.progress.label)}</div>
+      ` : '';
+      const statusLabel = repo.configuration.isEnabled ? repo.runtime.activity : 'paused';
+      const statusTitleLabel = repo.configuration.isEnabled ? statusLabel : 'idle';
+      const statusBadge = badge(
+        repo.configuration.isEnabled ? 'activity' : 'pause',
+        statusLabel,
+        activityTone(statusLabel)
+      );
+      const channelText = repo.runtime.releaseChannel === 'beta' ? 'Channel: Beta' : 'Channel: Stable';
+
+      node.innerHTML = `
+        <section class="panel">
+          <div class="status-card-head">
+            <div></div>
+            ${statusBadge}
+          </div>
+          <strong class="status-title">${icon(repo.configuration.isEnabled ? 'activity' : 'pause')}<span>${escapeHtml(statusTitleLabel.charAt(0).toUpperCase() + statusTitleLabel.slice(1))}</span></strong>
+          <p>${escapeHtml(repo.runtime.summary)}</p>
+          ${authorLine(repo.runtime.lastCommitAuthorLogin, repo.runtime.lastCommitAuthorAvatarURL, repo.runtime.lastCommitAuthorProfileURL, 'published this commit')}
+          <p>Current version: ${escapeHtml(repo.version || 'Unknown')}</p>
+          <p>${escapeHtml(channelText)}</p>
+          <p>Published version: ${escapeHtml(repo.publishedVersion || 'None')}</p>
+          ${progress}
+          ${repo.runtime.lastError ? `<p>${escapeHtml(repo.runtime.lastError)}</p>` : ''}
+          <div class="row tiny" style="margin-top: 10px;">
+            ${repo.runtime.buildStartedAt ? `<span>${escapeHtml(formatDate(repo.runtime.buildStartedAt))}</span>` : ''}
+            ${repo.runtime.lastLogPath ? `<span class="mono">${escapeHtml(repo.runtime.lastLogPath)}</span>` : ''}
+          </div>
+        </section>
+        <section class="panel">
+          ${sectionTitle('terminal', 'Live Output', 'h2')}
+          ${repo.runtime.lastLog ? `<div class="log-panel">${escapeHtml(repo.runtime.lastLog)}</div>` : '<div class="empty">No output yet.</div>'}
+          ${repo.runtime.lastLogPath ? `<div class="tiny mono" style="margin-top: 10px;">${escapeHtml(repo.runtime.lastLogPath)}</div>` : ''}
+        </section>
+      `;
+    }
+
+    function renderBuildsPane() {
+      const node = document.getElementById('pane-builds');
+      const draft = selectedRepoDraft();
+      const repo = selectedRepoSnapshot();
+      if (!draft || !repo) {
+        node.innerHTML = '<section class="panel"><div class="empty">Add or select a repository to inspect its details.</div></section>';
+        return;
+      }
+
+      const releaseOptions = repo.recentReleases.map(release => `
+        <div class="item">
+          <div class="row" style="justify-content: space-between;">
+            <h4>${escapeHtml(release.name || release.tagName)}</h4>
+            <button class="button ${release.isPrerelease ? '' : 'secondary'}" data-action="rollback" data-repo-id="${repo.id}" data-tag-name="${escapeHtmlAttr(release.tagName)}">Rollback</button>
+          </div>
+          <div class="tiny">${escapeHtml(release.tagName)} · ${escapeHtml(formatDate(release.publishedAt) || 'Unknown date')}</div>
+          <p>${escapeHtml((release.body || '').trim().slice(0, 240) || 'No release notes.')}</p>
+        </div>
+      `).join('');
+
+      const buildItems = repo.recentBuilds.map(build => `
+        <div class="item">
+          <h4>${escapeHtml(build.version)}</h4>
+          <div class="tiny">${escapeHtml(shortSha(build.sha))} · ${escapeHtml(formatDate(build.builtAt))}</div>
+          <p>${escapeHtml(build.summary || 'No summary')}</p>
+          ${build.logPath ? `<p class="tiny mono">${escapeHtml(build.logPath)}</p>` : ''}
+        </div>
+      `).join('');
+      const previewBuilds = repo.recentBuilds.slice(0, 2);
+      const previewReleases = repo.recentReleases.slice(0, 2);
+      const buildPreviewItems = previewBuilds.map(build => `
+        <div class="item">
+          <h4>${escapeHtml(build.version)}</h4>
+          <div class="tiny">${escapeHtml(shortSha(build.sha))} · ${escapeHtml(formatDate(build.builtAt))}</div>
+          <p>${escapeHtml(build.summary || 'No summary')}</p>
+          ${authorLine(build.authorLogin, build.authorAvatarURL, build.authorProfileURL, 'built this release')}
+        </div>
+      `).join('');
+      const releasePreviewItems = previewReleases.map(release => `
+        <div class="item">
+          <h4>${escapeHtml(release.tagName)}</h4>
+          <div class="tiny">${escapeHtml(release.isPrerelease ? 'Beta' : 'Stable')} · ${escapeHtml(formatDate(release.publishedAt) || 'Unknown date')}</div>
+          <p>${escapeHtml(release.name || 'No release title')}</p>
+          ${authorLine(release.authorLogin, release.authorAvatarURL, release.authorProfileURL, 'published this release')}
+        </div>
+      `).join('');
+
+      node.innerHTML = `
+        <section class="panel">
+          <div class="editor">
+            <section class="editor-section">
+              ${sectionTitle('history', 'Build History')}
+              <div class="collection">${buildPreviewItems || '<div class="empty">No builds recorded yet.</div>'}</div>
+              ${repo.recentBuilds.length > 2 ? `<div class="tiny" style="margin-top: 10px;">${repo.recentBuilds.length - 2} more build${repo.recentBuilds.length - 2 === 1 ? '' : 's'}.</div>` : ''}
+              ${repo.recentBuilds.length ? `<div class="toolbar"><button class="button" type="button" data-action="open-explorer" data-explorer="builds">${icon('overview')}<span>Explore Builds</span></button></div>` : ''}
+            </section>
+            <section class="editor-section">
+              ${sectionTitle('releases', 'Release Explorer')}
+              <div class="collection">${releasePreviewItems || '<div class="empty">No releases loaded yet.</div>'}</div>
+              ${repo.recentReleases.length > 2 ? `<div class="tiny" style="margin-top: 10px;">${repo.recentReleases.length - 2} more release${repo.recentReleases.length - 2 === 1 ? '' : 's'}.</div>` : ''}
+              ${repo.recentReleases.length ? `<div class="toolbar"><button class="button" type="button" data-action="open-explorer" data-explorer="releases">${icon('overview')}<span>Explore Releases</span></button></div>` : ''}
+            </section>
+          </div>
+        </section>
+      `;
+    }
+
+    function renderConfigurationPane() {
+      const node = document.getElementById('pane-configuration');
+      const draft = selectedRepoDraft();
+      const repo = selectedRepoSnapshot();
+      if (!draft || !repo) {
+        node.innerHTML = `
+          <section class="panel">
+            <div class="empty">Select a repository to edit its configuration. Use the gear button in the header for ShipHook settings.</div>
+          </section>
+        `;
+        return;
+      }
+
+      const repoSummary = summaryList([
+        ['Repository', `${draft.owner || 'Unknown'}/${draft.repo || 'Unknown'}`],
+        ['Branch', draft.branch || 'main'],
+        ['Checkout', draft.localCheckoutPath || 'Not set']
+      ]);
+
+      const buildSummary = draft.buildMode === 'shell'
+        ? summaryList([
+          ['Build Command', draft.shell.command || 'Not set'],
+          ['Artifact Path', draft.shell.artifactPath || 'Not set']
+        ])
+        : summaryList([
+          ['Scheme', draft.xcode.scheme || 'Not set'],
+          ['App Name', draft.xcode.appName || 'Not set'],
+          ['Configuration', draft.xcode.configuration || 'Release']
+        ]);
+
+      const sparkleSummary = summaryList([
+        ['Appcast', draft.sparkle.appcastURL || 'Not set'],
+        ['Skip Older Versions', draft.sparkle.skipIfVersionIsNotNewer ? 'Enabled' : 'Disabled'],
+        ['Auto Increment Build', draft.sparkle.autoIncrementBuild ? 'Enabled' : 'Disabled']
+      ]);
+
+      const webhookSummary = summaryList([
+        ['Success Notifications', draft.notifications.postOnSuccess ? 'Enabled' : 'Disabled'],
+        ['Failure Notifications', draft.notifications.postOnFailure ? 'Enabled' : 'Disabled'],
+        ['Webhook URL', draft.notifications.discordWebhookURL || 'Not set']
+      ]);
+
+      node.innerHTML = `
+        <section class="panel">
+          <div class="editor">
+            <section class="editor-section">
+              <div class="section-header">
+                ${sectionTitle('repo', 'Repository Setup')}
+                ${sectionToggle('repoSetup', state.configSections.repoSetup)}
+              </div>
+              ${state.configSections.repoSetup ? `
+                <div class="field-grid">
+                  ${textInput('Display Name', 'repo.name', draft.name)}
+                  ${readOnlyInput('Repository ID', draft.id)}
+                  ${textInput('GitHub Owner', 'repo.owner', draft.owner)}
+                  ${textInput('Repository', 'repo.repo', draft.repo)}
+                  ${textInput('Branch', 'repo.branch', draft.branch)}
+                  ${textInput('Working Directory', 'repo.workingDirectory', draft.workingDirectory)}
+                  ${textInput('Local Checkout Path', 'repo.localCheckoutPath', draft.localCheckoutPath)}
+                  ${selectInput('Build Mode', 'repo.buildMode', draft.buildMode, [
+                    ['xcodeArchive', 'Xcode Archive'],
+                    ['shell', 'Shell']
+                  ])}
+                  ${selectInput('Version Strategy', 'repo.versionStrategy', draft.versionStrategy, [
+                    ['shortSHA', 'Short SHA'],
+                    ['shortSHATimestamp', 'Short SHA + Timestamp'],
+                    ['dateAndShortSHA', 'Date + Short SHA']
+                  ])}
+                  ${textInput('Repo Token Env Var', 'repo.githubTokenEnvVar', draft.githubTokenEnvVar)}
+                  ${textInput('Release Notes Path', 'repo.releaseNotesPath', draft.releaseNotesPath)}
+                </div>
+                <div class="field-grid" style="margin-top: 12px;">
+                  ${toggleInput('Repository Enabled', 'repo.isEnabled', draft.isEnabled)}
+                  ${toggleInput('Build On First Seen Commit', 'repo.buildOnFirstSeen', draft.buildOnFirstSeen)}
+                </div>
+              ` : repoSummary}
+            </section>
+            <section class="editor-section">
+              <div class="section-header">
+                ${sectionTitle('hammer', 'Build Automation')}
+                ${sectionToggle('buildAutomation', state.configSections.buildAutomation)}
+              </div>
+              ${state.configSections.buildAutomation ? `
+                <div class="field-grid">
+                  ${textInput('Workspace Path', 'repo.xcode.workspacePath', draft.xcode.workspacePath)}
+                  ${textInput('Project Path', 'repo.xcode.projectPath', draft.xcode.projectPath)}
+                  ${textInput('Scheme', 'repo.xcode.scheme', draft.xcode.scheme)}
+                  ${textInput('App Name', 'repo.xcode.appName', draft.xcode.appName)}
+                  ${textInput('Configuration', 'repo.xcode.configuration', draft.xcode.configuration)}
+                  ${textInput('Archive Path', 'repo.xcode.archivePath', draft.xcode.archivePath)}
+                  ${textInput('Artifact Path', 'repo.xcode.artifactPath', draft.xcode.artifactPath)}
+                  ${textInput('Shell Artifact Path', 'repo.shell.artifactPath', draft.shell.artifactPath)}
+                </div>
+                <div class="field-grid single" style="margin-top: 12px;">
+                  ${textAreaInput('Shell Command', 'repo.shell.command', draft.shell.command, 6)}
+                </div>
+              ` : buildSummary}
+            </section>
+            <section class="editor-section">
+              <div class="section-header">
+                ${sectionTitle('sparkles', 'Sparkle')}
+                ${sectionToggle('sparkle', state.configSections.sparkle)}
+              </div>
+              ${state.configSections.sparkle ? `
+                <div class="field-grid">
+                  ${textInput('Appcast URL', 'repo.sparkle.appcastURL', draft.sparkle.appcastURL)}
+                  ${textInput('Beta Icon Path', 'repo.sparkle.betaIconPath', draft.sparkle.betaIconPath)}
+                  ${toggleInput('Auto Increment Build', 'repo.sparkle.autoIncrementBuild', draft.sparkle.autoIncrementBuild)}
+                  ${toggleInput('Skip If Version Not Newer', 'repo.sparkle.skipIfVersionIsNotNewer', draft.sparkle.skipIfVersionIsNotNewer)}
+                </div>
+              ` : sparkleSummary}
+            </section>
+            <section class="editor-section">
+              ${sectionTitle('shield', 'Signing')}
+              <div class="field-grid">
+                ${textInput('Development Team', 'repo.signing.developmentTeam', draft.signing.developmentTeam)}
+                ${selectInput('Code Sign Style', 'repo.signing.codeSignStyle', draft.signing.codeSignStyle, [
+                  ['automatic', 'Automatic'],
+                  ['manual', 'Manual']
+                ])}
+                ${textInput('Signing Identity', 'repo.signing.codeSignIdentity', draft.signing.codeSignIdentity)}
+                ${textInput('Notarization Profile', 'repo.signing.notarizationProfile', draft.signing.notarizationProfile)}
+              </div>
+            </section>
+            <section class="editor-section">
+              <div class="section-header">
+                ${sectionTitle('webhook', 'Webhooks')}
+                ${sectionToggle('webhooks', state.configSections.webhooks)}
+              </div>
+              ${state.configSections.webhooks ? `
+                <div class="field-grid">
+                  ${textInput('Discord Webhook URL', 'repo.notifications.discordWebhookURL', draft.notifications.discordWebhookURL)}
+                  ${toggleInput('Post On Success', 'repo.notifications.postOnSuccess', draft.notifications.postOnSuccess)}
+                  ${toggleInput('Post On Failure', 'repo.notifications.postOnFailure', draft.notifications.postOnFailure)}
+                </div>
+              ` : webhookSummary}
+            </section>
+            <section class="editor-section">
+              <div class="section-header">
+                ${sectionTitle('sliders', 'Advanced Build Settings')}
+                ${sectionToggle('advanced', state.configSections.advanced)}
+              </div>
+              ${state.configSections.advanced ? `
+                <div class="field-grid single">
+                  ${textAreaInput('Publish Command', 'repo.publishCommand', draft.publishCommand, 6)}
+                  ${textAreaInput('Environment (JSON object)', 'repo.environment', JSON.stringify(draft.environment, null, 2), 6)}
+                </div>
+              ` : '<div class="tiny">Project overrides, publish command, and environment live here when needed.</div>'}
+            </section>
+            <section class="editor-section">
+              <div class="toolbar">
+                <button class="button warn" data-action="remove-repo" data-repo-id="${repo.id}">${icon('trash')}<span>Delete Repository</span></button>
+              </div>
+            </section>
+          </div>
+        </section>
+      `;
+    }
+
+    function selectedRepoSnapshot() {
+      return state.snapshot?.repositories.find(repo => repo.id === state.selectedRepoId) || null;
+    }
+
+    function selectedRepoDraft() {
+      return state.draftConfig?.repositories.find(repo => repo.id === state.selectedRepoId) || null;
+    }
+
+    function summaryPill(iconName, label, detail) {
+      const trailing = detail
+        ? `<span class="divider">/</span><span class="muted">${escapeHtml(detail)}</span>`
+        : '';
+      return `<div class="summary-pill">${icon(iconName)}<span>${escapeHtml(label)}</span>${trailing}</div>`;
+    }
+
+    function repoStatusBadge(repo) {
+      const status = repo.configuration.isEnabled ? repo.runtime.activity : 'paused';
+      const iconName = repo.configuration.isEnabled ? 'activity' : 'pause';
+      return `<span class="badge icon-only ${activityTone(status)}" title="${escapeHtmlAttr(status)}" aria-label="${escapeHtmlAttr(status)}">${icon(iconName)}<span>${escapeHtml(status)}</span></span>`;
+    }
+
+    function badge(iconName, text, tone = '') {
+      return `<span class="badge ${tone}">${icon(iconName)}<span>${escapeHtml(text)}</span></span>`;
+    }
+
+    function sectionToggle(section, isOpen) {
+      return `<button class="button section-toggle" data-action="toggle-config-section" data-section="${section}"><span>${isOpen ? 'Done' : 'Configure'}</span></button>`;
+    }
+
+    function summaryList(rows) {
+      return `
+        <div class="summary-list">
+          ${rows.map(([label, value]) => `
+            <div class="summary-row">
+              <div class="summary-row-label">${escapeHtml(label)}</div>
+              <div class="summary-row-value">${escapeHtml(value || 'Not set')}</div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    function textInput(label, path, value, type = 'text') {
+      return `<label class="field">${escapeHtml(label)}<input type="${type}" value="${escapeHtmlAttr(value ?? '')}" data-field="${path}"></label>`;
+    }
+
+    function textAreaInput(label, path, value, rows = 6) {
+      return `<label class="field">${escapeHtml(label)}<textarea rows="${rows}" data-field="${path}">${escapeHtml(value ?? '')}</textarea></label>`;
+    }
+
+    function readOnlyInput(label, value) {
+      return `<label class="field">${escapeHtml(label)}<input type="text" value="${escapeHtmlAttr(value ?? '')}" readonly class="dim"></label>`;
+    }
+
+    function selectInput(label, path, value, options) {
+      return `
+        <label class="field">${escapeHtml(label)}
+          <select data-field="${path}">
+            ${options.map(([optionValue, optionLabel]) => `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ? 'selected' : ''}>${escapeHtml(optionLabel)}</option>`).join('')}
+          </select>
+        </label>
+      `;
+    }
+
+    function toggleInput(label, path, checked) {
+      return `<label class="field toggle"><input type="checkbox" data-field="${path}" ${checked ? 'checked' : ''}><span>${escapeHtml(label)}</span></label>`;
+    }
+
+    function icon(name) {
+      const icons = {
+        overview: '<svg viewBox="0 0 24 24"><path d="M4 5h7v6H4z"/><path d="M13 5h7v10h-7z"/><path d="M4 13h7v6H4z"/><path d="M13 17h7v2h-7z"/></svg>',
+        repo: '<svg viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v16H6.5A2.5 2.5 0 0 0 4 22z"/><path d="M8 8h8"/><path d="M8 12h8"/></svg>',
+        settings: '<svg viewBox="0 0 24 24"><path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/><circle cx="12" cy="12" r="4"/></svg>',
+        user: '<svg viewBox="0 0 24 24"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/><path d="M4 20a8 8 0 0 1 16 0"/></svg>',
+        gear: '<svg viewBox="0 0 24 24"><path d="M10.55 2.52h2.9l.43 2.14a7.92 7.92 0 0 1 1.72.71l1.87-1.14 2.05 2.05-1.14 1.87c.29.55.53 1.13.71 1.72l2.14.43v2.9l-2.14.43a7.92 7.92 0 0 1-.71 1.72l1.14 1.87-2.05 2.05-1.87-1.14a7.92 7.92 0 0 1-1.72.71l-.43 2.14h-2.9l-.43-2.14a7.92 7.92 0 0 1-1.72-.71l-1.87 1.14-2.05-2.05 1.14-1.87a7.92 7.92 0 0 1-.71-1.72L2.52 13.45v-2.9l2.14-.43c.18-.59.42-1.17.71-1.72L4.23 6.53l2.05-2.05 1.87 1.14c.55-.29 1.13-.53 1.72-.71zm1.45 6.23a3.25 3.25 0 1 0 0 6.5 3.25 3.25 0 0 0 0-6.5Z"/></svg>',
+        refresh: '<svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>',
+        save: '<svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v6h8V4"/><path d="M9 18h6"/></svg>',
+        play: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4z"/></svg>',
+        pause: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 9v6"/><path d="M14 9v6"/></svg>',
+        activity: '<svg viewBox="0 0 24 24"><path d="M4 12h4l2-4 4 8 2-4h4"/></svg>',
+        globe: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18"/><path d="M12 3a15 15 0 0 0 0 18"/></svg>',
+        shield: '<svg viewBox="0 0 24 24"><path d="M12 3 5 6v6c0 4.5 2.9 7.9 7 9 4.1-1.1 7-4.5 7-9V6z"/></svg>',
+        key: '<svg viewBox="0 0 24 24"><circle cx="8.5" cy="15.5" r="3.5"/><path d="M12 15.5h8"/><path d="M17 12.5v3"/><path d="M20 13.5v2"/></svg>',
+        sparkles: '<svg viewBox="0 0 24 24"><path d="m12 3 1.4 4.6L18 9l-4.6 1.4L12 15l-1.4-4.6L6 9l4.6-1.4z"/><path d="m19 15 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>',
+        history: '<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v5l3 2"/></svg>',
+        terminal: '<svg viewBox="0 0 24 24"><path d="m5 7 4 5-4 5"/><path d="M12 17h7"/><rect x="3" y="4" width="18" height="16" rx="2"/></svg>',
+        releases: '<svg viewBox="0 0 24 24"><path d="M6 8h12"/><path d="M6 12h12"/><path d="M6 16h8"/><path d="M4 5h16v14H4z"/></svg>',
+        webhook: '<svg viewBox="0 0 24 24"><path d="M8 12a4 4 0 1 1 4 4"/><path d="M16 12a4 4 0 1 0-4 4"/><circle cx="8" cy="12" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="12" cy="16" r="2"/></svg>',
+        hammer: '<svg viewBox="0 0 24 24"><path d="m14 6 4 4"/><path d="m11 9 4-4 4 4-4 4"/><path d="M5 21 13 13"/><path d="m4 20 2 2"/></svg>',
+        sliders: '<svg viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="11" cy="18" r="2"/></svg>',
+        trash: '<svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/></svg>',
+        plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
+        search: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m20 20-4.2-4.2"/></svg>',
+        close: '<svg viewBox="0 0 24 24"><path d="M6 6 18 18"/><path d="M18 6 6 18"/></svg>'
+      };
+      return `<span class="icon">${icons[name] || icons.overview}</span>`;
+    }
+
+    function activityTone(activity) {
+      switch (activity) {
+        case 'succeeded': return 'success';
+        case 'failed': return 'danger';
+        case 'building': return 'live';
+        case 'polling': return 'warning';
+        case 'paused': return 'warning';
+        default: return '';
+      }
+    }
+
+    function scheduleToastDismiss() {
+      if (state.toastTimerId) {
+        window.clearTimeout(state.toastTimerId);
+        state.toastTimerId = null;
+      }
+
+      if (!state.toasts.length) {
+        return;
+      }
+
+      state.toastTimerId = window.setTimeout(() => {
+        const nextToast = state.toasts.find(toast => !toast.hovered);
+        if (!nextToast) {
+          scheduleToastDismiss();
+          return;
+        }
+        state.toasts = state.toasts.filter(toast => toast.id !== nextToast.id);
+        renderStatus();
+        scheduleToastDismiss();
+      }, 3200);
+    }
+
+    function shortSha(value) {
+      return value ? String(value).slice(0, 7) : '';
     }
 
     function formatDate(value) {
-      if (!value) return "Never";
-      var date = new Date(value);
-      return Number.isNaN(date.getTime()) ? "Never" : date.toLocaleString();
+      if (!value) return '';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return new Intl.DateTimeFormat(undefined, {
+        dateStyle: 'medium',
+        timeStyle: 'short'
+      }).format(date);
     }
 
-    function shortSHA(value) {
-      return value ? value.slice(0, 7) : "None";
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
     }
 
-    function statusClass(repo) {
-      if (repo.isEnabled === false) return "paused";
-      if (repo.phase === "queued") return "queued";
-      if (repo.activity === "failed") return "failed";
-      if (repo.activity === "polling") return "polling";
-      if (repo.activity === "building") return "building";
-      if (repo.activity === "succeeded") return "succeeded";
-      return "idle";
+    function escapeHtmlAttr(value) {
+      return escapeHtml(value).replaceAll("'", '&#39;');
     }
 
-    function statusText(repo) {
-      if (repo.isEnabled === false) return "Paused";
-      if (repo.phase === "queued") return "Queued";
-      return String(repo.activity || "idle");
-    }
-
-    function statusIcon(repo) {
-      if (repo.isEnabled === false) return "⏸";
-      if (repo.phase === "queued") return "⏳";
-      if (repo.activity === "failed") return "❌";
-      if (repo.activity === "building") return "🛠";
-      if (repo.activity === "polling") return "🔄";
-      if (repo.activity === "succeeded") return "✅";
-      return "○";
-    }
-
-    function betaBadge(channel) {
-      return channel === "beta" ? '<span class="channel">Beta</span>' : "";
-    }
-
-    function renderAuthor(login, avatarURL, profileURL, suffix) {
-      if (!login) return "";
-      var avatar = avatarURL
-        ? '<img class="avatar" src="' + escapeHtml(avatarURL) + '" alt="avatar">'
-        : '<span class="avatar"></span>';
-      var label = login.startsWith("@") ? login : ("@" + login);
-      var user = profileURL
-        ? '<a href="' + escapeHtml(profileURL) + '" target="_blank" rel="noreferrer">' + escapeHtml(label) + '</a>'
-        : escapeHtml(label);
-      return '<div class="author">' + avatar + '<span>' + user + " " + escapeHtml(suffix || "") + '</span></div>';
-    }
-
-    function repoIconMarkup(repo, cls) {
-      if (repo && repo.iconDataURL) {
-        return '<img class="' + cls + '" src="' + escapeHtml(repo.iconDataURL) + '" alt="app icon">';
+    function parseEnvironment(text) {
+      const raw = (text || '').trim();
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+        throw new Error('Environment must be a JSON object.');
       }
-      return '<span class="' + cls + '">📦</span>';
-    }
-
-    function setSelectedRepo(repoID) {
-      selectedRepoID = repoID;
-      try { localStorage.setItem("shiphook-web-selected-repo", repoID); } catch (_) {}
-      renderUI();
-    }
-
-    function setTab(tab) {
-      selectedTab = tab;
-      renderUI();
-    }
-
-    function openExplorer(type) {
-      explorerType = type;
-      explorerPage = 0;
-      renderExplorerModal(getSelectedRepo());
-    }
-
-    function closeExplorer() {
-      explorerType = null;
-      renderExplorerModal(getSelectedRepo());
-    }
-
-    function moveExplorerPage(delta) {
-      explorerPage += delta;
-      if (explorerPage < 0) explorerPage = 0;
-      renderExplorerModal(getSelectedRepo());
-    }
-
-    function getSelectedRepo() {
-      var repos = dashboardState.repositories || [];
-      if (!repos.length) return null;
-      if (!selectedRepoID || !repos.some(function(r) { return r.id === selectedRepoID; })) {
-        selectedRepoID = repos[0].id;
+      const output = {};
+      for (const [key, value] of Object.entries(parsed)) {
+        output[String(key)] = String(value ?? '');
       }
-      return repos.find(function(r) { return r.id === selectedRepoID; }) || repos[0];
+      return output;
     }
 
-    function renderSidebar() {
-      var repos = dashboardState.repositories || [];
-      var root = document.getElementById("repoList");
-      if (!repos.length) {
-        root.innerHTML = '<div class="empty">No repositories configured yet.</div>';
+    function coerceNumber(value, fallback) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function buildPayloadConfig() {
+      const config = structuredClone(state.draftConfig);
+      config.pollIntervalSeconds = coerceNumber(config.pollIntervalSeconds, globalDefaults.pollIntervalSeconds);
+      config.generatedDataRetentionCount = Math.max(1, Math.round(coerceNumber(config.generatedDataRetentionCount, globalDefaults.generatedDataRetentionCount)));
+      config.autoPauseFailureCount = Math.max(1, Math.round(coerceNumber(config.autoPauseFailureCount, globalDefaults.autoPauseFailureCount)));
+      config.webDashboardPort = Math.round(coerceNumber(config.webDashboardPort, globalDefaults.webDashboardPort));
+      config.repositories = config.repositories.map(repository => {
+        const next = normalizeRepository(repository);
+        next.workingDirectory = next.workingDirectory || null;
+        next.releaseNotesPath = next.releaseNotesPath || null;
+        next.githubTokenEnvVar = next.githubTokenEnvVar || null;
+        next.xcode.projectPath = next.xcode.projectPath || null;
+        next.xcode.workspacePath = next.xcode.workspacePath || null;
+        next.sparkle.appcastURL = next.sparkle.appcastURL || null;
+        next.sparkle.betaIconPath = next.sparkle.betaIconPath || null;
+        next.notifications.discordWebhookURL = next.notifications.discordWebhookURL || null;
+        next.signing.developmentTeam = next.signing.developmentTeam || null;
+        next.signing.codeSignIdentity = next.signing.codeSignIdentity || null;
+        next.signing.notarizationProfile = next.signing.notarizationProfile || null;
+        return next;
+      });
+      return config;
+    }
+
+    document.addEventListener('click', async event => {
+      const target = event.target.closest('[data-action], [data-select-repo]');
+      if (!target) return;
+      event.preventDefault();
+
+      const selectedRepo = target.getAttribute('data-select-repo');
+      if (selectedRepo) {
+        state.selectedRepoId = selectedRepo;
+        state.mobileSidebarOpen = false;
+        render();
         return;
       }
-      var items = repos.map(function(repo) {
-        var active = repo.id === selectedRepoID ? " active" : "";
-        return (
-          '<button class="repo-item' + active + '" onclick="setSelectedRepo(\\'' + escapeHtml(repo.id) + '\\')">' +
-            '<div class="repo-top">' + repoIconMarkup(repo, "repo-icon") + '<div class="repo-name">' + escapeHtml(repo.name) + '</div></div>' +
-            '<div class="repo-sub">' + escapeHtml(repo.slug) + "</div>" +
-            '<div class="repo-meta">' +
-              '<span class="status ' + statusClass(repo) + '"><span class="dot"></span>' + escapeHtml(statusIcon(repo) + " " + statusText(repo)) + '</span>' +
-              '<span class="version-chip">v' + escapeHtml(repo.version || "Unknown") + '</span>' +
-            '</div>' +
-          '</button>'
-        );
-      }).join("");
-      root.innerHTML = items;
-    }
 
-    function renderBuildItems(builds) {
-      return builds.map(function(build) {
-        var author = renderAuthor(build.authorLogin, build.authorAvatarURL, build.authorProfileURL, "committed this build");
-        var summary = build.summary ? '<div class="list-body">' + escapeHtml(build.summary) + '</div>' : "";
-        return (
-          '<div class="list-item">' +
-            '<div class="list-title">v' + escapeHtml(build.version || "Unknown") + betaBadge(build.releaseChannel) + '</div>' +
-            '<div class="list-meta">' + escapeHtml(shortSHA(build.sha)) + " · " + escapeHtml(formatDate(build.builtAt)) + '</div>' +
-            summary + author +
-          '</div>'
-        );
-      }).join("");
-    }
-
-    function looksLikeHTML(value) {
-      return /<[^>]+>/.test(value || "");
-    }
-
-    function stripHTML(value) {
-      return String(value || "").replace(/<[^>]*>/g, " ").replace(/\\s+/g, " ").trim();
-    }
-
-    function truncate(value, limit) {
-      if (!value || value.length <= limit) return value;
-      return value.slice(0, limit - 1).trim() + "…";
-    }
-
-    function releaseBodyMarkup(body, fullNotes) {
-      if (!body) return "";
-      if (looksLikeHTML(body)) {
-        if (!fullNotes) {
-          return '<div class="list-body">' + escapeHtml(truncate(stripHTML(body), 220)) + '</div>';
+      const action = target.getAttribute('data-action');
+      try {
+        switch (action) {
+          case 'set-pane':
+            state.activePane = target.dataset.pane;
+            render();
+            break;
+          case 'toggle-config-section':
+            state.configSections[target.dataset.section] = !state.configSections[target.dataset.section];
+            renderConfigurationPane();
+            break;
+          case 'open-sidebar':
+            state.mobileSidebarOpen = true;
+            render();
+            break;
+          case 'close-sidebar':
+            state.mobileSidebarOpen = false;
+            render();
+            break;
+          case 'open-settings':
+            openSettingsModal();
+            break;
+          case 'close-settings':
+            state.settingsModalOpen = false;
+            renderModal();
+            break;
+          case 'open-explorer':
+            openExplorerModal(target.dataset.explorer);
+            break;
+          case 'close-explorer':
+            state.explorerModal = null;
+            renderModal();
+            break;
+          case 'open-add-repo':
+            state.addRepoWizardOpen = true;
+            state.addRepoInspectionPreview = null;
+            state.explorerModal = null;
+            state.settingsModalOpen = false;
+            renderModal();
+            break;
+          case 'close-add-repo':
+            state.addRepoWizardOpen = false;
+            state.addRepoInspectionPreview = null;
+            renderModal();
+            break;
+          case 'inspect-repo':
+            await runCommand({
+              type: 'inspectRepository',
+              inspectionRequest: {
+                localCheckoutPath: addRepoDraft.localCheckoutPath,
+                fallbackOwner: addRepoDraft.fallbackOwner,
+                fallbackRepo: addRepoDraft.fallbackRepo,
+                fallbackBranch: addRepoDraft.fallbackBranch
+              }
+            }, 'Inspection succeeded.');
+            renderModal();
+            break;
+          case 'confirm-add-repo':
+            await runCommand({
+              type: 'addRepositoryFromInspection',
+              inspectionSubmission: {
+                localCheckoutPath: addRepoDraft.localCheckoutPath,
+                fallbackOwner: addRepoDraft.fallbackOwner,
+                fallbackRepo: addRepoDraft.fallbackRepo,
+                fallbackBranch: addRepoDraft.fallbackBranch,
+                selectedScheme: addRepoDraft.selectedScheme || null
+              }
+            }, 'Repository added.');
+            state.addRepoWizardOpen = false;
+            state.activePane = 'configuration';
+            state.addRepoInspectionPreview = null;
+            if (state.snapshot?.repositories?.length) {
+              state.selectedRepoId = state.snapshot.repositories[state.snapshot.repositories.length - 1].id;
+            }
+            render();
+            break;
+          case 'save':
+            await runCommand({ type: 'saveConfiguration', configuration: buildPayloadConfig() }, 'Configuration saved.');
+            break;
+          case 'reload':
+            await runCommand({ type: 'reloadConfiguration' }, 'Configuration reloaded.');
+            break;
+          case 'poll-all':
+            await runCommand({ type: 'pollAll' }, 'Polling all repositories.');
+            break;
+          case 'poll-repo':
+            await runCommand({ type: 'pollRepository', repositoryID: target.dataset.repoId }, 'Polling repository.');
+            break;
+          case 'set-repo-enabled':
+            await runCommand({
+              type: 'setRepositoryEnabled',
+              repositoryID: target.dataset.repoId,
+              enabled: target.dataset.enabled === 'true'
+            }, target.dataset.enabled === 'true' ? 'Repository resumed.' : 'Repository paused.');
+            break;
+          case 'reset-build':
+            await runCommand({ type: 'resetBuildState', repositoryID: target.dataset.repoId }, 'Build state reset.');
+            break;
+          case 'refresh-releases':
+            await runCommand({ type: 'refreshReleases', repositoryID: target.dataset.repoId }, 'Refreshing releases.');
+            break;
+          case 'remove-repo':
+            if (window.confirm('Remove this repository from ShipHook?')) {
+              await runCommand({ type: 'removeRepository', repositoryID: target.dataset.repoId }, 'Repository removed.');
+            }
+            break;
+          case 'rollback':
+            if (window.confirm(`Rollback to ${target.dataset.tagName}?`)) {
+              await runCommand({
+                type: 'rollbackRelease',
+                repositoryID: target.dataset.repoId,
+                tagName: target.dataset.tagName
+              }, 'Rollback started.');
+            }
+            break;
+          case 'refresh-signing':
+            await runCommand({ type: 'refreshSigningIdentities' }, 'Signing identities refreshed.');
+            break;
+          case 'store-profile':
+            await runCommand({
+              type: 'storeNotarizationProfile',
+              notarizationProfile: structuredClone(notarizationDraft)
+            }, 'Notarization profile stored.');
+            notarizationDraft.profileName = '';
+            notarizationDraft.appleID = '';
+            notarizationDraft.teamID = '';
+            notarizationDraft.appSpecificPassword = '';
+            render();
+            break;
         }
-        return '<div class="list-body notes-html">' + body + '</div>';
+      } catch (error) {
+        setStatus({ kind: 'error', message: error.message || String(error) });
       }
-      if (!fullNotes) {
-        return '<div class="list-body">' + escapeHtml(truncate(body, 220)).replace(/\\n/g, "<br>") + '</div>';
-      }
-      return '<div class="list-body">' + escapeHtml(body).replace(/\\n/g, "<br>") + '</div>';
-    }
+    });
 
-    function renderReleaseItems(releases, fullNotes) {
-      return releases.map(function(release) {
-        var author = renderAuthor(release.authorLogin, release.authorAvatarURL, release.authorProfileURL, "published this release");
-        var body = releaseBodyMarkup(release.body || "", !!fullNotes);
-        var link = release.htmlURL ? '<a href="' + escapeHtml(release.htmlURL) + '" target="_blank" rel="noreferrer">Open release</a>' : "";
-        return (
-          '<div class="list-item">' +
-            '<div class="list-title">' + escapeHtml(release.tagName) + betaBadge(release.isPrerelease ? "beta" : "") + '</div>' +
-            '<div class="list-meta">' + escapeHtml(formatDate(release.publishedAt)) + '</div>' +
-            '<div class="list-meta">' + escapeHtml(release.name || "") + '</div>' +
-            body + author +
-            (link ? '<div class="list-meta">' + link + '</div>' : '') +
-          '</div>'
-        );
-      }).join("");
-    }
+    document.addEventListener('input', event => {
+      const target = event.target;
+      const field = target.getAttribute('data-field');
+      if (!field) return;
 
-    function renderBuildExplorerPreview(repo) {
-      var builds = repo.recentBuilds || [];
-      if (!builds.length) return '<div class="empty">No recent builds yet.</div>';
-      var preview = builds.slice(0, 2);
-      var remaining = Math.max(0, builds.length - preview.length);
-      return (
-        renderBuildItems(preview) +
-        (remaining > 0 ? '<div class="more-label">' + remaining + " more build" + (remaining === 1 ? "" : "s") + '.</div>' : '')
-      );
-    }
+      const value = target.type === 'checkbox' ? target.checked : target.value;
 
-    function renderReleaseExplorerPreview(repo) {
-      var releases = repo.recentReleases || [];
-      if (!releases.length) return '<div class="empty">No releases loaded yet.</div>';
-      var preview = releases.slice(0, 2);
-      var remaining = Math.max(0, releases.length - preview.length);
-      return (
-        renderReleaseItems(preview, false) +
-        (remaining > 0 ? '<div class="more-label">' + remaining + " more release" + (remaining === 1 ? "" : "s") + '.</div>' : '')
-      );
-    }
-
-    function renderExplorerModal(repo) {
-      var modalRoot = document.getElementById("explorerModal");
-      if (!repo || !explorerType) {
-        modalRoot.style.display = "none";
-        modalRoot.innerHTML = "";
-        return;
-      }
-
-      var items = explorerType === "build" ? (repo.recentBuilds || []) : (repo.recentReleases || []);
-      var title = explorerType === "build" ? "Build Explorer" : "Release Explorer";
-      var pageSize = 10;
-      var totalPages = Math.max(1, Math.ceil(items.length / pageSize));
-      if (explorerPage > totalPages - 1) explorerPage = totalPages - 1;
-      var start = explorerPage * pageSize;
-      var pageItems = items.slice(start, start + pageSize);
-      var listHTML = explorerType === "build" ? renderBuildItems(pageItems) : renderReleaseItems(pageItems, true);
-
-      modalRoot.innerHTML =
-        '<div class="modal">' +
-          '<div class="modal-head">' +
-            '<div><strong>' + (explorerType === "build" ? "🧱 " : "🧪 ") + escapeHtml(title) + '</strong><div class="list-meta">' + escapeHtml(repo.name) + '</div></div>' +
-            '<div class="modal-actions">' +
-              '<span class="list-meta">Page ' + (explorerPage + 1) + " of " + totalPages + '</span>' +
-              '<button class="modal-btn" ' + (explorerPage === 0 ? "disabled" : "") + ' onclick="moveExplorerPage(-1)">Previous</button>' +
-              '<button class="modal-btn" ' + (explorerPage >= totalPages - 1 ? "disabled" : "") + ' onclick="moveExplorerPage(1)">Next</button>' +
-              '<button class="modal-btn" onclick="closeExplorer()">Done</button>' +
-            '</div>' +
-          '</div>' +
-          (pageItems.length ? listHTML : '<div class="empty">Nothing to show.</div>') +
-        '</div>';
-
-      modalRoot.style.display = "flex";
-    }
-
-    function renderDetail() {
-      var repo = getSelectedRepo();
-      var root = document.getElementById("repoDetail");
-      if (!repo) {
-        root.innerHTML = '<div class="empty">Select a repository.</div>';
-        return;
-      }
-
-      var author = renderAuthor(repo.lastCommitAuthorLogin, repo.lastCommitAuthorAvatarURL, repo.lastCommitAuthorProfileURL, "published this commit");
-      var progress = "";
-      if (repo.progress) {
-        var width = Math.max(0, Math.min(100, repo.progress.fractionComplete * 100));
-        progress =
-          '<div class="progress-wrap">' +
-            '<div class="progress-label"><span>Step ' + repo.progress.currentStep + " of " + repo.progress.totalSteps + '</span><span>' + escapeHtml(repo.progress.label) + '</span></div>' +
-            '<div class="progress"><div class="bar" style="width:' + width + '%"></div></div>' +
-          '</div>';
-      }
-
-      var tabButtons =
-        '<div class="tabs">' +
-          '<button class="tab' + (selectedTab === "status" ? ' active' : '') + '" onclick="setTab(\\'status\\')">📊 Status</button>' +
-          '<button class="tab' + (selectedTab === "explorers" ? ' active' : '') + '" onclick="setTab(\\'explorers\\')">🧭 Builds & Releases</button>' +
-        '</div>';
-
-      var statusPane =
-        '<div class="split">' +
-          '<div class="pane">' +
-            '<div class="section-title"><span class="section-icon">📌</span>Current</div>' +
-            '<div class="card-grid">' +
-              '<div class="metric"><strong>Current Version</strong><span>' + escapeHtml(repo.version || "Unknown") + betaBadge(repo.releaseChannel) + '</span></div>' +
-              '<div class="metric"><strong>Published Version</strong><span>' + escapeHtml(repo.publishedVersion || "Unknown") + '</span></div>' +
-            '</div>' +
-            '<div class="row"><span>Status</span><span>' + escapeHtml(statusText(repo)) + '</span></div>' +
-            '<div class="row"><span>Phase</span><span>' + escapeHtml(repo.phase || "idle") + '</span></div>' +
-          '</div>' +
-          '<div class="pane">' +
-            '<div class="section-title"><span class="section-icon">🕒</span>Timeline</div>' +
-            '<div class="row"><span>Latest Seen</span><span>' + escapeHtml(shortSHA(repo.lastSeenSHA)) + " · " + escapeHtml(formatDate(repo.lastCheckDate)) + '</span></div>' +
-            '<div class="row"><span>Latest Built</span><span>' + escapeHtml(shortSHA(repo.lastBuiltSHA)) + " · " + escapeHtml(formatDate(repo.lastSuccessDate)) + '</span></div>' +
-            '<div class="row"><span>Branch</span><span>' + escapeHtml(repo.branch || "") + '</span></div>' +
-          '</div>' +
-        '</div>';
-
-      var explorersPane =
-        '<div class="stack">' +
-          '<div class="pane">' +
-            '<div class="explorer-head"><div class="section-title"><span class="section-icon">🧱</span>Build Explorer</div><button class="explore-btn" onclick="openExplorer(\\'build\\')">Explore</button></div>' +
-            renderBuildExplorerPreview(repo) +
-          '</div>' +
-          '<div class="pane">' +
-            '<div class="explorer-head"><div class="section-title"><span class="section-icon">🧪</span>Release Explorer</div><button class="explore-btn" onclick="openExplorer(\\'release\\')">Explore</button></div>' +
-            renderReleaseExplorerPreview(repo) +
-          '</div>' +
-        '</div>';
-
-      root.innerHTML =
-        '<div class="detail-header">' +
-          '<div class="detail-title-wrap">' + repoIconMarkup(repo, "detail-icon") + '<div><h2 class="title">' + escapeHtml(repo.name) + '</h2><div class="slug">' + escapeHtml(repo.slug) + " · " + escapeHtml(repo.branch) + '</div></div></div>' +
-          '<div class="status ' + statusClass(repo) + '"><span class="dot"></span>' + escapeHtml(statusIcon(repo) + " " + statusText(repo)) + '</div>' +
-        '</div>' +
-        '<p class="summary">' + escapeHtml(repo.summary || "") + '</p>' +
-        author +
-        progress +
-        tabButtons +
-        (selectedTab === "status" ? statusPane : explorersPane);
-    }
-
-    function renderUI() {
-      renderSidebar();
-      renderDetail();
-      renderExplorerModal(getSelectedRepo());
-    }
-
-    function render(state) {
-      dashboardState = state || { repositories: [] };
-      document.getElementById("updatedAt").textContent = "Updated " + formatDate(dashboardState.generatedAt);
-      if (!selectedRepoID) {
-        try { selectedRepoID = localStorage.getItem("shiphook-web-selected-repo"); } catch (_) {}
-      }
-      renderUI();
-    }
-
-    function renderUnavailable(message) {
-      document.getElementById("updatedAt").textContent = message;
-      dashboardState = { repositories: [] };
-      document.getElementById("repoList").innerHTML = '<div class="empty">' + escapeHtml(message) + '</div>';
-      document.getElementById("repoDetail").innerHTML = '<div class="empty">' + escapeHtml(message) + '</div>';
-    }
-
-    function refresh() {
-      var request = new XMLHttpRequest();
-      request.open("GET", "/api/state", true);
-      request.setRequestHeader("Cache-Control", "no-store");
-      request.onreadystatechange = function() {
-        if (request.readyState !== 4) return;
-        if (request.status < 200 || request.status >= 300) {
-          renderUnavailable("Dashboard error (" + request.status + ")");
-          return;
+      if (field.startsWith('global.')) {
+        updateByPath(state.draftConfig, field.replace('global.', ''), value);
+      } else if (field.startsWith('repo.')) {
+        const repo = selectedRepoDraft();
+        if (!repo) return;
+        if (field === 'repo.environment') {
+          try {
+            repo.environment = parseEnvironment(value);
+            target.style.borderColor = '';
+          } catch {
+            target.style.borderColor = 'rgba(255,109,122,0.8)';
+            return;
+          }
+        } else {
+          updateByPath(repo, field.replace('repo.', ''), value);
         }
-        try { render(JSON.parse(request.responseText)); }
-        catch (_) { renderUnavailable("Dashboard parse error"); }
-      };
-      request.onerror = function() { renderUnavailable("Dashboard unavailable"); };
-      request.send();
+      } else if (field.startsWith('notary.')) {
+        updateByPath(notarizationDraft, field.replace('notary.', ''), value);
+      } else if (field.startsWith('addRepo.')) {
+        updateByPath(addRepoDraft, field.replace('addRepo.', ''), value);
+      }
+
+      renderOverview();
+      renderRepoList();
+      renderStatusPane();
+      renderBuildsPane();
+      renderConfigurationPane();
+      renderModal();
+    });
+
+    document.addEventListener('change', async event => {
+      const target = event.target;
+      if (target.hasAttribute('data-launch-toggle')) {
+        try {
+          await runCommand({
+            type: 'setLaunchAtLogin',
+            enabled: !!target.checked
+          }, 'Launch at login updated.');
+        } catch (error) {
+          setStatus({ kind: 'error', message: error.message || String(error) });
+        }
+      }
+    });
+
+    document.addEventListener('mouseenter', event => {
+      const toast = event.target.closest('[data-toast-id]');
+      if (!toast) return;
+      const targetToast = state.toasts.find(item => item.id === toast.dataset.toastId);
+      if (!targetToast) return;
+      targetToast.hovered = true;
+      scheduleToastDismiss();
+    }, true);
+
+    document.addEventListener('mouseleave', event => {
+      const toast = event.target.closest('[data-toast-id]');
+      if (!toast) return;
+      const targetToast = state.toasts.find(item => item.id === toast.dataset.toastId);
+      if (!targetToast) return;
+      targetToast.hovered = false;
+      scheduleToastDismiss();
+    }, true);
+
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        runAutoRefresh().catch(() => {});
+      }
+    });
+
+    function updateByPath(root, path, value) {
+      const segments = path.split('.');
+      let target = root;
+      for (let index = 0; index < segments.length - 1; index += 1) {
+        const key = segments[index];
+        if (target[key] == null || typeof target[key] !== 'object') {
+          target[key] = {};
+        }
+        target = target[key];
+      }
+      target[segments.at(-1)] = value;
     }
 
-    refresh();
-    setInterval(refresh, 5000);
+    fetchState({ preserveDraft: false }).then(() => {
+      scheduleAutoRefresh();
+    }).catch(error => {
+      setStatus({ kind: 'error', message: error.message || String(error) });
+      scheduleAutoRefresh();
+    });
   </script>
 </body>
 </html>
 """
+}
+
+private extension JSONEncoder {
+    static var webDashboard: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }
+}
+
+private extension JSONDecoder {
+    static var webDashboard: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+}
+
+private struct WebDashboardAuthSetupRequest: Codable {
+    var username: String
+    var password: String
+    var publicBaseURL: String?
+    var sessionDurationHours: Int?
+}
+
+private struct WebDashboardPasswordLoginRequest: Codable {
+    var username: String
+    var password: String
+}
+
+private struct WebDashboardPasswordChangeRequest: Codable {
+    var currentPassword: String
+    var newPassword: String
+}
+
+private struct WebDashboardAdminInviteRequest: Codable {
+    var username: String
+}
+
+private struct WebDashboardAuthMessageResponse: Codable {
+    var ok: Bool
+    var message: String?
+    var error: String?
+    var passkeysAvailable: Bool?
+    var requiresPasswordChange: Bool?
+
+    init(ok: Bool, message: String? = nil, error: String? = nil, passkeysAvailable: Bool? = nil, requiresPasswordChange: Bool? = nil) {
+        self.ok = ok
+        self.message = message
+        self.error = error
+        self.passkeysAvailable = passkeysAvailable
+        self.requiresPasswordChange = requiresPasswordChange
+    }
+}
+
+private struct WebDashboardAdminInviteResponse: Codable {
+    var ok: Bool
+    var username: String
+    var temporaryPassword: String
+    var loginURL: String
+    var message: String
+}
+
+private struct WebDashboardPasskeyRegistrationOptionsResponse: Codable {
+    var ok: Bool
+    var challengeID: String
+    var challenge: String
+    var rpID: String
+    var rpName: String
+    var userID: String
+    var userName: String
+    var userDisplayName: String
+    var excludeCredentialIDs: [String]
+    var timeoutMilliseconds: Int
+}
+
+private struct WebDashboardPasskeyAuthenticationOptionsResponse: Codable {
+    var ok: Bool
+    var challengeID: String
+    var challenge: String
+    var rpID: String
+    var credentialIDs: [String]
+    var timeoutMilliseconds: Int
+}
+
+private struct WebDashboardFinishPasskeyRegistrationRequest: Codable {
+    var challengeID: String
+    var name: String?
+    var credentialID: String
+    var clientDataJSON: String
+    var attestationObject: String
+}
+
+private struct WebDashboardFinishPasskeyAuthenticationRequest: Codable {
+    var challengeID: String
+    var credentialID: String
+    var clientDataJSON: String
+    var authenticatorData: String
+    var signature: String
+    var userHandle: String?
+}
+
+private final class WebDashboardSecurityController {
+    enum SecurityError: LocalizedError {
+        case bootstrapUnavailable
+        case invalidInput(String)
+        case weakPassword
+        case unauthorized
+        case rateLimited
+        case passkeysUnavailable(String)
+        case invalidCredential
+
+        var errorDescription: String? { userMessage }
+
+        var userMessage: String {
+            switch self {
+            case .bootstrapUnavailable:
+                return "Initial setup is only available from localhost."
+            case let .invalidInput(message):
+                return message
+            case .weakPassword:
+                return "Password must be at least 14 characters long."
+            case .unauthorized:
+                return "Authentication required."
+            case .rateLimited:
+                return "Too many failed attempts. Try again shortly."
+            case let .passkeysUnavailable(message):
+                return message
+            case .invalidCredential:
+                return "The supplied credential could not be verified."
+            }
+        }
+
+        var statusCode: Int {
+            switch self {
+            case .rateLimited:
+                return 429
+            case .bootstrapUnavailable:
+                return 403
+            case .unauthorized:
+                return 401
+            default:
+                return 400
+            }
+        }
+
+        var reasonPhrase: String {
+            switch self {
+            case .rateLimited:
+                return "Too Many Requests"
+            case .bootstrapUnavailable:
+                return "Forbidden"
+            case .unauthorized:
+                return "Unauthorized"
+            default:
+                return "Bad Request"
+            }
+        }
+    }
+
+    struct StoredSettings: Codable {
+        struct Passkey: Codable {
+            var credentialID: String
+            var name: String
+            var publicKeyX963: String
+            var signCount: UInt32
+            var addedAt: Date
+        }
+
+        struct Admin: Codable {
+            var username: String
+            var passwordSalt: String?
+            var passwordHash: String?
+            var passwordIterations: Int?
+            var mustChangePassword: Bool
+            var inviteToken: String?
+            var createdAt: Date
+        }
+
+        var username: String
+        var publicBaseURL: String?
+        var sessionDurationHours: Int
+        var passwordConfigured: Bool
+        var passwordSalt: String?
+        var passwordHash: String?
+        var passwordIterations: Int?
+        var admins: [Admin]
+        var passkeys: [Passkey]
+
+        enum CodingKeys: String, CodingKey {
+            case username
+            case publicBaseURL
+            case sessionDurationHours
+            case passwordConfigured
+            case passwordSalt
+            case passwordHash
+            case passwordIterations
+            case admins
+            case passkeys
+        }
+
+        static let empty = StoredSettings(
+            username: "admin",
+            publicBaseURL: nil,
+            sessionDurationHours: 12,
+            passwordConfigured: false,
+            passwordSalt: nil,
+            passwordHash: nil,
+            passwordIterations: nil,
+            admins: [],
+            passkeys: []
+        )
+
+        init(
+            username: String,
+            publicBaseURL: String?,
+            sessionDurationHours: Int,
+            passwordConfigured: Bool,
+            passwordSalt: String?,
+            passwordHash: String?,
+            passwordIterations: Int?,
+            admins: [Admin],
+            passkeys: [Passkey]
+        ) {
+            self.username = username
+            self.publicBaseURL = publicBaseURL
+            self.sessionDurationHours = sessionDurationHours
+            self.passwordConfigured = passwordConfigured
+            self.passwordSalt = passwordSalt
+            self.passwordHash = passwordHash
+            self.passwordIterations = passwordIterations
+            self.admins = admins
+            self.passkeys = passkeys
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            username = try container.decodeIfPresent(String.self, forKey: .username) ?? "admin"
+            publicBaseURL = try container.decodeIfPresent(String.self, forKey: .publicBaseURL)
+            sessionDurationHours = try container.decodeIfPresent(Int.self, forKey: .sessionDurationHours) ?? 12
+            passwordConfigured = try container.decodeIfPresent(Bool.self, forKey: .passwordConfigured) ?? false
+            passwordSalt = try container.decodeIfPresent(String.self, forKey: .passwordSalt)
+            passwordHash = try container.decodeIfPresent(String.self, forKey: .passwordHash)
+            passwordIterations = try container.decodeIfPresent(Int.self, forKey: .passwordIterations)
+            admins = try container.decodeIfPresent([Admin].self, forKey: .admins) ?? []
+            passkeys = try container.decodeIfPresent([Passkey].self, forKey: .passkeys) ?? []
+        }
+    }
+
+    private struct PasswordRecord: Codable {
+        var salt: String
+        var hash: String
+        var iterations: Int
+    }
+
+    private struct Session {
+        var id: String
+        var username: String
+        var expiresAt: Date
+    }
+
+    private enum ChallengeKind {
+        case register(sessionID: String)
+        case authenticate
+    }
+
+    private struct PendingChallenge {
+        var id: String
+        var bytes: Data
+        var createdAt: Date
+        var rpID: String
+        var origin: String
+        var kind: ChallengeKind
+    }
+
+    private let queue = DispatchQueue(label: "ShipHook.WebDashboardSecurity")
+    private let settingsURL: URL
+    private let sessionCookieName = "shiphook_session"
+    private let defaultsKey = "ShipHook.WebDashboardSecuritySettings"
+    private var settings: StoredSettings
+    private var didBootstrapThisLaunch = false
+    private var sessions: [String: Session] = [:]
+    private var challenges: [String: PendingChallenge] = [:]
+    private var failuresByKey: [String: [Date]] = [:]
+    private var pendingCookieHeader: String?
+
+    init() {
+        let baseURL = ConfigStore().appSupportDirectory
+        try? FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true, attributes: nil)
+        settingsURL = baseURL.appendingPathComponent("web-dashboard-security.json")
+        settings = (try? Self.loadSettings(from: settingsURL))
+            ?? Self.loadSettingsFromDefaults(defaultsKey: defaultsKey)
+            ?? .empty
+        migrateLegacySettingsLocked()
+        didBootstrapThisLaunch = settings.passwordConfigured || !settings.admins.isEmpty || !settings.passkeys.isEmpty
+    }
+
+    var requiresBootstrap: Bool {
+        queue.sync {
+            !(didBootstrapThisLaunch || settings.passwordConfigured || !settings.admins.isEmpty || !settings.passkeys.isEmpty)
+        }
+    }
+
+    var hasRegisteredPasskeys: Bool {
+        queue.sync { !settings.passkeys.isEmpty }
+    }
+
+    func isBootstrapRequestAllowed(request: HttpRequest) -> Bool {
+        let host = request.headers["host"]?.split(separator: ":").first.map(String.init)?.lowercased()
+        let address = request.address?.lowercased() ?? ""
+        return (host == "localhost" || host == "127.0.0.1") && (address == "127.0.0.1" || address == "::1" || address == "localhost")
+    }
+
+    func isAuthorized(request: HttpRequest) -> Bool {
+        queue.sync {
+            pruneExpiredSessionsLocked()
+            guard let sessionID = sessionID(from: request),
+                  let session = sessions[sessionID],
+                  session.expiresAt > Date() else {
+                return false
+            }
+            sessions[sessionID]?.expiresAt = Date().addingTimeInterval(TimeInterval(max(1, settings.sessionDurationHours)) * 3600)
+            return true
+        }
+    }
+
+    func pendingCookieHeader(for request: HttpRequest) -> String? {
+        queue.sync {
+            defer { pendingCookieHeader = nil }
+            return pendingCookieHeader
+        }
+    }
+
+    func logout(request: HttpRequest) {
+        queue.sync {
+            if let sessionID = sessionID(from: request) {
+                sessions.removeValue(forKey: sessionID)
+            }
+            pendingCookieHeader = cookieHeader(value: "", expiresAt: Date(timeIntervalSince1970: 0), secure: isSecureRequest(request))
+        }
+    }
+
+    func completeBootstrap(using payload: WebDashboardAuthSetupRequest, request: HttpRequest) throws -> WebDashboardAuthMessageResponse {
+        guard isBootstrapRequestAllowed(request: request) else {
+            throw SecurityError.bootstrapUnavailable
+        }
+
+        let username = payload.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = payload.password
+        guard !username.isEmpty else {
+            throw SecurityError.invalidInput("Username is required.")
+        }
+        guard password.count >= 14 else {
+            throw SecurityError.weakPassword
+        }
+
+        return try queue.sync {
+            settings.username = username
+            settings.publicBaseURL = normalizedBaseURL(payload.publicBaseURL)
+            settings.sessionDurationHours = max(1, payload.sessionDurationHours ?? 12)
+            try storePasswordLocked(password, for: username, mustChangePassword: false, inviteToken: nil)
+            settings.passwordConfigured = true
+            try persistSettingsLocked()
+            didBootstrapThisLaunch = true
+            let sessionID = createSessionLocked(username: username, secure: isSecureRequest(request))
+            _ = sessionID
+            return WebDashboardAuthMessageResponse(
+                ok: true,
+                message: "Administrator account created.",
+                passkeysAvailable: !settings.passkeys.isEmpty
+            )
+        }
+    }
+
+    func login(using payload: WebDashboardPasswordLoginRequest, request: HttpRequest) throws -> WebDashboardAuthMessageResponse {
+        let username = payload.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = "\(username.lowercased())|\(request.address ?? "")"
+        return try queue.sync {
+            guard !isRateLimitedLocked(for: key) else {
+                throw SecurityError.rateLimited
+            }
+            guard let admin = adminLocked(username: username),
+                  let record = try? loadPasswordRecordLocked(for: username),
+                  verifyPassword(payload.password, record: record) else {
+                registerFailureLocked(for: key)
+                throw SecurityError.invalidCredential
+            }
+            failuresByKey.removeValue(forKey: key)
+            _ = createSessionLocked(username: username, secure: isSecureRequest(request))
+            return WebDashboardAuthMessageResponse(
+                ok: true,
+                message: "Signed in.",
+                passkeysAvailable: !settings.passkeys.isEmpty,
+                requiresPasswordChange: admin.mustChangePassword
+            )
+        }
+    }
+
+    func changePassword(using payload: WebDashboardPasswordChangeRequest, request: HttpRequest) throws {
+        guard isAuthorized(request: request) else {
+            throw SecurityError.unauthorized
+        }
+        guard payload.newPassword.count >= 14 else {
+            throw SecurityError.weakPassword
+        }
+        try queue.sync {
+            guard let username = currentUsername(request: request),
+                  let record = try? loadPasswordRecordLocked(for: username),
+                  verifyPassword(payload.currentPassword, record: record) else {
+                throw SecurityError.invalidCredential
+            }
+            try storePasswordLocked(payload.newPassword, for: username, mustChangePassword: false, inviteToken: nil)
+            settings.passwordConfigured = true
+            try persistSettingsLocked()
+        }
+    }
+
+    func inviteAdmin(username rawUsername: String, request: HttpRequest) throws -> WebDashboardAdminInviteResponse {
+        guard isAuthorized(request: request) else {
+            throw SecurityError.unauthorized
+        }
+        let username = rawUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !username.isEmpty else {
+            throw SecurityError.invalidInput("Username is required.")
+        }
+        return try queue.sync {
+            guard adminLocked(username: username) == nil else {
+                throw SecurityError.invalidInput("That username already exists.")
+            }
+            let temporaryPassword = generateTemporaryPassword()
+            let inviteToken = randomData(length: 24).base64URLEncodedString()
+            try storePasswordLocked(temporaryPassword, for: username, mustChangePassword: true, inviteToken: inviteToken)
+            try persistSettingsLocked()
+            return WebDashboardAdminInviteResponse(
+                ok: true,
+                username: username,
+                temporaryPassword: temporaryPassword,
+                loginURL: inviteURL(for: inviteToken, request: request),
+                message: "Administrator invite created."
+            )
+        }
+    }
+
+    func beginPasskeyRegistration(request: HttpRequest) throws -> WebDashboardPasskeyRegistrationOptionsResponse {
+        guard let sessionID = queue.sync(execute: { sessionID(from: request) }), isAuthorized(request: request) else {
+            throw SecurityError.unauthorized
+        }
+        let rp = try relyingParty(for: request)
+        return queue.sync {
+            let challenge = randomData(length: 32)
+            let challengeID = UUID().uuidString.lowercased()
+            challenges[challengeID] = PendingChallenge(
+                id: challengeID,
+                bytes: challenge,
+                createdAt: Date(),
+                rpID: rp.id,
+                origin: rp.origin,
+                kind: .register(sessionID: sessionID)
+            )
+            return WebDashboardPasskeyRegistrationOptionsResponse(
+                ok: true,
+                challengeID: challengeID,
+                challenge: challenge.base64URLEncodedString(),
+                rpID: rp.id,
+                rpName: "ShipHook",
+                userID: Data(settings.username.utf8).base64URLEncodedString(),
+                userName: settings.username,
+                userDisplayName: settings.username,
+                excludeCredentialIDs: settings.passkeys.map(\.credentialID),
+                timeoutMilliseconds: 60_000
+            )
+        }
+    }
+
+    func finishPasskeyRegistration(using payload: WebDashboardFinishPasskeyRegistrationRequest, request: HttpRequest) throws -> WebDashboardAuthMessageResponse {
+        guard isAuthorized(request: request) else {
+            throw SecurityError.unauthorized
+        }
+        return try queue.sync {
+            guard let challenge = challenges.removeValue(forKey: payload.challengeID) else {
+                throw SecurityError.invalidCredential
+            }
+            guard case let .register(expectedSessionID) = challenge.kind,
+                  expectedSessionID == sessionID(from: request) else {
+                throw SecurityError.invalidCredential
+            }
+
+            let clientData = try decodeClientData(from: payload.clientDataJSON, expectedType: "webauthn.create", challenge: challenge)
+            _ = clientData
+            let attestation = try Data(base64URLString: payload.attestationObject)
+            let registration = try parseRegistration(attestationObject: attestation, expectedRPID: challenge.rpID)
+            settings.passkeys.removeAll { $0.credentialID == registration.credentialID.base64URLEncodedString() }
+            settings.passkeys.append(
+                StoredSettings.Passkey(
+                    credentialID: registration.credentialID.base64URLEncodedString(),
+                    name: (payload.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? payload.name! : "Passkey"),
+                    publicKeyX963: registration.publicKeyX963.base64URLEncodedString(),
+                    signCount: registration.signCount,
+                    addedAt: Date()
+                )
+            )
+            try persistSettingsLocked()
+            return WebDashboardAuthMessageResponse(ok: true, message: "Passkey added.", passkeysAvailable: true)
+        }
+    }
+
+    func beginPasskeyAuthentication(request: HttpRequest) throws -> WebDashboardPasskeyAuthenticationOptionsResponse {
+        let rp = try relyingParty(for: request)
+        return try queue.sync {
+            guard !settings.passkeys.isEmpty else {
+                throw SecurityError.passkeysUnavailable("No passkeys are registered yet.")
+            }
+            let challengeBytes = randomData(length: 32)
+            let challengeID = UUID().uuidString.lowercased()
+            challenges[challengeID] = PendingChallenge(
+                id: challengeID,
+                bytes: challengeBytes,
+                createdAt: Date(),
+                rpID: rp.id,
+                origin: rp.origin,
+                kind: .authenticate
+            )
+            return WebDashboardPasskeyAuthenticationOptionsResponse(
+                ok: true,
+                challengeID: challengeID,
+                challenge: challengeBytes.base64URLEncodedString(),
+                rpID: rp.id,
+                credentialIDs: settings.passkeys.map(\.credentialID),
+                timeoutMilliseconds: 60_000
+            )
+        }
+    }
+
+    func finishPasskeyAuthentication(using payload: WebDashboardFinishPasskeyAuthenticationRequest, request: HttpRequest) throws -> WebDashboardAuthMessageResponse {
+        try queue.sync {
+            guard let challenge = challenges.removeValue(forKey: payload.challengeID) else {
+                throw SecurityError.invalidCredential
+            }
+            _ = try decodeClientData(from: payload.clientDataJSON, expectedType: "webauthn.get", challenge: challenge)
+            guard let index = settings.passkeys.firstIndex(where: { $0.credentialID == payload.credentialID }) else {
+                throw SecurityError.invalidCredential
+            }
+            let authenticatorData = try Data(base64URLString: payload.authenticatorData)
+            let signature = try Data(base64URLString: payload.signature)
+            try verifyAssertion(
+                authenticatorData: authenticatorData,
+                clientDataJSONBase64URL: payload.clientDataJSON,
+                signatureDER: signature,
+                expectedRPID: challenge.rpID,
+                passkey: settings.passkeys[index]
+            )
+            let signCount = readAssertionSignCount(authenticatorData)
+            if signCount > settings.passkeys[index].signCount {
+                settings.passkeys[index].signCount = signCount
+                try persistSettingsLocked()
+            }
+            _ = createSessionLocked(username: settings.username, secure: isSecureRequest(request))
+            return WebDashboardAuthMessageResponse(ok: true, message: "Signed in with passkey.", passkeysAvailable: true)
+        }
+    }
+
+    func setupPageHTML() -> String {
+        pageHTML(
+            title: "ShipHook Setup",
+            body: """
+            <div class="card auth-card">
+              \(mastheadHTML())
+              <div class="auth-copy">
+                <div class="auth-eyebrow">Initial Setup</div>
+                <h1>Create admin access</h1>
+                <p class="auth-lead">Set up the first administrator from localhost. After this, every dashboard request requires authentication.</p>
+              </div>
+              <section class="auth-section auth-section-accent">
+                <form id="setup-form" method="post" action="/api/auth/setup">
+                  <label>Username<input name="username" value="admin" autocomplete="username"></label>
+                  <label>Password<input type="password" name="password" autocomplete="new-password"></label>
+                  <label>Public Base URL<input name="publicBaseURL" placeholder="https://shiphook.example.com"></label>
+                  <label>Session Duration (Hours)<input name="sessionDurationHours" type="number" min="1" max="168" value="12"></label>
+                  <button type="submit">Create Administrator</button>
+                </form>
+              </section>
+              <p class="note auth-footnote">Passwords are stored as salted hashes. Passkeys can be added afterwards from Account &amp; Security.</p>
+              <div id="status" class="status"></div>
+            </div>
+            <script>
+              document.getElementById('setup-form').addEventListener('submit', async event => {
+                event.preventDefault();
+                const form = new FormData(event.currentTarget);
+                const requestPayload = Object.fromEntries(form.entries());
+                requestPayload.sessionDurationHours = Number(requestPayload.sessionDurationHours || 12);
+                const response = await fetch('/api/auth/setup', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(requestPayload)
+                });
+                const responsePayload = await response.json();
+                if (!response.ok || responsePayload.ok === false) {
+                  document.getElementById('status').textContent = responsePayload.error || 'Setup failed.';
+                  return;
+                }
+                window.location.href = '/';
+              });
+            </script>
+            """
+        )
+    }
+
+    func bootstrapLockedPageHTML() -> String {
+        pageHTML(
+            title: "ShipHook Setup Locked",
+            body: """
+            <div class="card auth-card">
+              \(mastheadHTML())
+              <div class="auth-copy">
+                <div class="auth-eyebrow">Local Access Required</div>
+                <h1>Finish setup on this Mac</h1>
+                <p class="auth-lead">Authentication has not been configured yet. Open the dashboard from <code>http://localhost</code> on this machine to complete the initial setup.</p>
+              </div>
+            </div>
+            """
+        )
+    }
+
+    func loginPageHTML(passkeysAvailable: Bool, inviteUsername: String?, inviteToken: String?) -> String {
+        let passkeyButton = passkeysAvailable ? "<button type=\"button\" id=\"passkey-button\" class=\"secondary\">Sign In With Passkey</button>" : ""
+        let inviteNotice = inviteUsername.map { username in
+            "<p class=\"note strong\">Invite for @\(escapeHTML(username)). Sign in with the temporary password, then set a new one immediately.</p>"
+        } ?? ""
+        return pageHTML(
+            title: "ShipHook Login",
+            body: """
+            <div class="card auth-card">
+              \(mastheadHTML())
+              <div class="auth-copy">
+                <div class="auth-eyebrow">Authentication</div>
+                <h1>Login</h1>
+                <p class="auth-lead">Sign in to manage repositories, releases, and build automation.</p>
+                \(inviteNotice)
+              </div>
+              <section class="auth-section auth-section-accent">
+                <form id="login-form" method="post" action="/api/auth/login">
+                  <label>Username<input name="username" value="\(escapeHTML(inviteUsername ?? settings.username))" autocomplete="username"></label>
+                  <label>Password<input type="password" name="password" autocomplete="current-password"></label>
+                  <div class="auth-actions">
+                    <button type="submit">Sign In</button>
+                    \(passkeyButton)
+                  </div>
+                </form>
+              </section>
+              <div id="status" class="status"></div>
+            </div>
+            <script>
+              const statusNode = document.getElementById('status');
+              document.getElementById('login-form').addEventListener('submit', async event => {
+                event.preventDefault();
+                const form = new FormData(event.currentTarget);
+                const response = await fetch('/api/auth/login', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(Object.fromEntries(form.entries()))
+                });
+                const payload = await response.json();
+                if (!response.ok || payload.ok === false) {
+                  statusNode.textContent = payload.error || 'Login failed.';
+                  return;
+                }
+                window.location.href = payload.requiresPasswordChange ? '/security?force-password=1' : '/';
+              });
+              const passkeyButton = document.getElementById('passkey-button');
+              if (passkeyButton) {
+                passkeyButton.addEventListener('click', async () => {
+                  statusNode.textContent = '';
+                  const beginResponse = await fetch('/api/auth/passkeys/authenticate/begin', { method: 'POST' });
+                  const beginPayload = await beginResponse.json();
+                  if (!beginResponse.ok || beginPayload.ok === false) {
+                    statusNode.textContent = beginPayload.error || 'Passkey login failed.';
+                    return;
+                  }
+                  const assertion = await navigator.credentials.get({
+                    publicKey: {
+                      challenge: base64URLToBuffer(beginPayload.challenge),
+                      rpId: beginPayload.rpID,
+                      allowCredentials: beginPayload.credentialIDs.map(id => ({ id: base64URLToBuffer(id), type: 'public-key' })),
+                      timeout: beginPayload.timeoutMilliseconds,
+                      userVerification: 'required'
+                    }
+                  });
+                  const finishResponse = await fetch('/api/auth/passkeys/authenticate/finish', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      challengeID: beginPayload.challengeID,
+                      credentialID: bufferToBase64URL(assertion.rawId),
+                      clientDataJSON: bufferToBase64URL(assertion.response.clientDataJSON),
+                      authenticatorData: bufferToBase64URL(assertion.response.authenticatorData),
+                      signature: bufferToBase64URL(assertion.response.signature),
+                      userHandle: assertion.response.userHandle ? bufferToBase64URL(assertion.response.userHandle) : null
+                    })
+                  });
+                  const finishPayload = await finishResponse.json();
+                  if (!finishResponse.ok || finishPayload.ok === false) {
+                    statusNode.textContent = finishPayload.error || 'Passkey login failed.';
+                    return;
+                  }
+                  window.location.href = '/';
+                });
+              }
+              function base64URLToBuffer(value) {
+                const base64 = value.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((value.length + 3) % 4);
+                const binary = atob(base64);
+                return Uint8Array.from(binary, char => char.charCodeAt(0));
+              }
+              function bufferToBase64URL(buffer) {
+                const bytes = new Uint8Array(buffer);
+                let binary = '';
+                bytes.forEach(byte => binary += String.fromCharCode(byte));
+                return btoa(binary).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/g, '');
+              }
+            </script>
+            """
+        )
+    }
+
+    func securityPageHTML(forcePassword: Bool, currentUsername: String) -> String {
+        let passkeyList = settings.passkeys.isEmpty
+            ? "<p class=\"note\">No passkeys registered yet.</p>"
+            : "<ul>" + settings.passkeys.map { "<li>\(escapeHTML($0.name))</li>" }.joined() + "</ul>"
+        let adminList = settings.admins
+            .map { admin in "<li>@\(escapeHTML(admin.username))\(admin.mustChangePassword ? " <span class=\"note\">needs password reset</span>" : "")</li>" }
+            .joined()
+        let forceNote = forcePassword ? "<p class=\"note strong\">This account must set a new password before returning to the dashboard.</p>" : ""
+        return pageHTML(
+            title: "ShipHook Security",
+            body: """
+            <div class="card auth-card">
+              \(mastheadHTML())
+              <div class="toolbar"><a href=\"/\">Dashboard</a><button type=\"button\" id=\"logout\" class=\"secondary\">Sign Out</button></div>
+              <div class="auth-copy">
+                <div class="auth-eyebrow">Account</div>
+                <h1>Security</h1>
+                <p class="auth-lead">Signed in as @\(escapeHTML(currentUsername)). Manage password access, administrators, and passkeys.</p>
+                \(forceNote)
+              </div>
+              <section class="auth-section">
+                <h2>Password</h2>
+                <form id="password-form" method="post" action="/api/auth/change-password">
+                  <label>Current Password<input type="password" name="currentPassword" autocomplete="current-password"></label>
+                  <label>New Password<input type="password" name="newPassword" autocomplete="new-password"></label>
+                  <button type="submit">Change Password</button>
+                </form>
+              </section>
+              <section class="auth-section">
+                <h2>Passkeys</h2>
+                \(passkeyList)
+                <button type="button" id="register-passkey">Register Passkey</button>
+                <p class="note">Passkeys work with platform authenticators such as iCloud Keychain when the browser and origin support WebAuthn.</p>
+              </section>
+              <section class="auth-section">
+                <h2>Administrators</h2>
+                <ul>\(adminList)</ul>
+                <form id="invite-admin-form">
+                  <label>Username<input name="username" autocomplete="off" placeholder="teammate"></label>
+                  <button type="submit">Add Administrator</button>
+                </form>
+                <div id="invite-output" class="invite-output"></div>
+              </section>
+              <div id="status" class="status"></div>
+            </div>
+            <script>
+              const statusNode = document.getElementById('status');
+              const inviteOutputNode = document.getElementById('invite-output');
+              document.getElementById('logout').addEventListener('click', async () => {
+                await fetch('/api/auth/logout', { method: 'POST' });
+                window.location.href = '/';
+              });
+              document.getElementById('password-form').addEventListener('submit', async event => {
+                event.preventDefault();
+                const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+                const response = await fetch('/api/auth/change-password', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+                statusNode.textContent = result.message || result.error || '';
+                if (result.message && \(forcePassword ? "true" : "false")) {
+                  window.location.href = '/';
+                }
+              });
+              document.getElementById('invite-admin-form').addEventListener('submit', async event => {
+                event.preventDefault();
+                const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+                const response = await fetch('/api/auth/admins/invite', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+                if (!response.ok || result.ok === false) {
+                  statusNode.textContent = result.error || 'Failed to create administrator.';
+                  return;
+                }
+                inviteOutputNode.innerHTML = `
+                  <div class="invite-card">
+                    <div><strong>@${escapeHTML(result.username)}</strong></div>
+                    <div>Temporary password: <code>${escapeHTML(result.temporaryPassword)}</code></div>
+                    <div>Login URL: <a href="${escapeAttribute(result.loginURL)}">${escapeHTML(result.loginURL)}</a></div>
+                  </div>
+                `;
+                event.currentTarget.reset();
+                statusNode.textContent = result.message || '';
+              });
+              document.getElementById('register-passkey').addEventListener('click', async () => {
+                if (!window.PublicKeyCredential || !navigator.credentials?.create) {
+                  statusNode.textContent = 'This browser does not support passkey creation.';
+                  return;
+                }
+                try {
+                  const beginResponse = await fetch('/api/auth/passkeys/register/begin', { method: 'POST' });
+                  const beginPayload = await beginResponse.json();
+                  if (!beginResponse.ok || beginPayload.ok === false) {
+                    statusNode.textContent = beginPayload.error || 'Passkey setup failed.';
+                    return;
+                  }
+                  const credential = await navigator.credentials.create({
+                    publicKey: {
+                      challenge: base64URLToBuffer(beginPayload.challenge),
+                      rp: { id: beginPayload.rpID, name: beginPayload.rpName },
+                      user: {
+                        id: base64URLToBuffer(beginPayload.userID),
+                        name: beginPayload.userName,
+                        displayName: beginPayload.userDisplayName
+                      },
+                      pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+                      timeout: beginPayload.timeoutMilliseconds,
+                      attestation: 'none',
+                      authenticatorSelection: {
+                        residentKey: 'preferred',
+                        userVerification: 'required'
+                      },
+                      excludeCredentials: beginPayload.excludeCredentialIDs.map(id => ({ id: base64URLToBuffer(id), type: 'public-key' }))
+                    }
+                  });
+                  const finishResponse = await fetch('/api/auth/passkeys/register/finish', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      challengeID: beginPayload.challengeID,
+                      name: '',
+                      credentialID: bufferToBase64URL(credential.rawId),
+                      clientDataJSON: bufferToBase64URL(credential.response.clientDataJSON),
+                      attestationObject: bufferToBase64URL(credential.response.attestationObject)
+                    })
+                  });
+                  const finishPayload = await finishResponse.json();
+                  if (!finishResponse.ok || finishPayload.ok === false) {
+                    statusNode.textContent = finishPayload.error || 'Passkey setup failed.';
+                    return;
+                  }
+                  window.location.reload();
+                } catch (error) {
+                  statusNode.textContent = error?.message || 'Passkey setup failed.';
+                }
+              });
+              function base64URLToBuffer(value) {
+                const base64 = value.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((value.length + 3) % 4);
+                const binary = atob(base64);
+                return Uint8Array.from(binary, char => char.charCodeAt(0));
+              }
+              function bufferToBase64URL(buffer) {
+                const bytes = new Uint8Array(buffer);
+                let binary = '';
+                bytes.forEach(byte => binary += String.fromCharCode(byte));
+                return btoa(binary).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/g, '');
+              }
+              function escapeHTML(value) {
+                return String(value ?? '')
+                  .replace(/&/g, '&amp;')
+                  .replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;')
+                  .replace(/"/g, '&quot;');
+              }
+              function escapeAttribute(value) {
+                return escapeHTML(value);
+              }
+            </script>
+            """
+        )
+    }
+
+    private func authPageVersionLabel() -> String {
+        let shortVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let buildVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+
+        switch (shortVersion?.trimmingCharacters(in: .whitespacesAndNewlines), buildVersion?.trimmingCharacters(in: .whitespacesAndNewlines)) {
+        case let (short?, build?) where !short.isEmpty && !build.isEmpty && short != build:
+            return "v\(short) (\(build))"
+        case let (short?, _) where !short.isEmpty:
+            return "v\(short)"
+        case let (_, build?) where !build.isEmpty:
+            return "v\(build)"
+        default:
+            return ""
+        }
+    }
+
+    private func mastheadHTML() -> String {
+        let versionLabel = authPageVersionLabel()
+        let versionHTML = versionLabel.isEmpty ? "" : "<div class=\"auth-masthead-version\">\(escapeHTML(versionLabel))</div>"
+        return """
+        <div class="auth-masthead">
+          <div class="auth-masthead-brand">
+            <picture>
+              <source media="(prefers-color-scheme: dark)" srcset="/assets/glyph-dark.png">
+              <img class="auth-glyph" src="/assets/glyph-light.png" alt="">
+            </picture>
+            <h1 class="auth-wordmark">ShipHook</h1>
+          </div>
+          \(versionHTML)
+        </div>
+        """
+    }
+
+    private func pageHTML(title: String, body: String) -> String {
+        """
+        <!doctype html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <meta name="robots" content="noindex,nofollow,noarchive">
+          <title>\(title)</title>
+          <style>
+            :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+            body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: radial-gradient(circle at top left, rgba(255,135,91,0.12), transparent 28%), radial-gradient(circle at 88% 10%, rgba(77,184,255,0.10), transparent 24%), linear-gradient(180deg, #0f131b, #151c28); color: #f5f7fb; padding: 16px; }
+            .card { width: min(680px, calc(100vw - 32px)); padding: 28px; border-radius: 24px; background: rgba(16, 21, 30, 0.94); border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 24px 64px rgba(0,0,0,0.32); }
+            .auth-card { overflow: hidden; display: grid; gap: 18px; backdrop-filter: blur(14px); }
+            .auth-masthead { position: relative; overflow: hidden; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-radius: 18px; padding: 16px 18px; margin-bottom: 18px; border: 1px solid rgba(255,255,255,0.08); background: linear-gradient(135deg, rgba(255,135,91,0.14), rgba(77,184,255,0.05) 52%, rgba(255,224,130,0.06)), rgba(25, 31, 42, 0.92); }
+            .auth-masthead-brand { display: inline-flex; align-items: center; gap: 12px; min-width: 0; }
+            .auth-glyph { width: 34px; height: 34px; object-fit: contain; }
+            .auth-wordmark { margin: 0; font: 600 32px/0.92 "Iowan Old Style", "Palatino Linotype", serif; letter-spacing: -0.03em; }
+            .auth-masthead-version { flex: 0 0 auto; color: rgba(245,247,251,0.48); font: 500 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0.02em; white-space: nowrap; }
+            .auth-copy { display: grid; gap: 10px; margin-bottom: 2px; }
+            .auth-eyebrow { color: rgba(245,247,251,0.50); font: 600 11px/1 var(--font-mono, ui-monospace, monospace); letter-spacing: 0.14em; text-transform: uppercase; }
+            .auth-copy h1 { margin: 0; font: 600 34px/0.95 "Iowan Old Style", "Palatino Linotype", serif; letter-spacing: -0.03em; }
+            .auth-lead { margin: 0; font-size: 15px; color: rgba(245,247,251,0.72); max-width: 46ch; }
+            h1, h2 { margin: 0 0 12px; }
+            p, li { color: rgba(245,247,251,0.76); line-height: 1.5; }
+            form, section { display: grid; gap: 14px; margin-top: 0; }
+            label { display: grid; gap: 6px; font-weight: 600; }
+            input { border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.05); color: inherit; padding: 12px 14px; }
+            button, a { display: inline-flex; align-items: center; justify-content: center; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: linear-gradient(135deg, rgba(255,135,91,0.28), rgba(255,135,91,0.12)); color: inherit; padding: 11px 14px; text-decoration: none; cursor: pointer; }
+            button.secondary, a.secondary { background: rgba(255,255,255,0.05); }
+            .toolbar { display: flex; gap: 10px; margin: -2px 0 4px; }
+            .auth-section { padding: 18px; border-radius: 18px; border: 1px solid rgba(255,255,255,0.08); background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02)); }
+            .auth-section-accent { background: linear-gradient(180deg, rgba(255,135,91,0.10), rgba(77,184,255,0.04) 68%, rgba(255,255,255,0.02)); }
+            .auth-section h2 { margin-bottom: 10px; font: 700 20px/1.05 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: -0.02em; }
+            .auth-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
+            .auth-footnote { margin-top: -4px; }
+            .status { min-height: 1.4em; margin-top: 2px; color: #ffbe55; font-weight: 600; }
+            .note, code { color: rgba(245,247,251,0.62); }
+            .note.strong { color: rgba(245,247,251,0.88); }
+            .invite-output { display: grid; gap: 10px; }
+            .invite-card { margin-top: 6px; padding: 14px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.04); display: grid; gap: 6px; word-break: break-word; }
+            ul { padding-left: 18px; }
+            @media (prefers-color-scheme: light) {
+              body { background: linear-gradient(180deg, #edf2f7, #dfe8f3); color: #132033; }
+              .card { background: rgba(255,255,255,0.94); border-color: rgba(19,32,51,0.10); }
+              .auth-masthead { border-color: rgba(33,49,76,0.10); background: linear-gradient(135deg, rgba(255,135,91,0.14), rgba(77,184,255,0.05) 52%, rgba(255,224,130,0.06)), rgba(252,253,255,0.94); }
+              .auth-masthead-version { color: rgba(19,32,51,0.44); }
+              .auth-eyebrow { color: rgba(19,32,51,0.46); }
+              .auth-lead { color: rgba(19,32,51,0.70); }
+              p, li, .note, code { color: rgba(19,32,51,0.70); }
+              input { background: rgba(19,32,51,0.04); border-color: rgba(19,32,51,0.12); color: #132033; }
+              button.secondary, a.secondary { background: rgba(19,32,51,0.04); }
+              .auth-section { background: linear-gradient(180deg, rgba(19,32,51,0.03), rgba(19,32,51,0.02)); border-color: rgba(19,32,51,0.08); }
+              .auth-section-accent { background: linear-gradient(180deg, rgba(216,106,56,0.10), rgba(34,123,189,0.04) 68%, rgba(19,32,51,0.02)); }
+              .invite-card { background: rgba(19,32,51,0.04); border-color: rgba(19,32,51,0.08); }
+            }
+            @media (max-width: 720px) {
+              .card { width: min(680px, calc(100vw - 20px)); padding: 18px; border-radius: 20px; }
+              .auth-copy h1 { font-size: 29px; }
+              .auth-masthead { padding: 14px 15px; }
+              .auth-section { padding: 14px; }
+              .toolbar, .auth-actions { grid-template-columns: 1fr; }
+              .toolbar, .auth-actions { display: grid; }
+            }
+          </style>
+        </head>
+        <body>\(body)</body>
+        </html>
+        """
+    }
+
+    private func normalizedBaseURL(_ value: String?) -> String? {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        guard let url = URL(string: raw), let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased(), scheme == "https" || host == "localhost" else {
+            return nil
+        }
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.path = ""
+        components?.query = nil
+        components?.fragment = nil
+        return components?.string
+    }
+
+    private func relyingParty(for request: HttpRequest) throws -> (id: String, origin: String) {
+        if let requestOrigin = resolvedRequestOrigin(for: request),
+           let requestHost = requestHost(for: request) {
+            if requestHost == "localhost" || requestHost == "127.0.0.1" {
+                return ("localhost", requestOrigin.replacingOccurrences(of: "127.0.0.1", with: "localhost"))
+            }
+            if let baseURL = queue.sync(execute: { settings.publicBaseURL }),
+               let url = URL(string: baseURL),
+               let host = url.host?.lowercased(),
+               host == requestHost {
+                return (host, baseURL)
+            }
+            if isSecureRequest(request) {
+                return (requestHost, requestOrigin)
+            }
+        }
+        if let baseURL = queue.sync(execute: { settings.publicBaseURL }),
+           let url = URL(string: baseURL),
+           let host = url.host?.lowercased() {
+            return (host, baseURL)
+        }
+        throw SecurityError.passkeysUnavailable("Passkeys require localhost access or a matching HTTPS public base URL.")
+    }
+
+    func usernameForInviteToken(_ token: String?) -> String? {
+        guard let token, !token.isEmpty else { return nil }
+        return queue.sync {
+            settings.admins.first(where: { $0.inviteToken == token })?.username
+        }
+    }
+
+    private func requestHost(for request: HttpRequest) -> String? {
+        request.headers["host"]?.split(separator: ":").first.map(String.init)?.lowercased()
+    }
+
+    private func resolvedRequestOrigin(for request: HttpRequest) -> String? {
+        guard let host = request.headers["host"] else {
+            return nil
+        }
+        let scheme = isSecureRequest(request) ? "https" : "http"
+        return "\(scheme)://\(host)"
+    }
+
+    private func createSessionLocked(username: String, secure: Bool) -> String {
+        pruneExpiredSessionsLocked()
+        let token = randomData(length: 32).base64URLEncodedString()
+        let expiry = Date().addingTimeInterval(TimeInterval(max(1, settings.sessionDurationHours)) * 3600)
+        sessions[token] = Session(id: token, username: username, expiresAt: expiry)
+        pendingCookieHeader = cookieHeader(value: token, expiresAt: expiry, secure: secure)
+        return token
+    }
+
+    private func cookieHeader(value: String, expiresAt: Date, secure: Bool) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
+        var attributes = [
+            "\(sessionCookieName)=\(value)",
+            "Path=/",
+            "HttpOnly",
+            "SameSite=Strict",
+            "Expires=\(formatter.string(from: expiresAt))"
+        ]
+        if secure {
+            attributes.append("Secure")
+        }
+        return attributes.joined(separator: "; ")
+    }
+
+    private func sessionID(from request: HttpRequest) -> String? {
+        request.headers["cookie"]?
+            .split(separator: ";")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { $0.hasPrefix("\(sessionCookieName)=") }
+            .map { String($0.dropFirst(sessionCookieName.count + 1)) }
+    }
+
+    private func pruneExpiredSessionsLocked() {
+        let now = Date()
+        sessions = sessions.filter { $0.value.expiresAt > now }
+        challenges = challenges.filter { now.timeIntervalSince($0.value.createdAt) < 300 }
+    }
+
+    private func isSecureRequest(_ request: HttpRequest) -> Bool {
+        if request.headers["x-forwarded-proto"]?.lowercased() == "https" {
+            return true
+        }
+        if request.headers["cf-visitor"]?.contains("\"https\"") == true {
+            return true
+        }
+        if let host = request.headers["host"]?.lowercased(), host.hasPrefix("localhost") {
+            return false
+        }
+        return false
+    }
+
+    private func isRateLimitedLocked(for key: String) -> Bool {
+        let cutoff = Date().addingTimeInterval(-900)
+        let attempts = failuresByKey[key, default: []].filter { $0 > cutoff }
+        failuresByKey[key] = attempts
+        return attempts.count >= 8
+    }
+
+    private func registerFailureLocked(for key: String) {
+        failuresByKey[key, default: []].append(Date())
+    }
+
+    private func persistSettingsLocked() throws {
+        let encoder = JSONEncoder.webDashboard
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(settings)
+        try data.write(to: settingsURL, options: .atomic)
+        UserDefaults.standard.set(data, forKey: defaultsKey)
+    }
+
+    private static func loadSettings(from url: URL) throws -> StoredSettings {
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder.webDashboard.decode(StoredSettings.self, from: data)
+    }
+
+    private static func loadSettingsFromDefaults(defaultsKey: String) -> StoredSettings? {
+        guard let data = UserDefaults.standard.data(forKey: defaultsKey) else {
+            return nil
+        }
+        return try? JSONDecoder.webDashboard.decode(StoredSettings.self, from: data)
+    }
+
+    private func storePasswordLocked(_ password: String) throws {
+        try storePasswordLocked(password, for: settings.username, mustChangePassword: false, inviteToken: nil)
+    }
+
+    private func loadPasswordRecordLocked() throws -> PasswordRecord {
+        try loadPasswordRecordLocked(for: settings.username)
+    }
+
+    private func storePasswordLocked(_ password: String, for username: String, mustChangePassword: Bool, inviteToken: String?) throws {
+        let salt = randomData(length: 16)
+        let iterations = 200_000
+        let saltString = salt.base64URLEncodedString()
+        let hashString = Self.derivePasswordHash(password: password, salt: salt, iterations: iterations).base64URLEncodedString()
+
+        if let index = settings.admins.firstIndex(where: { $0.username.caseInsensitiveCompare(username) == .orderedSame }) {
+            settings.admins[index].passwordSalt = saltString
+            settings.admins[index].passwordHash = hashString
+            settings.admins[index].passwordIterations = iterations
+            settings.admins[index].mustChangePassword = mustChangePassword
+            settings.admins[index].inviteToken = inviteToken
+        } else {
+            settings.admins.append(
+                StoredSettings.Admin(
+                    username: username,
+                    passwordSalt: saltString,
+                    passwordHash: hashString,
+                    passwordIterations: iterations,
+                    mustChangePassword: mustChangePassword,
+                    inviteToken: inviteToken,
+                    createdAt: Date()
+                )
+            )
+        }
+
+        if settings.username.caseInsensitiveCompare(username) == .orderedSame {
+            settings.passwordSalt = saltString
+            settings.passwordHash = hashString
+            settings.passwordIterations = iterations
+            settings.passwordConfigured = true
+        }
+    }
+
+    private func loadPasswordRecordLocked(for username: String) throws -> PasswordRecord {
+        guard let admin = adminLocked(username: username),
+              let salt = admin.passwordSalt,
+              let hash = admin.passwordHash,
+              let iterations = admin.passwordIterations else {
+            throw SecurityError.invalidCredential
+        }
+        return PasswordRecord(salt: salt, hash: hash, iterations: iterations)
+    }
+
+    private func adminLocked(username: String) -> StoredSettings.Admin? {
+        settings.admins.first { $0.username.caseInsensitiveCompare(username) == .orderedSame }
+    }
+
+    func currentUsername(request: HttpRequest) -> String? {
+        queue.sync {
+            guard let sessionID = sessionID(from: request) else { return nil }
+            return sessions[sessionID]?.username
+        }
+    }
+
+    func requiresPasswordChange(request: HttpRequest) -> Bool {
+        queue.sync {
+            guard let username = currentUsernameUnlocked(request: request),
+                  let admin = adminLocked(username: username) else {
+                return false
+            }
+            return admin.mustChangePassword
+        }
+    }
+
+    private func currentUsernameUnlocked(request: HttpRequest) -> String? {
+        guard let sessionID = sessionID(from: request) else { return nil }
+        return sessions[sessionID]?.username
+    }
+
+    private func migrateLegacySettingsLocked() {
+        if settings.admins.isEmpty,
+           let salt = settings.passwordSalt,
+           let hash = settings.passwordHash,
+           let iterations = settings.passwordIterations {
+            settings.admins = [
+                StoredSettings.Admin(
+                    username: settings.username,
+                    passwordSalt: salt,
+                    passwordHash: hash,
+                    passwordIterations: iterations,
+                    mustChangePassword: false,
+                    inviteToken: nil,
+                    createdAt: Date()
+                )
+            ]
+            settings.passwordConfigured = true
+            try? persistSettingsLocked()
+        }
+    }
+
+    private func generateTemporaryPassword() -> String {
+        "ship-" + randomData(length: 12).base64URLEncodedString()
+    }
+
+    private func inviteURL(for token: String, request: HttpRequest) -> String {
+        let origin = resolvedRequestOrigin(for: request) ?? queue.sync(execute: { settings.publicBaseURL }) ?? "http://localhost"
+        return "\(origin)/?invite=\(token)"
+    }
+
+    private static func derivePasswordHash(password: String, salt: Data, iterations: Int) -> Data {
+        var input = Data(password.utf8) + salt
+        for _ in 0..<iterations {
+            input = Data(SHA256.hash(data: input))
+        }
+        return input
+    }
+
+    private func verifyPassword(_ password: String, record: PasswordRecord) -> Bool {
+        guard let salt = try? Data(base64URLString: record.salt),
+              let stored = try? Data(base64URLString: record.hash) else {
+            return false
+        }
+        let candidate = Self.derivePasswordHash(password: password, salt: salt, iterations: record.iterations)
+        return constantTimeEquals(candidate, stored)
+    }
+
+    private func constantTimeEquals(_ lhs: Data, _ rhs: Data) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return zip(lhs, rhs).reduce(0) { $0 | ($1.0 ^ $1.1) } == 0
+    }
+
+    private func randomData(length: Int) -> Data {
+        var bytes = [UInt8](repeating: 0, count: length)
+        _ = SecRandomCopyBytes(kSecRandomDefault, length, &bytes)
+        return Data(bytes)
+    }
+
+    private func decodeClientData(from base64URL: String, expectedType: String, challenge: PendingChallenge) throws -> [String: String] {
+        let data = try Data(base64URLString: base64URL)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = object["type"] as? String,
+              let challengeValue = object["challenge"] as? String,
+              let origin = object["origin"] as? String,
+              type == expectedType,
+              challengeValue == challenge.bytes.base64URLEncodedString(),
+              origin == challenge.origin else {
+            throw SecurityError.invalidCredential
+        }
+        return ["challenge": challengeValue, "origin": origin]
+    }
+
+    private func parseRegistration(attestationObject: Data, expectedRPID: String) throws -> (credentialID: Data, publicKeyX963: Data, signCount: UInt32) {
+        var decoder = WebDashboardCBORDecoder(data: attestationObject)
+        let cbor = try decoder.decodeItem()
+        guard let map = cbor.mapValue,
+              let authData = map[string: "authData"]?.bytesValue else {
+            throw SecurityError.invalidCredential
+        }
+        let parsed = try parseAuthenticatorData(authData, expectedRPID: expectedRPID, requireAttestedCredentialData: true)
+        return (parsed.credentialID ?? Data(), parsed.publicKeyX963 ?? Data(), parsed.signCount)
+    }
+
+    private func verifyAssertion(
+        authenticatorData: Data,
+        clientDataJSONBase64URL: String,
+        signatureDER: Data,
+        expectedRPID: String,
+        passkey: StoredSettings.Passkey
+    ) throws {
+        _ = try parseAuthenticatorData(authenticatorData, expectedRPID: expectedRPID, requireAttestedCredentialData: false)
+        let clientDataJSON = try Data(base64URLString: clientDataJSONBase64URL)
+        let clientHash = Data(SHA256.hash(data: clientDataJSON))
+        var signedData = authenticatorData
+        signedData.append(clientHash)
+        let publicKey = try P256.Signing.PublicKey(x963Representation: Data(base64URLString: passkey.publicKeyX963))
+        let signature = try P256.Signing.ECDSASignature(derRepresentation: signatureDER)
+        guard publicKey.isValidSignature(signature, for: signedData) else {
+            throw SecurityError.invalidCredential
+        }
+    }
+
+    private func readAssertionSignCount(_ authenticatorData: Data) -> UInt32 {
+        guard authenticatorData.count >= 37 else { return 0 }
+        return authenticatorData.subdata(in: 33..<37).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+    }
+
+    private func parseAuthenticatorData(
+        _ data: Data,
+        expectedRPID: String,
+        requireAttestedCredentialData: Bool
+    ) throws -> (signCount: UInt32, credentialID: Data?, publicKeyX963: Data?) {
+        guard data.count >= 37 else {
+            throw SecurityError.invalidCredential
+        }
+        let rpHash = Data(SHA256.hash(data: Data(expectedRPID.utf8)))
+        let hash = data.prefix(32)
+        guard Data(hash) == rpHash else {
+            throw SecurityError.invalidCredential
+        }
+        let flags = data[data.startIndex.advanced(by: 32)]
+        guard (flags & 0x01) == 0x01, (flags & 0x04) == 0x04 else {
+            throw SecurityError.invalidCredential
+        }
+        let signCount = data.subdata(in: 33..<37).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        if !requireAttestedCredentialData {
+            return (signCount, nil, nil)
+        }
+        guard (flags & 0x40) == 0x40 else {
+            throw SecurityError.invalidCredential
+        }
+        var index = 37 + 16
+        let credentialLength = Int(data.subdata(in: index..<(index + 2)).withUnsafeBytes { $0.load(as: UInt16.self).bigEndian })
+        index += 2
+        let credentialID = data.subdata(in: index..<(index + credentialLength))
+        index += credentialLength
+        var decoder = WebDashboardCBORDecoder(data: data.subdata(in: index..<data.count))
+        let cbor = try decoder.decodeItem()
+        guard let coseKey = cbor.mapValue,
+              let x = coseKey[int: -2]?.bytesValue,
+              let y = coseKey[int: -3]?.bytesValue else {
+            throw SecurityError.invalidCredential
+        }
+        let x963 = Data([0x04]) + x + y
+        return (signCount, credentialID, x963)
+    }
+
+    private func escapeHTML(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+}
+
+private extension Data {
+    init(base64URLString: String) throws {
+        let base64 = base64URLString
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+            .padding(toLength: ((base64URLString.count + 3) / 4) * 4, withPad: "=", startingAt: 0)
+        guard let data = Data(base64Encoded: base64) else {
+            throw WebDashboardSecurityController.SecurityError.invalidCredential
+        }
+        self = data
+    }
+
+    func base64URLEncodedString() -> String {
+        base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+private struct WebDashboardCBOR {
+    struct MapValue {
+        var entries: [(WebDashboardCBOR, WebDashboardCBOR)]
+
+        subscript(string key: String) -> WebDashboardCBOR? {
+            entries.first(where: { $0.0.stringValue == key })?.1
+        }
+
+        subscript(int key: Int) -> WebDashboardCBOR? {
+            entries.first(where: { $0.0.integerValue == key })?.1
+        }
+    }
+
+    var integerValue: Int? {
+        switch storage {
+        case let .unsigned(value): return Int(value)
+        case let .negative(value): return value
+        default: return nil
+        }
+    }
+
+    var stringValue: String? {
+        if case let .string(value) = storage { return value }
+        return nil
+    }
+
+    var bytesValue: Data? {
+        if case let .bytes(value) = storage { return value }
+        return nil
+    }
+
+    var mapValue: MapValue? {
+        if case let .map(entries) = storage { return MapValue(entries: entries) }
+        return nil
+    }
+
+    enum Storage {
+        case unsigned(UInt64)
+        case negative(Int)
+        case bytes(Data)
+        case string(String)
+        case array([WebDashboardCBOR])
+        case map([(WebDashboardCBOR, WebDashboardCBOR)])
+    }
+
+    var storage: Storage
+}
+
+private struct WebDashboardCBORDecoder {
+    private let data: Data
+    private var index: Data.Index
+
+    init(data: Data) {
+        self.data = data
+        self.index = data.startIndex
+    }
+
+    mutating func decodeItem() throws -> WebDashboardCBOR {
+        guard index < data.endIndex else {
+            throw WebDashboardSecurityController.SecurityError.invalidCredential
+        }
+        let initial = data[index]
+        index += 1
+        let major = initial >> 5
+        let info = initial & 0x1f
+        switch major {
+        case 0:
+            return WebDashboardCBOR(storage: .unsigned(try readUInt(info)))
+        case 1:
+            return WebDashboardCBOR(storage: .negative(-1 - Int(try readUInt(info))))
+        case 2:
+            let count = Int(try readUInt(info))
+            let value = try readData(count)
+            return WebDashboardCBOR(storage: .bytes(value))
+        case 3:
+            let count = Int(try readUInt(info))
+            let value = try readData(count)
+            guard let string = String(data: value, encoding: .utf8) else {
+                throw WebDashboardSecurityController.SecurityError.invalidCredential
+            }
+            return WebDashboardCBOR(storage: .string(string))
+        case 4:
+            let count = Int(try readUInt(info))
+            let values = try (0..<count).map { _ in try decodeItem() }
+            return WebDashboardCBOR(storage: .array(values))
+        case 5:
+            let count = Int(try readUInt(info))
+            let entries = try (0..<count).map { _ in
+                (try decodeItem(), try decodeItem())
+            }
+            return WebDashboardCBOR(storage: .map(entries))
+        default:
+            throw WebDashboardSecurityController.SecurityError.invalidCredential
+        }
+    }
+
+    private mutating func readUInt(_ info: UInt8) throws -> UInt64 {
+        switch info {
+        case 0...23:
+            return UInt64(info)
+        case 24:
+            return UInt64(try readByte())
+        case 25:
+            return UInt64(try readFixed(UInt16.self))
+        case 26:
+            return UInt64(try readFixed(UInt32.self))
+        case 27:
+            return try readFixed(UInt64.self)
+        default:
+            throw WebDashboardSecurityController.SecurityError.invalidCredential
+        }
+    }
+
+    private mutating func readByte() throws -> UInt8 {
+        guard index < data.endIndex else {
+            throw WebDashboardSecurityController.SecurityError.invalidCredential
+        }
+        let value = data[index]
+        index += 1
+        return value
+    }
+
+    private mutating func readFixed<T: FixedWidthInteger>(_ type: T.Type) throws -> T {
+        let count = MemoryLayout<T>.size
+        let value = try readData(count)
+        return value.withUnsafeBytes { $0.load(as: T.self).bigEndian }
+    }
+
+    private mutating func readData(_ count: Int) throws -> Data {
+        guard data.distance(from: index, to: data.endIndex) >= count else {
+            throw WebDashboardSecurityController.SecurityError.invalidCredential
+        }
+        let range = index..<(index + count)
+        index += count
+        return data.subdata(in: range)
+    }
 }

@@ -48,6 +48,7 @@ final class AppState: ObservableObject {
     private let releasePlanner = ReleasePlanner()
     private let signingInspector = SigningInspector()
     private let commandRunner = ShellCommandRunner()
+    private let repositoryIconResolver = RepositoryIconResolver()
     private var buildHistoryByRepository: [String: [BuildRecord]] = [:]
     private var latestBuildByRepository: [String: BuildRecord] = [:]
     private var webIconDataByRepositoryID: [String: String] = [:]
@@ -65,9 +66,30 @@ final class AppState: ObservableObject {
     private let ignoredCommitMarkers = ["[shiphook skip]", "[skip shiphook]"]
     private let notarizationProfilesDefaultsKey = "ShipHookKnownNotarizationProfiles"
     private var lastSavedConfiguration: AppConfiguration = .default
-    private lazy var webDashboardServer = WebDashboardServer { [weak self] in
-        self?.makeWebDashboardSnapshot() ?? WebDashboardSnapshot(generatedAt: Date(), repositories: [])
-    }
+    private lazy var webDashboardServer = WebDashboardServer(
+        snapshotProvider: { [weak self] in
+            self?.makeWebDashboardSnapshot()
+                ?? WebDashboardSnapshot(
+                    generatedAt: Date(),
+                    global: .empty,
+                    repositories: []
+                )
+        },
+        commandHandler: { [weak self] command in
+            self?.handleWebDashboardCommand(command)
+                ?? WebDashboardCommandResponse(
+                    ok: false,
+                    message: nil,
+                    error: "ShipHook is no longer available.",
+                    snapshot: WebDashboardSnapshot(
+                        generatedAt: Date(),
+                        global: .empty,
+                        repositories: []
+                    ),
+                    inspectionPreview: nil
+                )
+        }
+    )
 
     init() {
         loadConfiguration()
@@ -482,6 +504,160 @@ final class AppState: ObservableObject {
         }
 
         refreshLaunchAtLoginStatus()
+    }
+
+    func handleWebDashboardCommand(_ command: WebDashboardCommand) -> WebDashboardCommandResponse {
+        switch command {
+        case let .saveConfiguration(configuration):
+            self.configuration = configuration
+            saveConfiguration()
+            if let lastGlobalError {
+                return webDashboardResponse(error: lastGlobalError)
+            }
+            return webDashboardResponse(message: "Configuration saved.")
+
+        case .reloadConfiguration:
+            loadConfiguration()
+            if let lastGlobalError {
+                return webDashboardResponse(error: lastGlobalError)
+            }
+            return webDashboardResponse(message: "Configuration reloaded from disk.")
+
+        case .addRepository:
+            _ = addRepository()
+            saveConfiguration()
+            if let lastGlobalError {
+                return webDashboardResponse(error: lastGlobalError)
+            }
+            return webDashboardResponse(message: "Repository added.")
+
+        case let .inspectRepository(request):
+            do {
+                let inspection = try inspectCheckout(localCheckoutPath: request.localCheckoutPath)
+                let preview = try makeRepositoryFromInspection(
+                    localCheckoutPath: request.localCheckoutPath,
+                    fallbackOwner: request.fallbackOwner,
+                    fallbackRepo: request.fallbackRepo,
+                    fallbackBranch: request.fallbackBranch,
+                    selectedScheme: inspection.suggestedScheme ?? inspection.schemes.first
+                )
+                return webDashboardResponse(
+                    message: "Inspection succeeded.",
+                    inspectionPreview: WebDashboardRepositoryInspectionPreview(
+                        inspection: inspection,
+                        suggestedRepository: preview
+                    )
+                )
+            } catch {
+                return webDashboardResponse(error: error.localizedDescription)
+            }
+
+        case let .addRepositoryFromInspection(submission):
+            do {
+                let repository = try makeRepositoryFromInspection(
+                    localCheckoutPath: submission.localCheckoutPath,
+                    fallbackOwner: submission.fallbackOwner,
+                    fallbackRepo: submission.fallbackRepo,
+                    fallbackBranch: submission.fallbackBranch,
+                    selectedScheme: submission.selectedScheme
+                )
+                _ = addRepository(repository)
+                saveConfiguration()
+                if let lastGlobalError {
+                    return webDashboardResponse(error: lastGlobalError)
+                }
+                return webDashboardResponse(message: "Repository added from inspection.")
+            } catch {
+                return webDashboardResponse(error: error.localizedDescription)
+            }
+
+        case let .removeRepository(repositoryID):
+            guard let index = configuration.repositories.firstIndex(where: { $0.id == repositoryID }) else {
+                return webDashboardResponse(error: "Repository not found.")
+            }
+            removeRepositories(atOffsets: IndexSet(integer: index))
+            saveConfiguration()
+            if let lastGlobalError {
+                return webDashboardResponse(error: lastGlobalError)
+            }
+            return webDashboardResponse(message: "Repository removed.")
+
+        case .pollAll:
+            triggerManualPollAll()
+            return webDashboardResponse(message: "Polling all repositories.")
+
+        case let .pollRepository(repositoryID):
+            triggerManualPoll(for: repositoryID)
+            return webDashboardResponse(message: "Polling repository.")
+
+        case let .setRepositoryEnabled(repositoryID, enabled):
+            guard configuration.repositories.contains(where: { $0.id == repositoryID }) else {
+                return webDashboardResponse(error: "Repository not found.")
+            }
+            setRepositoryEnabled(repositoryID, enabled: enabled)
+            updateState(for: repositoryID) {
+                $0.activity = .idle
+                $0.buildPhase = .idle
+                $0.buildDetail = nil
+                $0.lastCheckDate = Date()
+                $0.summary = enabled ? "Waiting for next check" : "Repository is paused"
+            }
+            persistConfigurationQuietly()
+            if let lastGlobalError {
+                return webDashboardResponse(error: lastGlobalError)
+            }
+            return webDashboardResponse(
+                message: enabled ? "Repository resumed." : "Repository paused."
+            )
+
+        case let .resetBuildState(repositoryID):
+            resetBuildState(for: repositoryID)
+            return webDashboardResponse(message: "Build state reset.")
+
+        case let .refreshReleases(repositoryID):
+            refreshReleaseExplorer(for: repositoryID, force: true)
+            return webDashboardResponse(message: "Refreshing releases.")
+
+        case let .rollbackRelease(repositoryID, tagName):
+            guard let release = releasesByRepository[repositoryID]?.first(where: { $0.tagName == tagName }) else {
+                return webDashboardResponse(error: "Release \(tagName) is not loaded. Refresh releases and try again.")
+            }
+            rollbackRelease(repositoryID: repositoryID, release: release)
+            return webDashboardResponse(message: "Rolling back to \(tagName).")
+
+        case let .setLaunchAtLogin(enabled):
+            do {
+                try setLaunchAtLogin(enabled)
+                return webDashboardResponse(
+                    message: enabled
+                        ? "Launch at login enabled."
+                        : "Launch at login disabled."
+                )
+            } catch {
+                refreshLaunchAtLoginStatus()
+                return webDashboardResponse(error: error.localizedDescription)
+            }
+
+        case .refreshSigningIdentities:
+            refreshSigningIdentities()
+            if let lastSigningIdentityError {
+                return webDashboardResponse(error: lastSigningIdentityError)
+            }
+            return webDashboardResponse(message: "Signing identities refreshed.")
+
+        case let .storeNotarizationProfile(profile):
+            do {
+                try storeNotarizationProfile(
+                    profileName: profile.profileName,
+                    appleID: profile.appleID,
+                    teamID: profile.teamID,
+                    appSpecificPassword: profile.appSpecificPassword
+                )
+                return webDashboardResponse(message: "Notarization profile stored.")
+            } catch {
+                return webDashboardResponse(error: error.localizedDescription)
+            }
+        }
     }
 
     func publishedVersion(for repository: RepositoryConfiguration) -> String? {
@@ -1918,33 +2094,84 @@ final class AppState: ObservableObject {
                 id: repository.id,
                 name: repository.name,
                 iconDataURL: webRepositoryIconDataURL(for: repository),
-                isEnabled: repository.isEnabled,
-                slug: "\(repository.owner)/\(repository.repo)",
-                branch: repository.branch,
-                activity: state.activity.rawValue,
-                phase: state.buildPhase.rawValue,
-                summary: state.summary,
-                releaseChannel: state.releaseChannel?.rawValue ?? latestBuild?.releaseChannel,
+                configuration: repository,
+                runtime: WebDashboardSnapshot.Repository.Runtime(
+                    isEnabled: repository.isEnabled,
+                    slug: "\(repository.owner)/\(repository.repo)",
+                    branch: repository.branch,
+                    activity: state.activity.rawValue,
+                    phase: state.buildPhase.rawValue,
+                    summary: state.summary,
+                    releaseChannel: state.releaseChannel?.rawValue ?? latestBuild?.releaseChannel,
+                    version: displayedVersion(for: repository),
+                    publishedVersion: publishedVersion(for: repository),
+                    lastSeenSHA: state.lastSeenSHA,
+                    lastBuiltSHA: state.lastBuiltSHA ?? latestBuild?.sha,
+                    lastCheckDate: state.lastCheckDate,
+                    lastSuccessDate: state.lastSuccessDate ?? latestBuild?.builtAt,
+                    buildStartedAt: state.buildStartedAt,
+                    lastCommitAuthorLogin: state.lastCommitAuthorLogin,
+                    lastCommitAuthorAvatarURL: state.lastCommitAuthorAvatarURL?.absoluteString,
+                    lastCommitAuthorProfileURL: state.lastCommitAuthorProfileURL?.absoluteString,
+                    lastLog: state.lastLog,
+                    lastLogPath: state.lastLogPath
+                ),
                 version: displayedVersion(for: repository),
                 publishedVersion: publishedVersion(for: repository),
-                lastSeenSHA: state.lastSeenSHA,
-                lastBuiltSHA: state.lastBuiltSHA ?? latestBuild?.sha,
-                lastCheckDate: state.lastCheckDate,
-                lastSuccessDate: state.lastSuccessDate ?? latestBuild?.builtAt,
-                buildStartedAt: state.buildStartedAt,
                 latestBuild: latestBuild,
                 recentBuilds: recentBuilds,
                 recentReleases: recentReleases,
-                progress: progressSnapshot(for: state),
-                lastCommitAuthorLogin: state.lastCommitAuthorLogin,
-                lastCommitAuthorAvatarURL: state.lastCommitAuthorAvatarURL?.absoluteString,
-                lastCommitAuthorProfileURL: state.lastCommitAuthorProfileURL?.absoluteString
+                progress: progressSnapshot(for: state)
             )
         }
 
         return WebDashboardSnapshot(
             generatedAt: Date(),
+            global: WebDashboardSnapshot.Global(
+                pollIntervalSeconds: configuration.pollIntervalSeconds,
+                githubToken: configuration.githubToken,
+                githubTokenEnvVar: configuration.githubTokenEnvVar,
+                generatedDataRetentionCount: configuration.generatedDataRetentionCount,
+                autoPauseFailureCount: configuration.autoPauseFailureCount,
+                webDashboardEnabled: configuration.webDashboardEnabled,
+                webDashboardPort: configuration.webDashboardPort,
+                configPath: configPath,
+                hasUnsavedChanges: hasUnsavedChanges,
+                lastGlobalError: lastGlobalError,
+                launchesAtLogin: launchesAtLogin,
+                launchAtLoginStatusMessage: launchAtLoginStatusMessage,
+                webDashboardStatusMessage: webDashboardStatusMessage,
+                webDashboardURLString: webDashboardURLString,
+                availableNotarizationProfiles: availableNotarizationProfiles,
+                lastSigningIdentityError: lastSigningIdentityError,
+                signingDiagnosticsSummary: signingDiagnostics?.summary,
+                signingDiagnosticsDetails: signingDiagnostics?.details ?? [],
+                availableSigningIdentities: availableSigningIdentities.map { identity in
+                    WebDashboardSnapshot.SigningIdentityOption(
+                        fingerprint: identity.fingerprint,
+                        commonName: identity.commonName,
+                        teamID: identity.teamID,
+                        kind: identity.kind.rawValue,
+                        displayName: identity.displayName,
+                        isRecommendedForSparkle: identity.isRecommendedForSparkle
+                    )
+                }
+            ),
             repositories: repositories
+        )
+    }
+
+    private func webDashboardResponse(
+        message: String? = nil,
+        error: String? = nil,
+        inspectionPreview: WebDashboardRepositoryInspectionPreview? = nil
+    ) -> WebDashboardCommandResponse {
+        WebDashboardCommandResponse(
+            ok: error == nil,
+            message: message,
+            error: error,
+            snapshot: makeWebDashboardSnapshot(),
+            inspectionPreview: inspectionPreview
         )
     }
 
@@ -1986,47 +2213,12 @@ final class AppState: ObservableObject {
             return cached
         }
 
-        let icon = resolveWebRepositoryIcon(for: repository)
+        let icon = repositoryIconResolver.resolveIcon(for: repository)
         guard let dataURL = Self.pngDataURL(from: icon) else {
             return nil
         }
         webIconDataByRepositoryID[repository.id] = dataURL
         return dataURL
-    }
-
-    private func resolveWebRepositoryIcon(for repository: RepositoryConfiguration) -> NSImage {
-        let fileManager = FileManager.default
-
-        if let artifactPath = repository.xcode?.artifactPath {
-            let expandedPath = (artifactPath as NSString).expandingTildeInPath
-            if fileManager.fileExists(atPath: expandedPath) {
-                return NSWorkspace.shared.icon(forFile: expandedPath)
-            }
-        }
-
-        let checkoutPath = (repository.localCheckoutPath as NSString).expandingTildeInPath
-        if fileManager.fileExists(atPath: checkoutPath) {
-            return NSWorkspace.shared.icon(forFile: checkoutPath)
-        }
-
-        if let projectPath = repository.xcode?.projectPath {
-            let expandedProjectPath = (projectPath as NSString).expandingTildeInPath
-            if fileManager.fileExists(atPath: expandedProjectPath) {
-                return NSWorkspace.shared.icon(forFile: expandedProjectPath)
-            }
-        }
-
-        if let workspacePath = repository.xcode?.workspacePath {
-            let expandedWorkspacePath = (workspacePath as NSString).expandingTildeInPath
-            if fileManager.fileExists(atPath: expandedWorkspacePath) {
-                return NSWorkspace.shared.icon(forFile: expandedWorkspacePath)
-            }
-        }
-
-        if #available(macOS 12.0, *) {
-            return NSWorkspace.shared.icon(for: .application)
-        }
-        return NSWorkspace.shared.icon(forFileType: "app")
     }
 
     nonisolated private static func pngDataURL(from image: NSImage) -> String? {

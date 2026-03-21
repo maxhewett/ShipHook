@@ -475,6 +475,7 @@ struct ContentView: View {
 
 private final class RepositoryIconCache: ObservableObject {
     private let cache = NSCache<NSString, NSImage>()
+    private let resolver = RepositoryIconResolver()
 
     func icon(for repository: RepositoryConfiguration) -> NSImage {
         let key = cacheKey(for: repository)
@@ -482,7 +483,7 @@ private final class RepositoryIconCache: ObservableObject {
             return cached
         }
 
-        let icon = resolveIcon(for: repository)
+        let icon = resolver.resolveIcon(for: repository)
         cache.setObject(icon, forKey: key as NSString)
         return icon
     }
@@ -495,40 +496,6 @@ private final class RepositoryIconCache: ObservableObject {
             repository.xcode?.projectPath ?? "",
             repository.xcode?.workspacePath ?? "",
         ].joined(separator: "|")
-    }
-
-    private func resolveIcon(for repository: RepositoryConfiguration) -> NSImage {
-        if let artifactPath = repository.xcode?.artifactPath {
-            let expandedPath = (artifactPath as NSString).expandingTildeInPath
-            if FileManager.default.fileExists(atPath: expandedPath) {
-                return NSWorkspace.shared.icon(forFile: expandedPath)
-            }
-        }
-
-        let checkoutPath = (repository.localCheckoutPath as NSString).expandingTildeInPath
-        if FileManager.default.fileExists(atPath: checkoutPath) {
-            return NSWorkspace.shared.icon(forFile: checkoutPath)
-        }
-
-        if let projectPath = repository.xcode?.projectPath {
-            let expandedProjectPath = (projectPath as NSString).expandingTildeInPath
-            if FileManager.default.fileExists(atPath: expandedProjectPath) {
-                return NSWorkspace.shared.icon(forFile: expandedProjectPath)
-            }
-        }
-
-        if let workspacePath = repository.xcode?.workspacePath {
-            let expandedWorkspacePath = (workspacePath as NSString).expandingTildeInPath
-            if FileManager.default.fileExists(atPath: expandedWorkspacePath) {
-                return NSWorkspace.shared.icon(forFile: expandedWorkspacePath)
-            }
-        }
-
-        if #available(macOS 12.0, *) {
-            return NSWorkspace.shared.icon(for: .application)
-        }
-
-        return NSWorkspace.shared.icon(forFileType: "app")
     }
 }
 
