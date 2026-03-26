@@ -514,6 +514,15 @@ final class WebDashboardServer {
             do {
                 let command = try self.decodeCommand(from: request)
                 let response = self.perform(command)
+                if response.ok {
+                    let (action, detail) = self.auditDescription(for: command)
+                    self.securityController.recordAuditEvent(
+                        action: action,
+                        detail: detail,
+                        request: request,
+                        username: self.securityController.currentUsername(request: request)
+                    )
+                }
                 return self.jsonResponse(for: response, request: request)
             } catch {
                 return self.errorResponse(message: error.localizedDescription, request: request)
@@ -812,6 +821,41 @@ final class WebDashboardServer {
             contentType: "application/json; charset=utf-8",
             request: request
         )
+    }
+
+    private func auditDescription(for command: WebDashboardCommand) -> (String, String?) {
+        switch command {
+        case .saveConfiguration:
+            return ("dashboard.configuration.saved", nil)
+        case .reloadConfiguration:
+            return ("dashboard.configuration.reloaded", nil)
+        case .addRepository:
+            return ("dashboard.repository.blank_added", nil)
+        case let .inspectRepository(request):
+            return ("dashboard.repository.inspected", request.localCheckoutPath)
+        case let .addRepositoryFromInspection(submission):
+            return ("dashboard.repository.added_from_inspection", submission.localCheckoutPath)
+        case let .removeRepository(repositoryID):
+            return ("dashboard.repository.removed", repositoryID)
+        case .pollAll:
+            return ("dashboard.poll.all", nil)
+        case let .pollRepository(repositoryID):
+            return ("dashboard.poll.repository", repositoryID)
+        case let .setRepositoryEnabled(repositoryID, enabled):
+            return (enabled ? "dashboard.repository.resumed" : "dashboard.repository.paused", repositoryID)
+        case let .resetBuildState(repositoryID):
+            return ("dashboard.build_state.reset", repositoryID)
+        case let .refreshReleases(repositoryID):
+            return ("dashboard.releases.refreshed", repositoryID)
+        case let .rollbackRelease(repositoryID, tagName):
+            return ("dashboard.release.rollback", "\(repositoryID) -> \(tagName)")
+        case let .setLaunchAtLogin(enabled):
+            return ("dashboard.launch_at_login.\(enabled ? "enabled" : "disabled")", nil)
+        case .refreshSigningIdentities:
+            return ("dashboard.signing_identities.refreshed", nil)
+        case let .storeNotarizationProfile(profile):
+            return ("dashboard.notarization_profile.stored", profile.profileName)
+        }
     }
 
     private func decodeRequest<T: Decodable>(_ type: T.Type, from request: HttpRequest) throws -> T {
@@ -3895,6 +3939,16 @@ private final class WebDashboardSecurityController {
         var expiresAt: Date
     }
 
+    struct AuditEntry: Codable {
+        var id: String
+        var occurredAt: Date
+        var username: String?
+        var action: String
+        var detail: String?
+        var remoteAddress: String?
+        var userAgent: String?
+    }
+
     private enum ChallengeKind {
         case register(sessionID: String, username: String)
         case authenticate
@@ -3911,6 +3965,7 @@ private final class WebDashboardSecurityController {
 
     private let queue = DispatchQueue(label: "ShipHook.WebDashboardSecurity")
     private let settingsURL: URL
+    private let auditLogURL: URL
     private let sessionCookieName = "shiphook_session"
     private let defaultsKey = "ShipHook.WebDashboardSecuritySettings"
     private var settings: StoredSettings
@@ -3919,14 +3974,17 @@ private final class WebDashboardSecurityController {
     private var challenges: [String: PendingChallenge] = [:]
     private var failuresByKey: [String: [Date]] = [:]
     private var pendingCookieHeader: String?
+    private var auditEntries: [AuditEntry] = []
 
     init() {
         let baseURL = ConfigStore().appSupportDirectory
         try? FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true, attributes: nil)
         settingsURL = baseURL.appendingPathComponent("web-dashboard-security.json")
+        auditLogURL = baseURL.appendingPathComponent("web-dashboard-audit-log.json")
         settings = (try? Self.loadSettings(from: settingsURL))
             ?? Self.loadSettingsFromDefaults(defaultsKey: defaultsKey)
             ?? .empty
+        auditEntries = (try? Self.loadAuditEntries(from: auditLogURL)) ?? []
         migrateLegacySettingsLocked()
         didBootstrapThisLaunch = settings.passwordConfigured || !settings.admins.isEmpty || !settings.passkeys.isEmpty
     }
@@ -3939,6 +3997,23 @@ private final class WebDashboardSecurityController {
 
     var hasRegisteredPasskeys: Bool {
         queue.sync { !settings.passkeys.isEmpty }
+    }
+
+    func recentAuditEntries(limit: Int = 80) -> [AuditEntry] {
+        queue.sync {
+            Array(auditEntries.prefix(max(0, limit)))
+        }
+    }
+
+    func recordAuditEvent(action: String, detail: String? = nil, request: HttpRequest, username: String? = nil) {
+        queue.sync {
+            appendAuditEntryLocked(
+                username: username,
+                action: action,
+                detail: detail,
+                request: request
+            )
+        }
     }
 
     func isBootstrapRequestAllowed(request: HttpRequest) -> Bool {
@@ -3969,10 +4044,12 @@ private final class WebDashboardSecurityController {
 
     func logout(request: HttpRequest) {
         queue.sync {
+            let username = currentUsernameUnlocked(request: request)
             if let sessionID = sessionID(from: request) {
                 sessions.removeValue(forKey: sessionID)
             }
             pendingCookieHeader = cookieHeader(value: "", expiresAt: Date(timeIntervalSince1970: 0), secure: isSecureRequest(request))
+            appendAuditEntryLocked(username: username, action: "auth.logout", detail: nil, request: request)
         }
     }
 
@@ -4000,6 +4077,7 @@ private final class WebDashboardSecurityController {
             didBootstrapThisLaunch = true
             let sessionID = createSessionLocked(username: username, secure: isSecureRequest(request))
             _ = sessionID
+            appendAuditEntryLocked(username: username, action: "bootstrap.completed", detail: "Initial administrator created.", request: request)
             return WebDashboardAuthMessageResponse(
                 ok: true,
                 message: "Administrator account created.",
@@ -4013,16 +4091,19 @@ private final class WebDashboardSecurityController {
         let key = "\(username.lowercased())|\(request.address ?? "")"
         return try queue.sync {
             guard !isRateLimitedLocked(for: key) else {
+                appendAuditEntryLocked(username: username.isEmpty ? nil : username, action: "auth.login.rate_limited", detail: nil, request: request)
                 throw SecurityError.rateLimited
             }
             guard let admin = adminLocked(username: username),
                   let record = try? loadPasswordRecordLocked(for: username),
                   verifyPassword(payload.password, record: record) else {
                 registerFailureLocked(for: key)
+                appendAuditEntryLocked(username: username.isEmpty ? nil : username, action: "auth.login.failed", detail: nil, request: request)
                 throw SecurityError.invalidCredential
             }
             failuresByKey.removeValue(forKey: key)
             _ = createSessionLocked(username: username, secure: isSecureRequest(request))
+            appendAuditEntryLocked(username: username, action: "auth.login.password", detail: nil, request: request)
             return WebDashboardAuthMessageResponse(
                 ok: true,
                 message: "Signed in.",
@@ -4048,6 +4129,7 @@ private final class WebDashboardSecurityController {
             try storePasswordLocked(payload.newPassword, for: username, mustChangePassword: false, passwordSetupToken: nil)
             settings.passwordConfigured = true
             try persistSettingsLocked()
+            appendAuditEntryLocked(username: username, action: "auth.password.changed", detail: nil, request: request)
         }
     }
 
@@ -4067,6 +4149,7 @@ private final class WebDashboardSecurityController {
             settings.passwordConfigured = true
             try persistSettingsLocked()
             _ = createSessionLocked(username: admin.username, secure: isSecureRequest(request))
+            appendAuditEntryLocked(username: admin.username, action: "auth.invite.accepted", detail: "Password set from invite/reset link.", request: request)
             return WebDashboardAuthMessageResponse(ok: true, message: "Password set. Signed in.", passkeysAvailable: !settings.passkeys.isEmpty)
         }
     }
@@ -4086,6 +4169,7 @@ private final class WebDashboardSecurityController {
             let setupToken = randomData(length: 24).base64URLEncodedString()
             try storePasswordLocked("", for: username, mustChangePassword: true, passwordSetupToken: setupToken, generatePasswordHash: false)
             try persistSettingsLocked()
+            appendAuditEntryLocked(username: currentUsernameUnlocked(request: request), action: "admin.invited", detail: "@\(username)", request: request)
             return WebDashboardAdminLinkResponse(
                 ok: true,
                 username: username,
@@ -4108,6 +4192,7 @@ private final class WebDashboardSecurityController {
             try storePasswordSetupTokenLocked(setupToken, for: username, mustChangePassword: true)
             sessions = sessions.filter { $0.value.username.caseInsensitiveCompare(username) != .orderedSame }
             try persistSettingsLocked()
+            appendAuditEntryLocked(username: currentUsernameUnlocked(request: request), action: "admin.password_reset_link.created", detail: "@\(username)", request: request)
             return WebDashboardAdminLinkResponse(
                 ok: true,
                 username: username,
@@ -4139,6 +4224,7 @@ private final class WebDashboardSecurityController {
             settings.passkeys.removeAll { $0.username.caseInsensitiveCompare(username) == .orderedSame }
             sessions = sessions.filter { $0.value.username.caseInsensitiveCompare(username) != .orderedSame }
             try persistSettingsLocked()
+            appendAuditEntryLocked(username: currentUsername, action: "admin.deleted", detail: "@\(username)", request: request)
         }
     }
 
@@ -4207,6 +4293,7 @@ private final class WebDashboardSecurityController {
                 )
             )
             try persistSettingsLocked()
+            appendAuditEntryLocked(username: username, action: "auth.passkey.added", detail: payload.name?.trimmingCharacters(in: .whitespacesAndNewlines), request: request)
             return WebDashboardAuthMessageResponse(ok: true, message: "Passkey added.", passkeysAvailable: true)
         }
     }
@@ -4262,6 +4349,7 @@ private final class WebDashboardSecurityController {
                 try persistSettingsLocked()
             }
             _ = createSessionLocked(username: settings.passkeys[index].username, secure: isSecureRequest(request))
+            appendAuditEntryLocked(username: settings.passkeys[index].username, action: "auth.login.passkey", detail: settings.passkeys[index].name, request: request)
             return WebDashboardAuthMessageResponse(ok: true, message: "Signed in with passkey.", passkeysAvailable: true)
         }
     }
@@ -4467,6 +4555,38 @@ private final class WebDashboardSecurityController {
         )
     }
 
+    private func auditLogHTML() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .medium
+
+        let entries = recentAuditEntries()
+        guard !entries.isEmpty else {
+            return "<p class=\"note\">No audit entries recorded yet.</p>"
+        }
+
+        let items = entries.map { entry in
+            let timestamp = formatter.string(from: entry.occurredAt)
+            let username = entry.username.map { "@\(escapeHTML($0))" } ?? "Unknown user"
+            let detail = entry.detail.map { "<div class=\"tiny\">\(escapeHTML($0))</div>" } ?? ""
+            let remote = entry.remoteAddress.map { "<div class=\"tiny\">IP \(escapeHTML($0))</div>" } ?? ""
+            return """
+            <div class="audit-entry">
+              <div class="audit-entry-main">
+                <strong>\(escapeHTML(entry.action))</strong>
+                <span class="note">\(username)</span>
+              </div>
+              <div class="tiny">\(escapeHTML(timestamp))</div>
+              \(detail)
+              \(remote)
+            </div>
+            """
+        }.joined()
+
+        return "<div class=\"audit-list\">\(items)</div>"
+    }
+
     func securityPageHTML(forcePassword: Bool, currentUsername: String) -> String {
         let passkeyList = settings.passkeys.isEmpty
             ? "<p class=\"note\">No passkeys registered yet.</p>"
@@ -4532,6 +4652,10 @@ private final class WebDashboardSecurityController {
                   <button type="submit">Add Administrator</button>
                 </form>
                 <div id="invite-output" class="invite-output"></div>
+              </section>
+              <section class="auth-section">
+                <h2>Audit Log</h2>
+                \(auditLogHTML())
               </section>
               <div id="status" class="status"></div>
             </div>
@@ -4777,6 +4901,9 @@ private final class WebDashboardSecurityController {
             .admin-row-copy { display: grid; gap: 4px; min-width: 0; }
             .admin-row-actions { display: flex; flex-wrap: wrap; gap: 8px; }
             .admin-row-actions button { padding: 9px 12px; }
+            .audit-list { display: grid; gap: 10px; }
+            .audit-entry { padding: 12px 14px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.06); background: rgba(255,255,255,0.03); display: grid; gap: 4px; }
+            .audit-entry-main { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
             ul { padding-left: 18px; }
             @media (prefers-color-scheme: light) {
               body { background: linear-gradient(180deg, #edf2f7, #dfe8f3); color: #132033; }
@@ -4793,6 +4920,7 @@ private final class WebDashboardSecurityController {
               .auth-section-accent { background: linear-gradient(180deg, rgba(216,106,56,0.10), rgba(34,123,189,0.04) 68%, rgba(19,32,51,0.02)); }
               .invite-card { background: rgba(19,32,51,0.04); border-color: rgba(19,32,51,0.08); }
               .admin-row { background: rgba(19,32,51,0.03); border-color: rgba(19,32,51,0.08); }
+              .audit-entry { background: rgba(19,32,51,0.03); border-color: rgba(19,32,51,0.08); }
             }
             @media (max-width: 720px) {
               .card { width: min(680px, calc(100vw - 20px)); padding: 18px; border-radius: 20px; }
@@ -4946,11 +5074,54 @@ private final class WebDashboardSecurityController {
         return try JSONDecoder.webDashboard.decode(StoredSettings.self, from: data)
     }
 
+    private func persistAuditEntriesLocked() throws {
+        let encoder = JSONEncoder.webDashboard
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(Array(auditEntries.prefix(500)))
+        try data.write(to: auditLogURL, options: .atomic)
+    }
+
+    private static func loadAuditEntries(from url: URL) throws -> [AuditEntry] {
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder.webDashboard.decode([AuditEntry].self, from: data)
+    }
+
     private static func loadSettingsFromDefaults(defaultsKey: String) -> StoredSettings? {
         guard let data = UserDefaults.standard.data(forKey: defaultsKey) else {
             return nil
         }
         return try? JSONDecoder.webDashboard.decode(StoredSettings.self, from: data)
+    }
+
+    private func appendAuditEntryLocked(username: String?, action: String, detail: String?, request: HttpRequest) {
+        let entry = AuditEntry(
+            id: UUID().uuidString.lowercased(),
+            occurredAt: Date(),
+            username: username,
+            action: action,
+            detail: detail,
+            remoteAddress: remoteAddress(for: request),
+            userAgent: request.headers["user-agent"]
+        )
+        auditEntries.insert(entry, at: 0)
+        if auditEntries.count > 500 {
+            auditEntries.removeLast(auditEntries.count - 500)
+        }
+        try? persistAuditEntriesLocked()
+    }
+
+    private func remoteAddress(for request: HttpRequest) -> String? {
+        if let cf = request.headers["cf-connecting-ip"], !cf.isEmpty {
+            return cf
+        }
+        if let forwarded = request.headers["x-forwarded-for"]?
+            .split(separator: ",")
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !forwarded.isEmpty {
+            return forwarded
+        }
+        return request.address
     }
 
     private func storePasswordLocked(_ password: String) throws {

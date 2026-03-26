@@ -186,7 +186,9 @@ struct ReleasePlanner {
             return "\(prefix)\(nextBuild)"
         }
 
-        throw ReleasePlannerError.nonNumericBuild("Current build \(currentBuild) is not newer than appcast build \(latest.buildVersion)")
+        // Let prepareRelease() convert non-newer builds into a clean skip when
+        // skipIfVersionIsNotNewer is enabled, instead of surfacing this as a failure.
+        return currentBuild
     }
 
     private func isVersionNewer(_ current: AppVersion, than latest: AppcastVersion) -> Bool {
