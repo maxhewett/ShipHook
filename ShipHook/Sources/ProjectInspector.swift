@@ -69,19 +69,35 @@ struct ProjectInspector {
     }
 
     private func findSchemes(workspacePath: String?, projectPath: String?, root: String) throws -> [String] {
-        let command: String
+        var commands: [String] = []
         if let workspacePath, !workspacePath.isEmpty {
-            command = "xcodebuild -workspace '\(workspacePath)' -list -json"
-        } else if let projectPath, !projectPath.isEmpty {
-            command = "xcodebuild -project '\(projectPath)' -list -json"
-        } else {
+            commands.append("xcodebuild -workspace '\(workspacePath)' -list -json")
+        }
+        if let projectPath, !projectPath.isEmpty {
+            commands.append("xcodebuild -project '\(projectPath)' -list -json")
+        }
+        guard !commands.isEmpty else {
             return []
         }
 
-        let output = try commandRunner.run(command, currentDirectory: root, environment: [:]).output
-        let data = try extractJSON(from: output)
-        let decoded = try JSONDecoder().decode(XcodeListResponse.self, from: data)
-        return decoded.schemes
+        var lastError: Error?
+        for command in commands {
+            do {
+                let output = try commandRunner.run(command, currentDirectory: root, environment: [:]).output
+                let data = try extractJSON(from: output)
+                let decoded = try JSONDecoder().decode(XcodeListResponse.self, from: data)
+                if !decoded.schemes.isEmpty {
+                    return decoded.schemes
+                }
+            } catch {
+                lastError = error
+            }
+        }
+
+        if let lastError {
+            throw lastError
+        }
+        return []
     }
 
     private func suggestScheme(
@@ -223,7 +239,7 @@ struct ProjectInspector {
     private func findFirstWorkspacePath(under root: String) -> String? {
         let enumerator = fileManager.enumerator(atPath: root)
         while let next = enumerator?.nextObject() as? String {
-            if next.contains("/.build/") || next.contains("/Pods/") || next.hasPrefix(".git/") {
+            if shouldSkipInspectionPath(next) {
                 continue
             }
             if next.contains(".xcodeproj/") {
@@ -239,7 +255,7 @@ struct ProjectInspector {
     private func findFirstPath(withExtension pathExtension: String, under root: String) -> String? {
         let enumerator = fileManager.enumerator(atPath: root)
         while let next = enumerator?.nextObject() as? String {
-            if next.contains("/.build/") || next.contains("/Pods/") || next.hasPrefix(".git/") {
+            if shouldSkipInspectionPath(next) {
                 continue
             }
             if (next as NSString).pathExtension == pathExtension {
@@ -247,6 +263,15 @@ struct ProjectInspector {
             }
         }
         return nil
+    }
+
+    private func shouldSkipInspectionPath(_ relativePath: String) -> Bool {
+        let components = relativePath.split(separator: "/")
+        return components.contains(".git")
+            || components.contains(".build")
+            || components.contains("Pods")
+            || components.contains(".swiftpm")
+            || components.contains("DerivedData")
     }
 
     private func parseGitHubRemote(_ remote: String) -> (owner: String, repo: String)? {
