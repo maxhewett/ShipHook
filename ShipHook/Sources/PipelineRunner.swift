@@ -123,6 +123,7 @@ struct PipelineRunner {
             for: repository,
             releaseNotesSource: releaseNotesSource,
             checkoutPath: checkoutPath,
+            releaseChannel: releaseChannel,
             version: version
         )
 
@@ -679,11 +680,22 @@ struct PipelineRunner {
         for repository: RepositoryConfiguration,
         releaseNotesSource: ReleaseNotesSource,
         checkoutPath: String,
+        releaseChannel: ReleaseChannel,
         version: String
     ) throws -> String {
         if let configuredPath = repository.releaseNotesPath?.expandingTildeInPath,
            !configuredPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return configuredPath
+        }
+
+        if repository.preferExistingReleaseNotesFile,
+           let existingPath = existingReleaseNotesPath(
+               for: repository,
+               checkoutPath: checkoutPath,
+               releaseChannel: releaseChannel,
+               version: version
+           ) {
+            return existingPath
         }
 
         let releaseNotesDirectory = "\(checkoutPath)/.shiphook/release-notes"
@@ -705,6 +717,27 @@ struct PipelineRunner {
         )
         try html.write(to: URL(fileURLWithPath: releaseNotesPath), atomically: true, encoding: .utf8)
         return releaseNotesPath
+    }
+
+    private func existingReleaseNotesPath(
+        for repository: RepositoryConfiguration,
+        checkoutPath: String,
+        releaseChannel: ReleaseChannel,
+        version: String
+    ) -> String? {
+        let normalizedVersion = sanitizedFilenameComponent(version)
+        let docsRoot = "\(checkoutPath)/docs"
+        let path = releaseChannel == .beta
+            ? "\(docsRoot)/beta/release-notes/\(normalizedVersion).html"
+            : "\(docsRoot)/release-notes/\(normalizedVersion).html"
+
+        guard FileManager.default.fileExists(atPath: path),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = attributes[.size] as? NSNumber,
+              size.intValue > 0 else {
+            return nil
+        }
+        return path
     }
 
     private func makeReleaseNotesHTML(

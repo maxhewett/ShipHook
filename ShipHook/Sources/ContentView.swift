@@ -1946,6 +1946,7 @@ private struct RepositoryEditor: View {
                         }
                         Toggle("Skip build when project version is not newer than appcast", isOn: sparkle.skipIfVersionIsNotNewer)
                         Toggle("Auto-increment build when appcast build is not newer", isOn: sparkle.autoIncrementBuild)
+                        Toggle("Use existing versioned release notes file when present", isOn: $repository.preferExistingReleaseNotesFile)
                     }
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 } else {
@@ -1953,7 +1954,8 @@ private struct RepositoryEditor: View {
                         summaryGrid(rows: [
                             ("Appcast", appcastURLBinding.wrappedValue, "link"),
                             ("Skip Older Versions", sparkle.wrappedValue.skipIfVersionIsNotNewer ? "Enabled" : "Disabled", "arrow.uturn.backward.circle"),
-                            ("Auto Increment Build", sparkle.wrappedValue.autoIncrementBuild ? "Enabled" : "Disabled", "number.circle")
+                            ("Auto Increment Build", sparkle.wrappedValue.autoIncrementBuild ? "Enabled" : "Disabled", "number.circle"),
+                            ("Existing Release Notes", repository.preferExistingReleaseNotesFile ? "Prefer Existing File" : "Generate From Commits", "note.text")
                         ])
                         Text("Tap the configure icon to edit Sparkle settings.")
                             .font(.caption)

@@ -241,6 +241,7 @@ final class AppState: ObservableObject {
             bash "$SHIPHOOK_BUNDLED_PUBLISH_SCRIPT" --version "$SHIPHOOK_VERSION" --artifact "$SHIPHOOK_ARTIFACT_PATH" --app-name "\(appName)" --repo-owner "$SHIPHOOK_GITHUB_OWNER" --repo-name "$SHIPHOOK_GITHUB_REPO" --channel "$SHIPHOOK_RELEASE_CHANNEL" --release-notes "$SHIPHOOK_RELEASE_NOTES_PATH" --docs-dir "$SHIPHOOK_LOCAL_CHECKOUT_PATH/docs" --releases-dir "$SHIPHOOK_LOCAL_CHECKOUT_PATH/release-artifacts" --working-dir "$SHIPHOOK_LOCAL_CHECKOUT_PATH"
             """,
             releaseNotesPath: inspection.releaseNotesPath,
+            preferExistingReleaseNotesFile: false,
             githubTokenEnvVar: nil,
             environment: [:],
             versionStrategy: .shortSHATimestamp,
@@ -590,6 +591,14 @@ final class AppState: ObservableObject {
             triggerManualPoll(for: repositoryID)
             return webDashboardResponse(message: "Polling repository.")
 
+        case let .recloneRepository(repositoryID):
+            do {
+                try recloneRepository(repositoryID)
+                return webDashboardResponse(message: "Repository recloned. Checking branch state.")
+            } catch {
+                return webDashboardResponse(error: error.localizedDescription)
+            }
+
         case let .setRepositoryEnabled(repositoryID, enabled):
             guard configuration.repositories.contains(where: { $0.id == repositoryID }) else {
                 return webDashboardResponse(error: "Repository not found.")
@@ -875,6 +884,81 @@ final class AppState: ObservableObject {
             $0.summary = "Build state reset. Ready to check again."
         }
         startNextQueuedBuildIfPossible()
+    }
+
+    func recloneRepository(_ repositoryID: String) throws {
+        guard let repository = configuration.repositories.first(where: { $0.id == repositoryID }) else {
+            throw NSError(domain: "ShipHook", code: 910, userInfo: [NSLocalizedDescriptionKey: "Repository not found."])
+        }
+        if inFlightBuilds.contains(repositoryID)
+            || activeBuildRepositoryID == repositoryID
+            || queuedBuilds[repositoryID] != nil {
+            throw NSError(domain: "ShipHook", code: 911, userInfo: [NSLocalizedDescriptionKey: "This repository is currently being checked or built. Let that finish before recloning."])
+        }
+
+        let checkoutPath = (repository.localCheckoutPath as NSString).expandingTildeInPath
+        let checkoutURL = URL(fileURLWithPath: checkoutPath)
+        try validateSafeReclonePath(checkoutURL)
+
+        let remoteURL = try resolvedRemoteURL(for: repository, checkoutPath: checkoutPath)
+        let parentURL = checkoutURL.deletingLastPathComponent()
+        let fileManager = FileManager.default
+
+        updateState(for: repositoryID) {
+            $0.activity = .polling
+            $0.buildStartedAt = nil
+            $0.buildPhase = .syncing
+            $0.buildDetail = nil
+            $0.lastError = nil
+            $0.lastCheckDate = Date()
+            $0.summary = "Recloning local checkout"
+            $0.lastLog = "Preparing to reclone \(repository.name)...\n"
+            $0.lastLogPath = nil
+        }
+
+        releaseExplorerErrors.removeValue(forKey: repositoryID)
+        releaseExplorerLastRefreshedAt.removeValue(forKey: repositoryID)
+        releasesByRepository.removeValue(forKey: repositoryID)
+        buildVersionsInFlight.removeValue(forKey: repositoryID)
+        logBuffers.removeValue(forKey: repositoryID)
+        logFlushTasks[repositoryID]?.cancel()
+        logFlushTasks.removeValue(forKey: repositoryID)
+        do {
+            if fileManager.fileExists(atPath: checkoutPath) {
+                try fileManager.removeItem(at: checkoutURL)
+            }
+            try fileManager.createDirectory(at: parentURL, withIntermediateDirectories: true, attributes: nil)
+
+            let result = try commandRunner.run(
+                "git clone --branch \(shellSingleQuoted(repository.branch)) --single-branch \(shellSingleQuoted(remoteURL)) \(shellSingleQuoted(checkoutPath))",
+                currentDirectory: parentURL.path,
+                environment: [:]
+            )
+
+            updateState(for: repositoryID) {
+                $0.activity = .idle
+                $0.buildStartedAt = nil
+                $0.buildPhase = .idle
+                $0.buildDetail = nil
+                $0.summary = "Repository recloned. Waiting for branch check."
+                $0.lastLog = tailLines(from: result.output, limit: 120)
+                $0.lastError = nil
+                $0.lastSeenSHA = nil
+                $0.lastBuiltSHA = nil
+            }
+
+            triggerManualPoll(for: repositoryID)
+        } catch {
+            updateState(for: repositoryID) {
+                $0.activity = .idle
+                $0.buildStartedAt = nil
+                $0.buildPhase = .idle
+                $0.buildDetail = nil
+                $0.summary = "Reclone failed"
+                $0.lastError = error.localizedDescription
+            }
+            throw error
+        }
     }
 
     private func normalizeConfiguration() {
@@ -1756,6 +1840,54 @@ final class AppState: ObservableObject {
 
     private func modificationDate(for url: URL) -> Date {
         (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+    }
+
+    private func validateSafeReclonePath(_ checkoutURL: URL) throws {
+        let path = checkoutURL.standardizedFileURL.path
+        let protectedPaths = Set([
+            "/",
+            NSHomeDirectory(),
+            (NSHomeDirectory() as NSString).expandingTildeInPath,
+            URL(fileURLWithPath: NSHomeDirectory()).deletingLastPathComponent().path,
+            URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Developer").path
+        ])
+
+        guard !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              checkoutURL.lastPathComponent.isEmpty == false,
+              checkoutURL.pathComponents.count > 3,
+              !protectedPaths.contains(path) else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 912,
+                userInfo: [NSLocalizedDescriptionKey: "Refusing to reclone an unsafe checkout path: \(path)"]
+            )
+        }
+    }
+
+    private func resolvedRemoteURL(for repository: RepositoryConfiguration, checkoutPath: String) throws -> String {
+        if FileManager.default.fileExists(atPath: checkoutPath + "/.git"),
+           let existing = try? commandRunner
+            .run("git -C \(shellSingleQuoted(checkoutPath)) remote get-url origin", currentDirectory: checkoutPath, environment: [:])
+            .output
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !existing.isEmpty {
+            return existing
+        }
+
+        guard !repository.owner.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !repository.repo.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 913,
+                userInfo: [NSLocalizedDescriptionKey: "Could not resolve the repository remote URL for recloning."]
+            )
+        }
+
+        return "https://github.com/\(repository.owner)/\(repository.repo).git"
+    }
+
+    private func shellSingleQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private func githubToken(for repository: RepositoryConfiguration) -> String? {

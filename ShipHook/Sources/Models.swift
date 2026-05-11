@@ -159,6 +159,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
     var shell: ShellBuildConfiguration?
     var publishCommand: String
     var releaseNotesPath: String?
+    var preferExistingReleaseNotesFile: Bool
     var githubTokenEnvVar: String?
     var environment: [String: String]
     var versionStrategy: VersionStrategy
@@ -192,6 +193,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
         case shell
         case publishCommand
         case releaseNotesPath
+        case preferExistingReleaseNotesFile
         case githubTokenEnvVar
         case environment
         case versionStrategy
@@ -215,6 +217,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
         shell: ShellBuildConfiguration?,
         publishCommand: String,
         releaseNotesPath: String?,
+        preferExistingReleaseNotesFile: Bool,
         githubTokenEnvVar: String?,
         environment: [String: String],
         versionStrategy: VersionStrategy,
@@ -236,6 +239,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
         self.shell = shell
         self.publishCommand = publishCommand
         self.releaseNotesPath = releaseNotesPath
+        self.preferExistingReleaseNotesFile = preferExistingReleaseNotesFile
         self.githubTokenEnvVar = githubTokenEnvVar
         self.environment = environment
         self.versionStrategy = versionStrategy
@@ -260,6 +264,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
         shell = try container.decodeIfPresent(ShellBuildConfiguration.self, forKey: .shell)
         publishCommand = try container.decodeIfPresent(String.self, forKey: .publishCommand) ?? ""
         releaseNotesPath = try container.decodeIfPresent(String.self, forKey: .releaseNotesPath)
+        preferExistingReleaseNotesFile = try container.decodeIfPresent(Bool.self, forKey: .preferExistingReleaseNotesFile) ?? false
         githubTokenEnvVar = try container.decodeIfPresent(String.self, forKey: .githubTokenEnvVar)
         environment = try container.decodeIfPresent([String: String].self, forKey: .environment) ?? [:]
         versionStrategy = try container.decodeIfPresent(VersionStrategy.self, forKey: .versionStrategy) ?? .shortSHATimestamp
@@ -284,6 +289,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
             shell: .default,
             publishCommand: "bash \"$SHIPHOOK_BUNDLED_PUBLISH_SCRIPT\" --version \"$SHIPHOOK_VERSION\" --artifact \"$SHIPHOOK_ARTIFACT_PATH\" --app-name \"YourApp\" --repo-owner \"$SHIPHOOK_GITHUB_OWNER\" --repo-name \"$SHIPHOOK_GITHUB_REPO\" --channel \"$SHIPHOOK_RELEASE_CHANNEL\" --docs-dir \"$SHIPHOOK_LOCAL_CHECKOUT_PATH/docs\" --releases-dir \"$SHIPHOOK_LOCAL_CHECKOUT_PATH/release-artifacts\" --working-dir \"$SHIPHOOK_LOCAL_CHECKOUT_PATH\"",
             releaseNotesPath: nil,
+            preferExistingReleaseNotesFile: false,
             githubTokenEnvVar: nil,
             environment: [:],
             versionStrategy: .shortSHATimestamp,

@@ -165,6 +165,7 @@ enum WebDashboardCommand: Codable {
     case removeRepository(String)
     case pollAll
     case pollRepository(String)
+    case recloneRepository(String)
     case setRepositoryEnabled(repositoryID: String, enabled: Bool)
     case resetBuildState(String)
     case refreshReleases(String)
@@ -193,6 +194,7 @@ enum WebDashboardCommand: Codable {
         case removeRepository
         case pollAll
         case pollRepository
+        case recloneRepository
         case setRepositoryEnabled
         case resetBuildState
         case refreshReleases
@@ -223,6 +225,8 @@ enum WebDashboardCommand: Codable {
             self = .pollAll
         case .pollRepository:
             self = .pollRepository(try container.decode(String.self, forKey: .repositoryID))
+        case .recloneRepository:
+            self = .recloneRepository(try container.decode(String.self, forKey: .repositoryID))
         case .setRepositoryEnabled:
             self = .setRepositoryEnabled(
                 repositoryID: try container.decode(String.self, forKey: .repositoryID),
@@ -272,6 +276,9 @@ enum WebDashboardCommand: Codable {
         case let .pollRepository(repositoryID):
             try container.encode(CommandType.pollRepository, forKey: .type)
             try container.encode(repositoryID, forKey: .repositoryID)
+        case let .recloneRepository(repositoryID):
+            try container.encode(CommandType.recloneRepository, forKey: .type)
+            try container.encode(repositoryID, forKey: .repositoryID)
         case let .setRepositoryEnabled(repositoryID, enabled):
             try container.encode(CommandType.setRepositoryEnabled, forKey: .type)
             try container.encode(repositoryID, forKey: .repositoryID)
@@ -309,6 +316,36 @@ struct WebDashboardCommandResponse: Codable {
 private struct WebDashboardErrorResponse: Encodable {
     var ok: Bool
     var error: String
+}
+
+private struct WebDashboardSecurityStateResponse: Codable {
+    struct Admin: Codable {
+        var username: String
+        var mustChangePassword: Bool
+        var createdAt: Date
+        var isCurrentUser: Bool
+    }
+
+    struct Passkey: Codable {
+        var username: String
+        var name: String
+        var addedAt: Date
+    }
+
+    struct AuditEntry: Codable {
+        var id: String
+        var occurredAt: Date
+        var username: String?
+        var action: String
+        var detail: String?
+        var remoteAddress: String?
+    }
+
+    var ok: Bool
+    var currentUsername: String
+    var admins: [Admin]
+    var passkeys: [Passkey]
+    var auditEntries: [AuditEntry]
 }
 
 final class WebDashboardServer {
@@ -429,6 +466,13 @@ final class WebDashboardServer {
                 return .internalServerError
             }
             return self.handleLogout(request: request)
+        }
+
+        server["/api/auth/security-state"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleSecurityState(request: request)
         }
 
         server.POST["/api/auth/change-password"] = { [weak self] request in
@@ -696,6 +740,17 @@ final class WebDashboardServer {
         return jsonResponse(for: WebDashboardAuthMessageResponse(ok: true, message: "Signed out."), request: request)
     }
 
+    private func handleSecurityState(request: HttpRequest) -> HttpResponse {
+        do {
+            let response = try securityController.securityState(request: request)
+            return jsonResponse(for: response, request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
     private func handlePasswordChange(request: HttpRequest) -> HttpResponse {
         do {
             let payload = try decodePasswordChangeRequest(from: request)
@@ -841,6 +896,8 @@ final class WebDashboardServer {
             return ("dashboard.poll.all", nil)
         case let .pollRepository(repositoryID):
             return ("dashboard.poll.repository", repositoryID)
+        case let .recloneRepository(repositoryID):
+            return ("dashboard.repository.recloned", repositoryID)
         case let .setRepositoryEnabled(repositoryID, enabled):
             return (enabled ? "dashboard.repository.resumed" : "dashboard.repository.paused", repositoryID)
         case let .resetBuildState(repositoryID):
@@ -1544,6 +1601,7 @@ final class WebDashboardServer {
       border-radius: 24px;
       padding: 22px;
       background: rgba(16, 20, 28, 0.9);
+      min-width: 0;
     }
     .panel + .panel { margin-top: 18px; }
     .workspace {
@@ -1796,7 +1854,10 @@ final class WebDashboardServer {
       padding: 12px;
       font: 12px/1.45 var(--font-mono);
       white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
       color: var(--text);
+      min-width: 0;
     }
     .avatar-row {
       display: flex;
@@ -1834,6 +1895,7 @@ final class WebDashboardServer {
       border-radius: 24px;
       padding: 20px;
       background: rgba(14, 18, 26, 0.94);
+      min-width: 0;
     }
     .editor-section h3 {
       color: var(--accent-3);
@@ -1938,6 +2000,10 @@ final class WebDashboardServer {
       box-shadow: 0 28px 70px rgba(0,0,0,0.44);
       padding: 22px;
     }
+    .modal-card.settings-modal {
+      width: min(1180px, 100%);
+      padding: 20px 20px 22px;
+    }
     .modal-title {
       display: flex;
       align-items: center;
@@ -1950,6 +2016,169 @@ final class WebDashboardServer {
       font: 600 30px/1 var(--font-display);
       color: var(--text);
       letter-spacing: -0.03em;
+    }
+    .settings-shell {
+      display: grid;
+      gap: 18px;
+    }
+    .settings-tabs {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      padding: 6px;
+      border-radius: 22px;
+      background: rgba(10, 13, 18, 0.78);
+      border: 1px solid rgba(255,255,255,0.07);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+    }
+    .settings-tab {
+      display: grid;
+      justify-items: center;
+      gap: 8px;
+      padding: 14px 12px 12px;
+      border-radius: 16px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      text-align: center;
+      font: 600 13px/1.1 var(--font-body);
+    }
+    .settings-tab .icon {
+      width: 18px;
+      height: 18px;
+    }
+    .settings-tab.active {
+      color: var(--text);
+      border-color: rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.09);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+    }
+    .settings-pane-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+      gap: 16px;
+      align-items: start;
+    }
+    .settings-pane-grid.single {
+      grid-template-columns: 1fr;
+    }
+    .settings-stack {
+      display: grid;
+      gap: 16px;
+    }
+    .settings-card {
+      border-radius: 22px;
+      padding: 20px;
+      background: rgba(14, 18, 26, 0.92);
+      border: 1px solid rgba(255,255,255,0.06);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+    }
+    .settings-card .section-title {
+      margin-bottom: 16px;
+    }
+    .settings-card .toolbar {
+      margin-top: 16px;
+    }
+    .settings-note {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .security-list {
+      display: grid;
+      gap: 10px;
+    }
+    .security-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 12px 14px;
+      border-radius: 16px;
+      background: rgba(255,255,255,0.035);
+      border: 1px solid rgba(255,255,255,0.06);
+      min-width: 0;
+    }
+    .security-row.compact {
+      align-items: flex-start;
+    }
+    .security-row-main {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+    .security-row-main strong {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .security-row-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+      flex: none;
+    }
+    .audit-card {
+      max-height: min(680px, calc(100vh - 260px));
+      overflow: auto;
+    }
+    .audit-list {
+      display: grid;
+      gap: 9px;
+    }
+    .audit-row {
+      display: grid;
+      grid-template-columns: 30px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      padding: 10px 12px;
+      border-radius: 15px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.055);
+    }
+    .audit-icon {
+      width: 30px;
+      height: 30px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.05);
+      color: var(--muted);
+    }
+    .audit-copy {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+    .audit-line {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      min-width: 0;
+    }
+    .audit-line strong {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .invite-card {
+      display: grid;
+      gap: 5px;
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-radius: 16px;
+      background: rgba(77,184,255,0.08);
+      border: 1px solid rgba(77,184,255,0.20);
+      word-break: break-word;
+    }
+    .invite-card a {
+      color: var(--accent-2);
+      text-decoration: none;
     }
     .dim { opacity: 0.68; }
     .empty {
@@ -2068,7 +2297,17 @@ final class WebDashboardServer {
         border-color: rgba(33,49,76,0.10);
         box-shadow: inset 0 1px 0 rgba(255,255,255,0.70);
       }
+      .settings-tabs {
+        background: rgba(255,255,255,0.72);
+        border-color: rgba(33,49,76,0.10);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.78);
+      }
       .tab.active {
+        border-color: rgba(33,49,76,0.10);
+        background: rgba(24,34,51,0.06);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.78);
+      }
+      .settings-tab.active {
         border-color: rgba(33,49,76,0.10);
         background: rgba(24,34,51,0.06);
         box-shadow: inset 0 1px 0 rgba(255,255,255,0.78);
@@ -2081,8 +2320,18 @@ final class WebDashboardServer {
       }
       .panel,
       .editor-section,
-      .stack {
+      .stack,
+      .settings-card,
+      .security-row,
+      .audit-row {
         background: rgba(255,255,255,0.80);
+      }
+      .audit-icon {
+        background: rgba(24,34,51,0.05);
+      }
+      .invite-card {
+        background: rgba(34,123,189,0.08);
+        border-color: rgba(34,123,189,0.18);
       }
       .progress {
         background: rgba(24,34,51,0.08);
@@ -2131,6 +2380,9 @@ final class WebDashboardServer {
     }
     @media (max-width: 1440px) {
       .main-grid { grid-template-columns: 344px minmax(0, 1fr); }
+      .settings-pane-grid {
+        grid-template-columns: 1fr;
+      }
     }
     @media (max-width: 1040px) {
       .masthead, .grid.two, .grid.three, .field-grid, .summary-grid, .hero-stats { grid-template-columns: 1fr; }
@@ -2138,6 +2390,7 @@ final class WebDashboardServer {
       .shell { height: auto; overflow: visible; }
       .main-grid { display: block; height: auto; }
       .workspace { overflow: visible; }
+      .settings-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .workspace-sticky {
         position: sticky;
         top: 12px;
@@ -2281,6 +2534,11 @@ final class WebDashboardServer {
       },
       addRepoWizardOpen: false,
       settingsModalOpen: false,
+      settingsPane: 'general',
+      securityState: null,
+      securityLoading: false,
+      securityStatus: '',
+      securityInviteLink: null,
       explorerModal: null,
       mobileSidebarOpen: false,
       addRepoInspectionPreview: null,
@@ -2327,6 +2585,7 @@ final class WebDashboardServer {
       },
       publishCommand: '',
       releaseNotesPath: '',
+      preferExistingReleaseNotesFile: false,
       githubTokenEnvVar: '',
       environment: {},
       versionStrategy: 'shortSHATimestamp',
@@ -2364,6 +2623,12 @@ final class WebDashboardServer {
       selectedScheme: ''
     };
 
+    const securityDraft = {
+      currentPassword: '',
+      newPassword: '',
+      inviteUsername: ''
+    };
+
     async function fetchState({ preserveDraft = true, clearStatus = true } = {}) {
       const response = await fetch('/api/state');
       if (response.status === 401) {
@@ -2374,6 +2639,24 @@ final class WebDashboardServer {
       applySnapshot(snapshot, { preserveDraft });
       if (clearStatus) {
         setStatus(null);
+      }
+    }
+
+    async function fetchSecurityState() {
+      state.securityLoading = true;
+      try {
+        const response = await fetch('/api/auth/security-state');
+        if (response.status === 401) {
+          window.location.href = '/';
+          return;
+        }
+        const payload = await response.json();
+        if (!response.ok || payload.ok === false) {
+          throw new Error(payload.error || 'Could not load account security.');
+        }
+        state.securityState = payload;
+      } finally {
+        state.securityLoading = false;
       }
     }
 
@@ -2504,11 +2787,20 @@ final class WebDashboardServer {
       wireActionButtons();
     }
 
-    function openSettingsModal() {
+    function openSettingsModal(pane = null) {
       state.settingsModalOpen = true;
+      state.settingsPane = pane || state.settingsPane || 'general';
       state.addRepoWizardOpen = false;
       state.explorerModal = null;
       render();
+      if (state.settingsPane === 'account' && !state.securityState && !state.securityLoading) {
+        fetchSecurityState()
+          .then(renderModal)
+          .catch(error => {
+            state.securityStatus = error.message || String(error);
+            renderModal();
+          });
+      }
     }
 
     function openExplorerModal(kind) {
@@ -2531,7 +2823,7 @@ final class WebDashboardServer {
       if (securityButton) {
         securityButton.onclick = event => {
           event.preventDefault();
-          window.location.href = '/security';
+          openSettingsModal('account');
         };
       }
 
@@ -2671,6 +2963,7 @@ final class WebDashboardServer {
         </div>
         <div class="repo-subhead-actions">
           <button class="button secondary" data-action="poll-repo" data-repo-id="${repo.id}">${icon('refresh')}<span>Check Now</span></button>
+          <button class="button" data-action="reclone-repo" data-repo-id="${repo.id}">${icon('repo-refresh')}<span>Reclone</span></button>
           <button class="button" data-action="set-repo-enabled" data-repo-id="${repo.id}" data-enabled="${repo.configuration.isEnabled ? 'false' : 'true'}" title="${repo.configuration.isEnabled ? 'Pause repository' : 'Resume repository'}">${icon(repo.configuration.isEnabled ? 'pause' : 'play')}</button>
         </div>
       `;
@@ -2681,7 +2974,7 @@ final class WebDashboardServer {
       if (state.settingsModalOpen) {
         node.innerHTML = `
           <div class="modal-backdrop">
-            <div class="modal-card">
+            <div class="modal-card settings-modal">
               <div class="modal-title">
                 <h2>ShipHook Settings</h2>
                 <button class="button" data-action="close-settings">${icon('close')}<span>Close</span></button>
@@ -2837,62 +3130,262 @@ final class WebDashboardServer {
         ? snapshot.global.availableNotarizationProfiles.map(profile => `<span class="badge">${escapeHtml(profile)}</span>`).join('')
         : '<span class="tiny">No notarization profiles stored yet.</span>';
 
-      return `
-        <div class="grid two">
-          <div class="card">
-            <div class="field-grid">
-              ${textInput('Poll Interval (Seconds)', 'global.pollIntervalSeconds', config.pollIntervalSeconds, 'number')}
-              ${textInput('GitHub Token Env Var', 'global.githubTokenEnvVar', config.githubTokenEnvVar)}
-              ${textInput('Builds To Keep', 'global.generatedDataRetentionCount', config.generatedDataRetentionCount, 'number')}
-              ${textInput('Auto Pause After Fails', 'global.autoPauseFailureCount', config.autoPauseFailureCount, 'number')}
-              ${textInput('GitHub Token', 'global.githubToken', config.githubToken, 'password')}
+      const tabs = [
+        settingsTabButton('general', 'sliders', 'General'),
+        settingsTabButton('automation', 'activity', 'Automation'),
+        settingsTabButton('account', 'user', 'Account'),
+        settingsTabButton('signing', 'shield', 'Signing'),
+        settingsTabButton('files', 'folder', 'Files')
+      ].join('');
+
+      const panes = {
+        general: `
+          <div class="settings-pane-grid">
+            <div class="settings-card">
+              ${sectionTitle('sliders', 'General', 'h2')}
+              <div class="field-grid">
+                ${textInput('Poll Interval (Seconds)', 'global.pollIntervalSeconds', config.pollIntervalSeconds, 'number')}
+                ${textInput('GitHub Token Env Var', 'global.githubTokenEnvVar', config.githubTokenEnvVar)}
+                ${textInput('Builds To Keep', 'global.generatedDataRetentionCount', config.generatedDataRetentionCount, 'number')}
+                ${textInput('Auto Pause After Fails', 'global.autoPauseFailureCount', config.autoPauseFailureCount, 'number')}
+                ${textInput('GitHub Token', 'global.githubToken', config.githubToken, 'password')}
+              </div>
+              <p class="settings-note">GitHub token is optional for public repositories, recommended for rate limits, and required for private repositories. ShipHook stores the configured token in your local config file.</p>
+              <div class="toolbar">
+                <button class="button primary" data-action="save">${icon('save')}<span>Save Configuration</span></button>
+                <button class="button" data-action="reload">${icon('refresh')}<span>Reload From Disk</span></button>
+              </div>
             </div>
-            <div class="field-grid" style="margin-top: 12px;">
-              <label class="field toggle">
-                <input type="checkbox" ${snapshot.global.launchesAtLogin ? 'checked' : ''} data-launch-toggle>
-                <span>Launch ShipHook at login</span>
-              </label>
-            </div>
-            <div class="link-row tiny">
-              <span>${escapeHtml(snapshot.global.launchAtLoginStatusMessage || 'Use Account & Security to manage dashboard sign-in and passkeys.')}</span>
-              <a href="/security">Account &amp; Security</a>
-            </div>
-            <div class="toolbar">
-              <button class="button primary" data-action="save">${icon('save')}<span>Save Configuration</span></button>
-              <button class="button" data-action="reload">${icon('refresh')}<span>Reload From Disk</span></button>
+            <div class="settings-stack">
+              <div class="settings-card">
+                ${sectionTitle('overview', 'Config File')}
+                <div class="summary-list">
+                  <div class="summary-row">
+                    <div class="summary-row-label">Location</div>
+                    <div class="summary-row-value">${escapeHtml(snapshot.global.configPath || 'Unknown')}</div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
-          <div class="card">
-            <div class="tiny">Signing readiness</div>
-            <strong>${escapeHtml(snapshot.global.signingDiagnosticsSummary || 'Refresh identities to inspect this Mac.')}</strong>
-            <p>${escapeHtml(snapshot.global.lastSigningIdentityError || '')}</p>
-            <div class="badges">${identitySummary}</div>
-            <div class="link-row">
-              <button class="button secondary" data-action="refresh-signing">${icon('shield')}<span>Refresh Signing Identities</span></button>
+        `,
+        account: renderAccountSecurityPane(),
+        automation: `
+          <div class="settings-pane-grid">
+            <div class="settings-card">
+              ${sectionTitle('activity', 'Automation', 'h2')}
+              <div class="field-grid single">
+                <label class="field toggle">
+                  <input type="checkbox" ${snapshot.global.launchesAtLogin ? 'checked' : ''} data-launch-toggle>
+                  <span>Launch ShipHook at login</span>
+                </label>
+                <label class="field toggle">
+                  <input type="checkbox" data-field="global.webDashboardEnabled" ${config.webDashboardEnabled ? 'checked' : ''}>
+                  <span>Serve the local web dashboard</span>
+                </label>
+              </div>
+              <div class="field-grid" style="margin-top: 12px;">
+                ${textInput('Web Dashboard Port', 'global.webDashboardPort', config.webDashboardPort, 'number')}
+                ${readOnlyInput('Current URL', snapshot.global.webDashboardURLString || 'Not running')}
+              </div>
+              <p class="settings-note">${escapeHtml(snapshot.global.launchAtLoginStatusMessage || snapshot.global.webDashboardStatusMessage || 'Automation settings are applied locally on this Mac.')}</p>
             </div>
-            ${snapshot.global.signingDiagnosticsDetails.length ? `<p class="tiny">${snapshot.global.signingDiagnosticsDetails.map(escapeHtml).join('<br>')}</p>` : ''}
+            <div class="settings-stack">
+              <div class="settings-card">
+                ${sectionTitle('globe', 'Dashboard Status')}
+                <div class="summary-list">
+                  <div class="summary-row">
+                    <div class="summary-row-label">Local Dashboard</div>
+                    <div class="summary-row-value">${escapeHtml(snapshot.global.webDashboardStatusMessage || 'Unknown')}</div>
+                  </div>
+                  <div class="summary-row">
+                    <div class="summary-row-label">Open</div>
+                    <div class="summary-row-value">${escapeHtml(snapshot.global.webDashboardURLString || 'Not running')}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        `,
+        signing: `
+          <div class="settings-pane-grid">
+            <div class="settings-card">
+              ${sectionTitle('shield', 'Signing Readiness', 'h2')}
+              <div class="summary-list">
+                <div class="summary-row">
+                  <div class="summary-row-label">Summary</div>
+                  <div class="summary-row-value">${escapeHtml(snapshot.global.signingDiagnosticsSummary || 'Refresh identities to inspect this Mac.')}</div>
+                </div>
+                ${snapshot.global.lastSigningIdentityError ? `
+                  <div class="summary-row">
+                    <div class="summary-row-label">Last Error</div>
+                    <div class="summary-row-value">${escapeHtml(snapshot.global.lastSigningIdentityError)}</div>
+                  </div>
+                ` : ''}
+              </div>
+              <div class="badges" style="margin-top: 16px;">${identitySummary}</div>
+              <div class="toolbar">
+                <button class="button secondary" data-action="refresh-signing">${icon('shield')}<span>Refresh Signing Identities</span></button>
+              </div>
+              ${snapshot.global.signingDiagnosticsDetails.length ? `<p class="settings-note">${snapshot.global.signingDiagnosticsDetails.map(escapeHtml).join('<br>')}</p>` : ''}
+            </div>
+            <div class="settings-stack">
+              <div class="settings-card">
+                ${sectionTitle('key', 'Notarization Profiles')}
+                <div class="badges">${profileOptions}</div>
+              </div>
+              <div class="settings-card">
+                ${sectionTitle('key', 'Add Profile')}
+                <div class="field-grid">
+                  ${textInput('Profile Name', 'notary.profileName', notarizationDraft.profileName)}
+                  ${textInput('Apple ID', 'notary.appleID', notarizationDraft.appleID)}
+                  ${textInput('Team ID', 'notary.teamID', notarizationDraft.teamID)}
+                  ${textInput('App-Specific Password', 'notary.appSpecificPassword', notarizationDraft.appSpecificPassword, 'password')}
+                </div>
+                <div class="toolbar">
+                  <button class="button secondary" data-action="store-profile">${icon('key')}<span>Store Profile</span></button>
+                </div>
+              </div>
+            </div>
+          </div>
+        `,
+        files: `
+          <div class="settings-pane-grid single">
+            <div class="settings-card">
+              ${sectionTitle('folder', 'Files & Storage', 'h2')}
+              <div class="summary-list">
+                <div class="summary-row">
+                  <div class="summary-row-label">Configuration</div>
+                  <div class="summary-row-value">${escapeHtml(snapshot.global.configPath || 'Unknown')}</div>
+                </div>
+                <div class="summary-row">
+                  <div class="summary-row-label">Retention</div>
+                  <div class="summary-row-value">ShipHook currently keeps ${escapeHtml(String(config.generatedDataRetentionCount))} generated build artifacts per repository.</div>
+                </div>
+              </div>
+              <p class="settings-note">This mirrors the lighter utility-style panes in Safari settings: quick context on the left, details without crowding, and the core actions kept nearby.</p>
+            </div>
+          </div>
+        `
+      };
+
+      return `
+        <div class="settings-shell">
+          <div class="settings-tabs">${tabs}</div>
+          ${panes[state.settingsPane] || panes.general}
+        </div>
+      `;
+    }
+
+    function renderAccountSecurityPane() {
+      if (state.securityLoading && !state.securityState) {
+        return '<div class="settings-card"><div class="empty">Loading account security...</div></div>';
+      }
+
+      const security = state.securityState;
+      if (!security) {
+        return `
+          <div class="settings-pane-grid single">
+            <div class="settings-card">
+              ${sectionTitle('user', 'Account & Security', 'h2')}
+              <div class="empty">Account security has not loaded yet.</div>
+            </div>
+          </div>
+        `;
+      }
+
+      const adminRows = security.admins.map(admin => `
+        <div class="security-row">
+          <div class="security-row-main">
+            <strong>@${escapeHtml(admin.username)}</strong>
+            <span class="tiny">${admin.isCurrentUser ? 'Signed in' : (admin.mustChangePassword ? 'Password setup pending' : `Created ${formatDate(admin.createdAt)}`)}</span>
+          </div>
+          <div class="security-row-actions">
+            <button class="button" data-action="security-reset-admin" data-username="${escapeHtmlAttr(admin.username)}">${icon('key')}<span>Reset</span></button>
+            ${admin.isCurrentUser ? '' : `<button class="button warn" data-action="security-delete-admin" data-username="${escapeHtmlAttr(admin.username)}">${icon('trash')}<span>Delete</span></button>`}
           </div>
         </div>
+      `).join('');
 
-        <div class="grid two" style="margin-top: 12px;">
-          <div class="card">
-            <div class="tiny">Stored notarization profiles</div>
-            <div class="badges" style="margin-top: 10px;">${profileOptions}</div>
-          </div>
-          <div class="card">
-            <div class="tiny">Add notarization profile</div>
-            <div class="field-grid">
-              ${textInput('Profile Name', 'notary.profileName', notarizationDraft.profileName)}
-              ${textInput('Apple ID', 'notary.appleID', notarizationDraft.appleID)}
-              ${textInput('Team ID', 'notary.teamID', notarizationDraft.teamID)}
-              ${textInput('App-Specific Password', 'notary.appSpecificPassword', notarizationDraft.appSpecificPassword, 'password')}
+      const passkeyRows = security.passkeys.length
+        ? security.passkeys.map(passkey => `
+          <div class="security-row compact">
+            <div class="security-row-main">
+              <strong>${escapeHtml(passkey.name || 'Passkey')}</strong>
+              <span class="tiny">@${escapeHtml(passkey.username)} · ${escapeHtml(formatDate(passkey.addedAt))}</span>
             </div>
-            <div class="toolbar">
-              <button class="button secondary" data-action="store-profile">${icon('key')}<span>Store Profile</span></button>
+          </div>
+        `).join('')
+        : '<div class="empty">No passkeys registered yet.</div>';
+
+      const auditRows = security.auditEntries.length
+        ? security.auditEntries.map(entry => `
+          <div class="audit-row">
+            <div class="audit-icon">${icon(auditIcon(entry.action))}</div>
+            <div class="audit-copy">
+              <div class="audit-line">
+                <strong>${escapeHtml(formatAuditAction(entry.action))}</strong>
+                <span class="tiny">${escapeHtml(formatDate(entry.occurredAt))}</span>
+              </div>
+              <div class="tiny">${entry.username ? '@' + escapeHtml(entry.username) : 'Unknown user'}${entry.detail ? ' / ' + escapeHtml(entry.detail) : ''}${entry.remoteAddress ? ' / ' + escapeHtml(entry.remoteAddress) : ''}</div>
+            </div>
+          </div>
+        `).join('')
+        : '<div class="empty">No audit entries recorded yet.</div>';
+
+      const inviteLink = state.securityInviteLink
+        ? `<div class="invite-card"><strong>@${escapeHtml(state.securityInviteLink.username)}</strong><span class="tiny">${escapeHtml(state.securityInviteLink.label)}</span><a href="${escapeHtmlAttr(state.securityInviteLink.url)}">${escapeHtml(state.securityInviteLink.url)}</a></div>`
+        : '';
+
+      return `
+        <div class="settings-pane-grid">
+          <div class="settings-stack">
+            <div class="settings-card">
+              ${sectionTitle('user', 'Account & Security', 'h2')}
+              <div class="summary-list">
+                <div class="summary-row">
+                  <div class="summary-row-label">Signed In</div>
+                  <div class="summary-row-value">@${escapeHtml(security.currentUsername || 'Unknown')}</div>
+                </div>
+              </div>
+              <div class="field-grid" style="margin-top: 14px;">
+                ${textInput('Current Password', 'security.currentPassword', securityDraft.currentPassword, 'password')}
+                ${textInput('New Password', 'security.newPassword', securityDraft.newPassword, 'password')}
+              </div>
+              <div class="toolbar">
+                <button class="button primary" data-action="security-change-password">${icon('save')}<span>Change Password</span></button>
+                <button class="button" data-action="security-register-passkey">${icon('key')}<span>Add Passkey</span></button>
+              </div>
+              ${state.securityStatus ? `<p class="settings-note">${escapeHtml(state.securityStatus)}</p>` : ''}
+            </div>
+            <div class="settings-card">
+              ${sectionTitle('repo', 'Administrators')}
+              <div class="security-list">${adminRows || '<div class="empty">No administrators configured.</div>'}</div>
+              <div class="field-grid single" style="margin-top: 14px;">
+                ${textInput('New Administrator Username', 'security.inviteUsername', securityDraft.inviteUsername)}
+              </div>
+              <div class="toolbar">
+                <button class="button secondary" data-action="security-invite-admin">${icon('plus')}<span>Add Administrator</span></button>
+              </div>
+              ${inviteLink}
+            </div>
+          </div>
+          <div class="settings-stack">
+            <div class="settings-card">
+              ${sectionTitle('key', 'Passkeys')}
+              <div class="security-list">${passkeyRows}</div>
+            </div>
+            <div class="settings-card audit-card">
+              ${sectionTitle('history', 'Audit Log')}
+              <div class="audit-list">${auditRows}</div>
             </div>
           </div>
         </div>
       `;
+    }
+
+    function settingsTabButton(id, iconName, label) {
+      return `<button class="settings-tab ${state.settingsPane === id ? 'active' : ''}" data-action="set-settings-pane" data-settings-pane="${id}">${icon(iconName)}<span>${escapeHtml(label)}</span></button>`;
     }
 
     function renderStatusPane() {
@@ -3043,7 +3536,8 @@ final class WebDashboardServer {
       const sparkleSummary = summaryList([
         ['Appcast', draft.sparkle.appcastURL || 'Not set'],
         ['Skip Older Versions', draft.sparkle.skipIfVersionIsNotNewer ? 'Enabled' : 'Disabled'],
-        ['Auto Increment Build', draft.sparkle.autoIncrementBuild ? 'Enabled' : 'Disabled']
+        ['Auto Increment Build', draft.sparkle.autoIncrementBuild ? 'Enabled' : 'Disabled'],
+        ['Existing Release Notes', draft.preferExistingReleaseNotesFile ? 'Prefer Existing File' : 'Generate From Commits']
       ]);
 
       const webhookSummary = summaryList([
@@ -3119,6 +3613,7 @@ final class WebDashboardServer {
                   ${textInput('Beta Icon Path', 'repo.sparkle.betaIconPath', draft.sparkle.betaIconPath)}
                   ${toggleInput('Auto Increment Build', 'repo.sparkle.autoIncrementBuild', draft.sparkle.autoIncrementBuild)}
                   ${toggleInput('Skip If Version Not Newer', 'repo.sparkle.skipIfVersionIsNotNewer', draft.sparkle.skipIfVersionIsNotNewer)}
+                  ${toggleInput('Prefer Existing Versioned Release Notes File', 'repo.preferExistingReleaseNotesFile', draft.preferExistingReleaseNotesFile)}
                 </div>
               ` : sparkleSummary}
             </section>
@@ -3240,7 +3735,9 @@ final class WebDashboardServer {
     function icon(name) {
       const icons = {
         overview: '<svg viewBox="0 0 24 24"><path d="M4 5h7v6H4z"/><path d="M13 5h7v10h-7z"/><path d="M4 13h7v6H4z"/><path d="M13 17h7v2h-7z"/></svg>',
+        repos: '<svg viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v16H6.5A2.5 2.5 0 0 0 4 22z"/><path d="M8 8h8"/><path d="M8 12h8"/></svg>',
         repo: '<svg viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v16H6.5A2.5 2.5 0 0 0 4 22z"/><path d="M8 8h8"/><path d="M8 12h8"/></svg>',
+        'repo-refresh': '<svg viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v16H6.5A2.5 2.5 0 0 0 4 22z"/><path d="M8 8h6"/><path d="M8 12h5"/><path d="M16 9a3.5 3.5 0 1 1-1 6.86"/><path d="M16 7v2h-2"/></svg>',
         settings: '<svg viewBox="0 0 24 24"><path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/><circle cx="12" cy="12" r="4"/></svg>',
         user: '<svg viewBox="0 0 24 24"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/><path d="M4 20a8 8 0 0 1 16 0"/></svg>',
         gear: '<svg viewBox="0 0 24 24"><path d="M10.55 2.52h2.9l.43 2.14a7.92 7.92 0 0 1 1.72.71l1.87-1.14 2.05 2.05-1.14 1.87c.29.55.53 1.13.71 1.72l2.14.43v2.9l-2.14.43a7.92 7.92 0 0 1-.71 1.72l1.14 1.87-2.05 2.05-1.87-1.14a7.92 7.92 0 0 1-1.72.71l-.43 2.14h-2.9l-.43-2.14a7.92 7.92 0 0 1-1.72-.71l-1.87 1.14-2.05-2.05 1.14-1.87a7.92 7.92 0 0 1-.71-1.72L2.52 13.45v-2.9l2.14-.43c.18-.59.42-1.17.71-1.72L4.23 6.53l2.05-2.05 1.87 1.14c.55-.29 1.13-.53 1.72-.71zm1.45 6.23a3.25 3.25 0 1 0 0 6.5 3.25 3.25 0 0 0 0-6.5Z"/></svg>',
@@ -3256,6 +3753,7 @@ final class WebDashboardServer {
         history: '<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v5l3 2"/></svg>',
         terminal: '<svg viewBox="0 0 24 24"><path d="m5 7 4 5-4 5"/><path d="M12 17h7"/><rect x="3" y="4" width="18" height="16" rx="2"/></svg>',
         releases: '<svg viewBox="0 0 24 24"><path d="M6 8h12"/><path d="M6 12h12"/><path d="M6 16h8"/><path d="M4 5h16v14H4z"/></svg>',
+        folder: '<svg viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v8A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z"/></svg>',
         webhook: '<svg viewBox="0 0 24 24"><path d="M8 12a4 4 0 1 1 4 4"/><path d="M16 12a4 4 0 1 0-4 4"/><circle cx="8" cy="12" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="12" cy="16" r="2"/></svg>',
         hammer: '<svg viewBox="0 0 24 24"><path d="m14 6 4 4"/><path d="m11 9 4-4 4 4-4 4"/><path d="M5 21 13 13"/><path d="m4 20 2 2"/></svg>',
         sliders: '<svg viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="11" cy="18" r="2"/></svg>',
@@ -3345,6 +3843,139 @@ final class WebDashboardServer {
       return Number.isFinite(parsed) ? parsed : fallback;
     }
 
+    async function securityRequest(url, payload, successMessage) {
+      state.securityStatus = '';
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (response.status === 401) {
+        window.location.href = '/';
+        return null;
+      }
+      const result = await response.json();
+      if (!response.ok || result.ok === false) {
+        throw new Error(result.error || 'Security request failed.');
+      }
+      state.securityStatus = result.message || successMessage || 'Updated.';
+      await fetchSecurityState();
+      renderModal();
+      return result;
+    }
+
+    async function inviteAdminFromSettings() {
+      const result = await securityRequest('/api/auth/admins/invite', {
+        username: securityDraft.inviteUsername
+      }, 'Administrator invite created.');
+      if (result?.loginURL) {
+        state.securityInviteLink = {
+          username: result.username,
+          url: result.loginURL,
+          label: 'Password setup link'
+        };
+      }
+      securityDraft.inviteUsername = '';
+      renderModal();
+    }
+
+    async function resetAdminFromSettings(username) {
+      const result = await securityRequest('/api/auth/admins/reset', { username }, 'Password reset link created.');
+      if (result?.loginURL) {
+        state.securityInviteLink = {
+          username: result.username,
+          url: result.loginURL,
+          label: 'Password reset link'
+        };
+      }
+      renderModal();
+    }
+
+    async function registerPasskeyFromDashboard() {
+      if (!window.PublicKeyCredential || !navigator.credentials?.create) {
+        throw new Error('This browser does not support passkey creation.');
+      }
+      state.securityStatus = '';
+      const beginResponse = await fetch('/api/auth/passkeys/register/begin', { method: 'POST' });
+      if (beginResponse.status === 401) {
+        window.location.href = '/';
+        return;
+      }
+      const beginPayload = await beginResponse.json();
+      if (!beginResponse.ok || beginPayload.ok === false) {
+        throw new Error(beginPayload.error || 'Passkey setup failed.');
+      }
+      const credential = await navigator.credentials.create({
+        publicKey: {
+          challenge: base64URLToBuffer(beginPayload.challenge),
+          rp: { id: beginPayload.rpID, name: beginPayload.rpName },
+          user: {
+            id: base64URLToBuffer(beginPayload.userID),
+            name: beginPayload.userName,
+            displayName: beginPayload.userDisplayName
+          },
+          pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+          timeout: beginPayload.timeoutMilliseconds,
+          attestation: 'none',
+          authenticatorSelection: {
+            residentKey: 'preferred',
+            userVerification: 'required'
+          },
+          excludeCredentials: beginPayload.excludeCredentialIDs.map(id => ({ id: base64URLToBuffer(id), type: 'public-key' }))
+        }
+      });
+      const finishResponse = await fetch('/api/auth/passkeys/register/finish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          challengeID: beginPayload.challengeID,
+          name: '',
+          credentialID: bufferToBase64URL(credential.rawId),
+          clientDataJSON: bufferToBase64URL(credential.response.clientDataJSON),
+          attestationObject: bufferToBase64URL(credential.response.attestationObject)
+        })
+      });
+      const finishPayload = await finishResponse.json();
+      if (!finishResponse.ok || finishPayload.ok === false) {
+        throw new Error(finishPayload.error || 'Passkey setup failed.');
+      }
+      state.securityStatus = finishPayload.message || 'Passkey added.';
+      await fetchSecurityState();
+      renderModal();
+    }
+
+    function formatAuditAction(action) {
+      return String(action || '')
+        .split('.')
+        .filter(Boolean)
+        .map(part => part.replaceAll('_', ' '))
+        .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' / ');
+    }
+
+    function auditIcon(action) {
+      if (action.includes('passkey') || action.includes('password')) return 'key';
+      if (action.includes('admin')) return 'user';
+      if (action.includes('reclone') || action.includes('repository')) return 'repo';
+      if (action.includes('release')) return 'releases';
+      if (action.includes('poll')) return 'refresh';
+      if (action.includes('signing')) return 'shield';
+      return 'history';
+    }
+
+    function base64URLToBuffer(value) {
+      const base64 = value.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((value.length + 3) % 4);
+      const binary = atob(base64);
+      return Uint8Array.from(binary, char => char.charCodeAt(0));
+    }
+
+    function bufferToBase64URL(buffer) {
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      bytes.forEach(byte => binary += String.fromCharCode(byte));
+      return btoa(binary).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/g, '');
+    }
+
     function buildPayloadConfig() {
       const config = structuredClone(state.draftConfig);
       config.pollIntervalSeconds = coerceNumber(config.pollIntervalSeconds, globalDefaults.pollIntervalSeconds);
@@ -3403,6 +4034,14 @@ final class WebDashboardServer {
             break;
           case 'open-settings':
             openSettingsModal();
+            break;
+          case 'set-settings-pane':
+            state.settingsPane = target.dataset.settingsPane || 'general';
+            renderModal();
+            if (state.settingsPane === 'account' && !state.securityState && !state.securityLoading) {
+              await fetchSecurityState();
+              renderModal();
+            }
             break;
           case 'close-settings':
             state.settingsModalOpen = false;
@@ -3470,6 +4109,11 @@ final class WebDashboardServer {
           case 'poll-repo':
             await runCommand({ type: 'pollRepository', repositoryID: target.dataset.repoId }, 'Polling repository.');
             break;
+          case 'reclone-repo':
+            if (window.confirm('Reclone this repository locally? ShipHook will delete the current checkout folder and clone it again.')) {
+              await runCommand({ type: 'recloneRepository', repositoryID: target.dataset.repoId }, 'Repository recloned.');
+            }
+            break;
           case 'set-repo-enabled':
             await runCommand({
               type: 'setRepositoryEnabled',
@@ -3511,9 +4155,35 @@ final class WebDashboardServer {
             notarizationDraft.appSpecificPassword = '';
             render();
             break;
+          case 'security-change-password':
+            await securityRequest('/api/auth/change-password', {
+              currentPassword: securityDraft.currentPassword,
+              newPassword: securityDraft.newPassword
+            }, 'Password updated.');
+            securityDraft.currentPassword = '';
+            securityDraft.newPassword = '';
+            break;
+          case 'security-register-passkey':
+            await registerPasskeyFromDashboard();
+            break;
+          case 'security-invite-admin':
+            await inviteAdminFromSettings();
+            break;
+          case 'security-reset-admin':
+            await resetAdminFromSettings(target.dataset.username);
+            break;
+          case 'security-delete-admin':
+            if (window.confirm(`Delete administrator @${target.dataset.username}?`)) {
+              await securityRequest('/api/auth/admins/delete', { username: target.dataset.username }, 'Administrator removed.');
+            }
+            break;
         }
       } catch (error) {
         setStatus({ kind: 'error', message: error.message || String(error) });
+        if (state.settingsModalOpen && state.settingsPane === 'account') {
+          state.securityStatus = error.message || String(error);
+          renderModal();
+        }
       }
     });
 
@@ -3544,6 +4214,9 @@ final class WebDashboardServer {
         updateByPath(notarizationDraft, field.replace('notary.', ''), value);
       } else if (field.startsWith('addRepo.')) {
         updateByPath(addRepoDraft, field.replace('addRepo.', ''), value);
+      } else if (field.startsWith('security.')) {
+        updateByPath(securityDraft, field.replace('security.', ''), value);
+        return;
       }
 
       renderOverview();
@@ -4012,6 +4685,56 @@ private final class WebDashboardSecurityController {
                 action: action,
                 detail: detail,
                 request: request
+            )
+        }
+    }
+
+    func securityState(request: HttpRequest) throws -> WebDashboardSecurityStateResponse {
+        guard isAuthorized(request: request) else {
+            throw SecurityError.unauthorized
+        }
+        return queue.sync {
+            let currentUsername = currentUsernameUnlocked(request: request) ?? ""
+            let admins = settings.admins
+                .sorted { $0.username.localizedCaseInsensitiveCompare($1.username) == .orderedAscending }
+                .map { admin in
+                    WebDashboardSecurityStateResponse.Admin(
+                        username: admin.username,
+                        mustChangePassword: admin.mustChangePassword,
+                        createdAt: admin.createdAt,
+                        isCurrentUser: admin.username.caseInsensitiveCompare(currentUsername) == .orderedSame
+                    )
+                }
+            let passkeys = settings.passkeys
+                .sorted {
+                    if $0.username.caseInsensitiveCompare($1.username) == .orderedSame {
+                        return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+                    }
+                    return $0.username.localizedCaseInsensitiveCompare($1.username) == .orderedAscending
+                }
+                .map { passkey in
+                    WebDashboardSecurityStateResponse.Passkey(
+                        username: passkey.username,
+                        name: passkey.name,
+                        addedAt: passkey.addedAt
+                    )
+                }
+            let audit = Array(auditEntries.prefix(120)).map { entry in
+                WebDashboardSecurityStateResponse.AuditEntry(
+                    id: entry.id,
+                    occurredAt: entry.occurredAt,
+                    username: entry.username,
+                    action: entry.action,
+                    detail: entry.detail,
+                    remoteAddress: entry.remoteAddress
+                )
+            }
+            return WebDashboardSecurityStateResponse(
+                ok: true,
+                currentUsername: currentUsername,
+                admins: admins,
+                passkeys: passkeys,
+                auditEntries: audit
             )
         }
     }
