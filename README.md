@@ -4,7 +4,14 @@
 
 ShipHook is a macOS app used to automate signing & deployment of other macOS apps. ShipHook monitors GitHub repositories and then builds, signs & notarises apps. Once notarised, ShipHook utilises the Sparkle framework to push app updates via appcast.xml hosted on GitHub pages. The main use case for ShipHook is to replace the manual step of signing & building apps when multiple collaborators are working on a macOS app. This allows everyone to test, build, and collaborate via git, but only automate the last step when a build is ready for deployment.
 
+## Screenshots
+### App
 <img width="1232" height="884" alt="shpreview" src="https://github.com/user-attachments/assets/2c64a5ea-e7a7-4335-be06-0981b829daf6" />
+
+### webUI
+<img width="1575" height="1067" alt="login webui" src="https://github.com/user-attachments/assets/f6e5ff7e-2847-4327-9793-e81fe54751c7" />
+<img width="1575" height="1067" alt="main webui" src="https://github.com/user-attachments/assets/a072b6c4-3003-4cb3-8aaf-8a3dc709ed6b" />
+<img width="1575" height="1067" alt="settings webui" src="https://github.com/user-attachments/assets/e3d93365-fe44-4f0e-9b2a-56ef23b92648" />
 
 
 ## Project Layout
