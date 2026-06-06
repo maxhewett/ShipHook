@@ -510,7 +510,11 @@ final class AppState: ObservableObject {
     func handleWebDashboardCommand(_ command: WebDashboardCommand) -> WebDashboardCommandResponse {
         switch command {
         case let .saveConfiguration(configuration):
-            self.configuration = configuration
+            var nextConfiguration = configuration
+            if nextConfiguration.githubToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                nextConfiguration.githubToken = self.configuration.githubToken
+            }
+            self.configuration = nextConfiguration
             saveConfiguration()
             if let lastGlobalError {
                 return webDashboardResponse(error: lastGlobalError)
@@ -647,6 +651,10 @@ final class AppState: ObservableObject {
                 return webDashboardResponse(error: error.localizedDescription)
             }
 
+        case .restartAgent:
+            restartAgentFromWebDashboard()
+            return webDashboardResponse(message: "Restarting ShipHook. The dashboard will reconnect after the app relaunches.")
+
         case .refreshSigningIdentities:
             refreshSigningIdentities()
             if let lastSigningIdentityError {
@@ -665,6 +673,16 @@ final class AppState: ObservableObject {
                 return webDashboardResponse(message: "Notarization profile stored.")
             } catch {
                 return webDashboardResponse(error: error.localizedDescription)
+            }
+        }
+    }
+
+    private func restartAgentFromWebDashboard() {
+        let bundleURL = Bundle.main.bundleURL
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            let configuration = NSWorkspace.OpenConfiguration()
+            NSWorkspace.shared.openApplication(at: bundleURL, configuration: configuration) { _, _ in
+                NSApp.terminate(nil)
             }
         }
     }
@@ -1160,6 +1178,7 @@ final class AppState: ObservableObject {
                     $0.buildPhase = .queued
                     $0.buildDetail = nil
                     $0.summary = "Queued behind \(activeName)"
+                    $0.stageMessages = ["Queued behind \(activeName)"]
                     $0.lastSeenSHA = snapshot.sha
                     $0.lastCommitAuthorLogin = snapshot.authorLogin
                     $0.lastCommitAuthorAvatarURL = snapshot.authorAvatarURL
@@ -1181,8 +1200,11 @@ final class AppState: ObservableObject {
                 $0.buildPhase = .syncing
                 $0.buildDetail = nil
                 $0.summary = "Building commit \(snapshot.sha.prefix(7))"
+                $0.stageMessages = ["Preparing checkout for \(snapshot.sha.prefix(7))"]
                 $0.lastLogPath = "\((repository.localCheckoutPath as NSString).expandingTildeInPath)/.shiphook/logs/\(repository.id)-latest.log"
                 $0.lastLog = ""
+                $0.lastError = nil
+                $0.lastErrorSuggestions = []
                 $0.releaseChannel = releaseChannel
                 $0.lastCommitAuthorLogin = snapshot.authorLogin
                 $0.lastCommitAuthorAvatarURL = snapshot.authorAvatarURL
@@ -1246,6 +1268,8 @@ final class AppState: ObservableObject {
                     $0.lastLog = tailLines(from: outcome.log, limit: 120)
                     $0.lastLogPath = outcome.logPath
                     $0.lastError = nil
+                    $0.lastErrorSuggestions = []
+                    $0.stageMessages = ["Repository updated locally", outcome.summary]
                     $0.summary = outcome.summary
                     $0.releaseChannel = outcome.releaseChannel
                 }
@@ -1278,6 +1302,8 @@ final class AppState: ObservableObject {
                 $0.lastLog = tailLines(from: outcome.log, limit: 120)
                 $0.lastLogPath = outcome.logPath
                 $0.lastError = nil
+                $0.lastErrorSuggestions = []
+                $0.stageMessages = ["Release published successfully", outcome.summary]
                 $0.summary = outcome.summary
                 $0.releaseChannel = outcome.releaseChannel
             }
@@ -1315,16 +1341,24 @@ final class AppState: ObservableObject {
             switch stage {
             case let .syncing(message):
                 $0.buildPhase = .syncing
-                $0.buildDetail = nil
+                $0.buildDetail = message
                 $0.summary = stageSummary(for: .syncing, sha: sha, detail: message, repositoryID: repositoryID)
             case .planningRelease:
                 $0.buildPhase = .planningRelease
                 $0.buildDetail = nil
                 $0.summary = stageSummary(for: .planningRelease, sha: sha, detail: nil, repositoryID: repositoryID)
+            case .building:
+                $0.buildPhase = .building
+                $0.buildDetail = nil
+                $0.summary = stageSummary(for: .building, sha: sha, detail: nil, repositoryID: repositoryID)
             case .archiving:
                 $0.buildPhase = .archiving
                 $0.buildDetail = nil
                 $0.summary = stageSummary(for: .archiving, sha: sha, detail: nil, repositoryID: repositoryID)
+            case .signing:
+                $0.buildPhase = .signing
+                $0.buildDetail = nil
+                $0.summary = stageSummary(for: .signing, sha: sha, detail: nil, repositoryID: repositoryID)
             case .notarizing:
                 $0.buildPhase = .notarizing
                 $0.buildDetail = nil
@@ -1334,6 +1368,7 @@ final class AppState: ObservableObject {
                 $0.buildDetail = nil
                 $0.summary = stageSummary(for: .publishing, sha: sha, detail: nil, repositoryID: repositoryID)
             }
+            appendStageMessage(stageMessage(for: $0.buildPhase, detail: $0.buildDetail), to: &$0.stageMessages)
         }
     }
 
@@ -1362,8 +1397,12 @@ final class AppState: ObservableObject {
             return "Syncing \(shortSHA)\(buildContext)"
         case .planningRelease:
             return "Planning release for \(shortSHA)\(buildContext)"
+        case .building:
+            return "Building app for \(shortSHA)\(buildContext)"
         case .archiving:
             return "Archiving app for \(shortSHA)\(buildContext)"
+        case .signing:
+            return "Signing app for \(shortSHA)\(buildContext)"
         case .notarizing:
             return "\(ShipHookLocale.notarising) app for \(shortSHA)\(buildContext)"
         case .publishing:
@@ -1420,18 +1459,21 @@ final class AppState: ObservableObject {
                     state.buildPhase = .archiving
                 }
                 state.buildDetail = label
+                appendStageMessage(label, to: &state.stageMessages)
                 if let sha = state.lastSeenSHA {
                     state.summary = stageSummary(for: .archiving, sha: sha, detail: label, repositoryID: repositoryID)
                 }
             case let .notarize(label):
                 state.buildPhase = .notarizing
                 state.buildDetail = label
+                appendStageMessage(label, to: &state.stageMessages)
                 if let sha = state.lastSeenSHA {
                     state.summary = stageSummary(for: .notarizing, sha: sha, detail: label, repositoryID: repositoryID)
                 }
             case let .publish(label):
                 state.buildPhase = .publishing
                 state.buildDetail = label
+                appendStageMessage(label, to: &state.stageMessages)
                 if let sha = state.lastSeenSHA {
                     state.summary = stageSummary(for: .publishing, sha: sha, detail: label, repositoryID: repositoryID)
                 }
@@ -1501,6 +1543,33 @@ final class AppState: ObservableObject {
         case publish(String)
     }
 
+    private func stageMessage(for phase: RepositoryBuildPhase, detail: String?) -> String {
+        if let detail, !detail.isEmpty {
+            return detail
+        }
+
+        switch phase {
+        case .idle:
+            return "Build idle"
+        case .queued:
+            return "Queued for the build agent"
+        case .syncing:
+            return "Pulling latest repository state"
+        case .planningRelease:
+            return "Planning release metadata"
+        case .building:
+            return "Running build"
+        case .archiving:
+            return "Archiving the app"
+        case .signing:
+            return "Signing and verifying the app"
+        case .notarizing:
+            return "\(ShipHookLocale.notarising) with Apple"
+        case .publishing:
+            return "Publishing release assets"
+        }
+    }
+
     private func flushLogBuffer(for repositoryID: String) {
         guard let chunk = logBuffers[repositoryID], !chunk.isEmpty else {
             return
@@ -1511,9 +1580,105 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func appendStageMessage(_ message: String, to messages: inout [String]) {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, messages.last != trimmed else {
+            return
+        }
+        messages.append(trimmed)
+        if messages.count > 5 {
+            messages = Array(messages.suffix(5))
+        }
+    }
+
     private func tailLines(from string: String, limit: Int) -> String {
         let lines = string.split(separator: "\n", omittingEmptySubsequences: false)
         return lines.suffix(limit).map(String.init).joined(separator: "\n")
+    }
+
+    private static func errorSuggestions(for error: String, log: String) -> [BuildErrorSuggestion] {
+        let context = "\(error)\n\(log)".lowercased()
+        var suggestions: [BuildErrorSuggestion] = []
+
+        if context.contains("could not read from remote repository")
+            || context.contains("permission denied (publickey)")
+            || context.contains("authentication failed")
+            || context.contains("repository not found") {
+            suggestions.append(
+                BuildErrorSuggestion(
+                    id: "github-auth",
+                    title: "Check GitHub access",
+                    detail: "ShipHook could not authenticate with the remote repository. Confirm the token, SSH key, or repository permissions used by this Mac.",
+                    buttonLabel: "Open Settings",
+                    action: .openGeneralSettings
+                )
+            )
+        }
+
+        if context.contains("not a git repository")
+            || context.contains("would be overwritten by checkout")
+            || context.contains("you have unstaged changes")
+            || context.contains("cannot lock ref")
+            || context.contains("bad object") {
+            suggestions.append(
+                BuildErrorSuggestion(
+                    id: "reclone",
+                    title: "Refresh the local checkout",
+                    detail: "The local Git checkout looks out of sync or damaged. Reclone deletes the local checkout and pulls it fresh from GitHub.",
+                    buttonLabel: "Reclone Repository",
+                    action: .recloneRepository
+                )
+            )
+        }
+
+        if context.contains("no signing certificate")
+            || context.contains("code signing")
+            || context.contains("codesign")
+            || context.contains("signing identity")
+            || context.contains("development team") {
+            suggestions.append(
+                BuildErrorSuggestion(
+                    id: "signing",
+                    title: "Review signing settings",
+                    detail: "The archive or export step could not use a valid signing identity. Refresh signing identities and confirm the selected team/certificate.",
+                    buttonLabel: "Open Signing",
+                    action: .openSigningSettings
+                )
+            )
+        }
+
+        if context.contains("notarytool")
+            || context.contains("notarization")
+            || context.contains("notarisation")
+            || context.contains("keychain-profile") {
+            suggestions.append(
+                BuildErrorSuggestion(
+                    id: "notarization",
+                    title: "Check notarization profile",
+                    detail: "Apple notarization failed or the keychain profile is missing. Confirm the stored profile and Apple credentials.",
+                    buttonLabel: "Open Signing",
+                    action: .openSigningSettings
+                )
+            )
+        }
+
+        if context.contains("scheme")
+            || context.contains("workspacepath")
+            || context.contains("projectpath")
+            || context.contains("xcodebuild: error") {
+            suggestions.append(
+                BuildErrorSuggestion(
+                    id: "xcode-config",
+                    title: "Review build configuration",
+                    detail: "xcodebuild could not use the configured project, workspace, or scheme. Inspect the repository build automation settings.",
+                    buttonLabel: "Open Configuration",
+                    action: .openRepositoryConfiguration
+                )
+            )
+        }
+
+        var seen = Set<String>()
+        return suggestions.filter { seen.insert($0.id).inserted }
     }
 
     private func startNextQueuedBuildIfPossible() {
@@ -1601,12 +1766,14 @@ final class AppState: ObservableObject {
             $0.buildPhase = .idle
             $0.buildDetail = nil
             $0.lastError = error.localizedDescription
+            $0.lastErrorSuggestions = Self.errorSuggestions(for: error.localizedDescription, log: $0.lastLog)
             if let snapshot {
                 $0.releaseChannel = releaseChannel(for: snapshot)
             }
             if $0.lastLog.isEmpty {
                 $0.lastLog = error.localizedDescription
             }
+            appendStageMessage("Build failed: \(error.localizedDescription)", to: &$0.stageMessages)
             if shouldAutoPause {
                 $0.summary = "Build paused after \(streak) consecutive failures. Last error: \(error.localizedDescription)"
             } else {
@@ -2234,6 +2401,7 @@ final class AppState: ObservableObject {
                     activity: state.activity.rawValue,
                     phase: state.buildPhase.rawValue,
                     summary: state.summary,
+                    stageMessages: state.stageMessages,
                     releaseChannel: state.releaseChannel?.rawValue ?? latestBuild?.releaseChannel,
                     version: displayedVersion(for: repository),
                     publishedVersion: publishedVersion(for: repository),
@@ -2246,7 +2414,9 @@ final class AppState: ObservableObject {
                     lastCommitAuthorAvatarURL: state.lastCommitAuthorAvatarURL?.absoluteString,
                     lastCommitAuthorProfileURL: state.lastCommitAuthorProfileURL?.absoluteString,
                     lastLog: state.lastLog,
-                    lastLogPath: state.lastLogPath
+                    lastLogPath: state.lastLogPath,
+                    lastError: state.lastError,
+                    lastErrorSuggestions: state.lastErrorSuggestions
                 ),
                 version: displayedVersion(for: repository),
                 publishedVersion: publishedVersion(for: repository),
@@ -2261,7 +2431,7 @@ final class AppState: ObservableObject {
             generatedAt: Date(),
             global: WebDashboardSnapshot.Global(
                 pollIntervalSeconds: configuration.pollIntervalSeconds,
-                githubToken: configuration.githubToken,
+                githubToken: nil,
                 githubTokenEnvVar: configuration.githubTokenEnvVar,
                 generatedDataRetentionCount: configuration.generatedDataRetentionCount,
                 autoPauseFailureCount: configuration.autoPauseFailureCount,
@@ -2330,13 +2500,17 @@ final class AppState: ObservableObject {
         case .syncing:
             return (2, 5, "Syncing")
         case .planningRelease:
-            return (3, 5, "Planning Release")
+            return (3, 7, "Planning Release")
+        case .building:
+            return (4, 7, detail ?? "Building")
         case .archiving:
-            return (4, 5, detail ?? "Archiving")
+            return (5, 7, detail ?? "Archiving")
+        case .signing:
+            return (6, 7, detail ?? "Signing")
         case .notarizing:
-            return (5, 6, detail ?? ShipHookLocale.notarising)
+            return (7, 8, detail ?? ShipHookLocale.notarising)
         case .publishing:
-            return (6, 6, detail ?? "Publishing")
+            return (8, 8, detail ?? "Publishing")
         }
     }
 

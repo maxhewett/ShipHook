@@ -81,6 +81,7 @@ struct WebDashboardSnapshot: Codable {
             var activity: String
             var phase: String
             var summary: String
+            var stageMessages: [String]
             var releaseChannel: String?
             var version: String?
             var publishedVersion: String?
@@ -94,6 +95,8 @@ struct WebDashboardSnapshot: Codable {
             var lastCommitAuthorProfileURL: String?
             var lastLog: String
             var lastLogPath: String?
+            var lastError: String?
+            var lastErrorSuggestions: [BuildErrorSuggestion]
         }
     }
 
@@ -156,6 +159,23 @@ struct WebDashboardRepositoryInspectionSubmission: Codable {
     var selectedScheme: String?
 }
 
+struct WebDashboardGitHubLinkRequest: Codable {
+    var token: String
+}
+
+struct WebDashboardGitHubRepositoriesResponse: Codable {
+    var ok: Bool
+    var repositories: [GitHubRepositorySummary]
+}
+
+struct WebDashboardGitHubCloneRequest: Codable {
+    var owner: String
+    var repo: String
+    var branch: String
+    var cloneURL: String
+    var localCheckoutPath: String
+}
+
 enum WebDashboardCommand: Codable {
     case saveConfiguration(AppConfiguration)
     case reloadConfiguration
@@ -171,6 +191,7 @@ enum WebDashboardCommand: Codable {
     case refreshReleases(String)
     case rollbackRelease(repositoryID: String, tagName: String)
     case setLaunchAtLogin(Bool)
+    case restartAgent
     case refreshSigningIdentities
     case storeNotarizationProfile(WebDashboardNotarizationProfileInput)
 
@@ -200,6 +221,7 @@ enum WebDashboardCommand: Codable {
         case refreshReleases
         case rollbackRelease
         case setLaunchAtLogin
+        case restartAgent
         case refreshSigningIdentities
         case storeNotarizationProfile
     }
@@ -243,6 +265,8 @@ enum WebDashboardCommand: Codable {
             )
         case .setLaunchAtLogin:
             self = .setLaunchAtLogin(try container.decode(Bool.self, forKey: .enabled))
+        case .restartAgent:
+            self = .restartAgent
         case .refreshSigningIdentities:
             self = .refreshSigningIdentities
         case .storeNotarizationProfile:
@@ -296,6 +320,8 @@ enum WebDashboardCommand: Codable {
         case let .setLaunchAtLogin(enabled):
             try container.encode(CommandType.setLaunchAtLogin, forKey: .type)
             try container.encode(enabled, forKey: .enabled)
+        case .restartAgent:
+            try container.encode(CommandType.restartAgent, forKey: .type)
         case .refreshSigningIdentities:
             try container.encode(CommandType.refreshSigningIdentities, forKey: .type)
         case let .storeNotarizationProfile(profile):
@@ -319,11 +345,20 @@ private struct WebDashboardErrorResponse: Encodable {
 }
 
 private struct WebDashboardSecurityStateResponse: Codable {
+    struct GitHubProfile: Codable {
+        var login: String
+        var name: String?
+        var avatarURL: String?
+        var profileURL: String?
+        var linkedAt: Date?
+    }
+
     struct Admin: Codable {
         var username: String
         var mustChangePassword: Bool
         var createdAt: Date
         var isCurrentUser: Bool
+        var github: GitHubProfile?
     }
 
     struct Passkey: Codable {
@@ -343,6 +378,7 @@ private struct WebDashboardSecurityStateResponse: Codable {
 
     var ok: Bool
     var currentUsername: String
+    var currentGitHub: GitHubProfile?
     var admins: [Admin]
     var passkeys: [Passkey]
     var auditEntries: [AuditEntry]
@@ -538,6 +574,34 @@ final class WebDashboardServer {
             return self.handleFinishPasskeyAuthentication(request: request)
         }
 
+        server.POST["/api/github/link"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleGitHubLink(request: request)
+        }
+
+        server.POST["/api/github/unlink"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleGitHubUnlink(request: request)
+        }
+
+        server["/api/github/repositories"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleGitHubRepositories(request: request)
+        }
+
+        server.POST["/api/github/clone-inspect"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleGitHubCloneInspect(request: request)
+        }
+
         server["/api/state"] = { [weak self] request in
             guard let self else {
                 return .internalServerError
@@ -546,6 +610,16 @@ final class WebDashboardServer {
                 return self.unauthorizedJSONResponse(request: request)
             }
             return self.jsonResponse(for: self.currentSnapshot(), request: request)
+        }
+
+        server["/api/log"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            guard self.securityController.isAuthorized(request: request) else {
+                return self.unauthorizedJSONResponse(request: request)
+            }
+            return self.logDownloadResponse(request: request)
         }
 
         server.POST["/api/command"] = { [weak self] request in
@@ -616,6 +690,71 @@ final class WebDashboardServer {
                 commandHandler(command)
             }
         }
+    }
+
+    private func waitForAsync<T>(_ operation: @escaping () async throws -> T) throws -> T {
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = WebDashboardAsyncResultBox<T>()
+        Task {
+            do {
+                box.result = .success(try await operation())
+            } catch {
+                box.result = .failure(error)
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return try box.result!.get()
+    }
+
+    private func cloneGitHubRepositoryForInspection(_ payload: WebDashboardGitHubCloneRequest, token: String) throws {
+        guard let cloneURL = URL(string: payload.cloneURL),
+              cloneURL.scheme == "https",
+              cloneURL.host?.lowercased() == "github.com" else {
+            throw NSError(domain: "ShipHook", code: 1001, userInfo: [NSLocalizedDescriptionKey: "Only https://github.com clone URLs are supported."])
+        }
+
+        let owner = payload.owner.trimmingCharacters(in: .whitespacesAndNewlines)
+        let repo = payload.repo.trimmingCharacters(in: .whitespacesAndNewlines)
+        let branch = payload.branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "main" : payload.branch
+        guard cloneURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased() == "\(owner)/\(repo).git".lowercased() else {
+            throw NSError(domain: "ShipHook", code: 1002, userInfo: [NSLocalizedDescriptionKey: "Clone URL does not match the selected GitHub repository."])
+        }
+
+        let checkoutPath = (payload.localCheckoutPath as NSString).expandingTildeInPath
+        let checkoutURL = URL(fileURLWithPath: checkoutPath).standardizedFileURL
+        let developerURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Developer").standardizedFileURL
+        guard checkoutURL.path == developerURL.path || checkoutURL.path.hasPrefix(developerURL.path + "/") else {
+            throw NSError(domain: "ShipHook", code: 1003, userInfo: [NSLocalizedDescriptionKey: "GitHub repositories can only be cloned under ~/Developer from the webUI."])
+        }
+
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: checkoutURL.appendingPathComponent(".git").path) {
+            return
+        }
+        if fileManager.fileExists(atPath: checkoutURL.path) {
+            let contents = try fileManager.contentsOfDirectory(atPath: checkoutURL.path)
+            guard contents.isEmpty else {
+                throw NSError(domain: "ShipHook", code: 1004, userInfo: [NSLocalizedDescriptionKey: "Checkout folder already exists and is not empty. Choose another path or remove the folder first."])
+            }
+        } else {
+            try fileManager.createDirectory(at: checkoutURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        }
+
+        let command = "git clone --branch \(shellSingleQuoted(branch)) --single-branch \(shellSingleQuoted(cloneURL.absoluteString)) \(shellSingleQuoted(checkoutURL.path))"
+        _ = try ShellCommandRunner().run(
+            command,
+            currentDirectory: developerURL.path,
+            environment: [
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+                "GIT_CONFIG_VALUE_0": "Authorization: Bearer \(token)"
+            ]
+        )
+    }
+
+    private func shellSingleQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private func decodeCommand(from request: HttpRequest) throws -> WebDashboardCommand {
@@ -694,6 +833,39 @@ final class WebDashboardServer {
         return htmlResponse(
             securityController.loginPageHTML(passkeysAvailable: securityController.hasRegisteredPasskeys),
             request: request
+        )
+    }
+
+    private func logDownloadResponse(request: HttpRequest) -> HttpResponse {
+        guard let repositoryID = request.queryParams.first(where: { $0.0 == "repo" })?.1,
+              !repositoryID.isEmpty else {
+            return errorResponse(message: "Missing repository id.", request: request)
+        }
+
+        let snapshot = currentSnapshot()
+        guard let repository = snapshot.repositories.first(where: { $0.id == repositoryID }),
+              let logPath = repository.runtime.lastLogPath,
+              !logPath.isEmpty else {
+            return errorResponse(message: "No log is available for this repository yet.", request: request)
+        }
+
+        let logURL = URL(fileURLWithPath: (logPath as NSString).expandingTildeInPath)
+        guard FileManager.default.fileExists(atPath: logURL.path),
+              let data = try? Data(contentsOf: logURL) else {
+            return errorResponse(message: "The latest log file could not be read.", request: request)
+        }
+
+        let safeName = repository.name
+            .replacingOccurrences(of: "[^A-Za-z0-9._-]+", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        let filename = "\(safeName.isEmpty ? repository.id : safeName)-latest.log"
+        return rawResponse(
+            statusCode: 200,
+            reason: "OK",
+            body: data,
+            contentType: "text/plain; charset=utf-8",
+            request: request,
+            extraHeaders: ["Content-Disposition": "attachment; filename=\"\(filename)\""]
         )
     }
 
@@ -863,6 +1035,91 @@ final class WebDashboardServer {
         }
     }
 
+    private func handleGitHubLink(request: HttpRequest) -> HttpResponse {
+        guard securityController.isAuthorized(request: request) else {
+            return unauthorizedJSONResponse(request: request)
+        }
+        do {
+            let payload = try decodeRequest(WebDashboardGitHubLinkRequest.self, from: request)
+            let token = payload.token.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !token.isEmpty else {
+                return errorResponse(message: "Enter a GitHub token to link your account.", request: request)
+            }
+            let profile = try waitForAsync {
+                try await GitHubAPI().authenticatedUser(token: token)
+            }
+            let response = try securityController.linkGitHubProfile(profile, token: token, request: request)
+            return jsonResponse(for: response, request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func handleGitHubUnlink(request: HttpRequest) -> HttpResponse {
+        guard securityController.isAuthorized(request: request) else {
+            return unauthorizedJSONResponse(request: request)
+        }
+        do {
+            let response = try securityController.unlinkGitHubProfile(request: request)
+            return jsonResponse(for: response, request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func handleGitHubRepositories(request: HttpRequest) -> HttpResponse {
+        guard securityController.isAuthorized(request: request) else {
+            return unauthorizedJSONResponse(request: request)
+        }
+        do {
+            let token = try securityController.githubTokenForCurrentUser(request: request)
+            let repositories = try waitForAsync {
+                try await GitHubAPI().listAuthenticatedRepositories(token: token)
+            }
+            return jsonResponse(for: WebDashboardGitHubRepositoriesResponse(ok: true, repositories: repositories), request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func handleGitHubCloneInspect(request: HttpRequest) -> HttpResponse {
+        guard securityController.isAuthorized(request: request) else {
+            return unauthorizedJSONResponse(request: request)
+        }
+        do {
+            let payload = try decodeRequest(WebDashboardGitHubCloneRequest.self, from: request)
+            let token = try securityController.githubTokenForCurrentUser(request: request)
+            try cloneGitHubRepositoryForInspection(payload, token: token)
+            let response = perform(
+                .inspectRepository(
+                    WebDashboardRepositoryInspectionRequest(
+                        localCheckoutPath: payload.localCheckoutPath,
+                        fallbackOwner: payload.owner,
+                        fallbackRepo: payload.repo,
+                        fallbackBranch: payload.branch
+                    )
+                )
+            )
+            securityController.recordAuditEvent(
+                action: "repository.github.clone_inspected",
+                detail: "\(payload.owner)/\(payload.repo)",
+                request: request,
+                username: securityController.currentUsername(request: request)
+            )
+            return jsonResponse(for: response, request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
     private func authErrorResponse(_ error: WebDashboardSecurityController.SecurityError, request: HttpRequest) -> HttpResponse {
         let response = WebDashboardAuthMessageResponse(ok: false, message: nil, error: error.userMessage, passkeysAvailable: securityController.hasRegisteredPasskeys)
         let encoder = JSONEncoder.webDashboard
@@ -908,6 +1165,8 @@ final class WebDashboardServer {
             return ("dashboard.release.rollback", "\(repositoryID) -> \(tagName)")
         case let .setLaunchAtLogin(enabled):
             return ("dashboard.launch_at_login.\(enabled ? "enabled" : "disabled")", nil)
+        case .restartAgent:
+            return ("dashboard.agent.restart_requested", nil)
         case .refreshSigningIdentities:
             return ("dashboard.signing_identities.refreshed", nil)
         case let .storeNotarizationProfile(profile):
@@ -1018,11 +1277,13 @@ final class WebDashboardServer {
         reason: String,
         body: Data,
         contentType: String,
-        request: HttpRequest
+        request: HttpRequest,
+        extraHeaders: [String: String] = [:]
     ) -> HttpResponse {
         var headers = securityHeaders(for: request)
         headers["Content-Type"] = contentType
         headers["Content-Length"] = "\(body.count)"
+        extraHeaders.forEach { headers[$0.key] = $0.value }
         if let cookie = securityController.pendingCookieHeader(for: request) {
             headers["Set-Cookie"] = cookie
         }
@@ -1234,6 +1495,11 @@ final class WebDashboardServer {
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; min-height: 100%; height: 100%; }
+    @property --shine-x {
+      syntax: '<percentage>';
+      inherits: false;
+      initial-value: -30%;
+    }
     body {
       font: 14px/1.45 var(--font-body);
       color: var(--text);
@@ -1242,6 +1508,9 @@ final class WebDashboardServer {
         radial-gradient(circle at 88% 10%, rgba(77,184,255,0.14), transparent 26%),
         linear-gradient(180deg, #0e1015 0%, #161922 42%, #0f1218 100%);
       letter-spacing: 0.01em;
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      body { animation: ambient-shift 18s ease-in-out infinite alternate; }
     }
     button, input, textarea, select { font: inherit; }
     a { color: inherit; }
@@ -1279,6 +1548,7 @@ final class WebDashboardServer {
       transform: rotate(-8deg);
       filter: blur(18px);
       pointer-events: none;
+      animation: hero-sheen 7s ease-in-out infinite alternate;
     }
     .hero-header {
       display: flex;
@@ -1391,7 +1661,7 @@ final class WebDashboardServer {
       padding: 18px;
       background: rgba(16, 20, 28, 0.92);
       height: 100%;
-      overflow: hidden;
+      overflow: clip;
       display: flex;
       flex-direction: column;
     }
@@ -1428,7 +1698,8 @@ final class WebDashboardServer {
       flex: 1 1 auto;
       min-height: 0;
       overflow: auto;
-      padding-right: 4px;
+      padding: 5px 10px 12px 5px;
+      margin: -5px -10px -12px -5px;
     }
     .stack-footer {
       padding-top: 14px;
@@ -1438,17 +1709,18 @@ final class WebDashboardServer {
       justify-content: center;
     }
     .repo-card {
+      position: relative;
       border-radius: 18px;
       padding: 8px 10px;
       background:
         linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0)),
         rgba(17, 21, 30, 0.92);
       cursor: pointer;
-      transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+      transition: transform 180ms cubic-bezier(.2,.9,.2,1), border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
       min-width: 0;
       width: 100%;
     }
-    .repo-card:hover { transform: translateY(-1px); border-color: var(--line-strong); }
+    .repo-card:hover { z-index: 2; transform: translateY(-2px) scale(1.012); border-color: var(--line-strong); box-shadow: 0 12px 34px rgba(0,0,0,0.18); }
     .repo-card.active {
       border-color: rgba(255,135,91,0.52);
       background:
@@ -1582,9 +1854,10 @@ final class WebDashboardServer {
       border-radius: 14px;
       padding: 10px 14px;
       cursor: pointer;
-      transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+      transition: transform 150ms cubic-bezier(.2,.9,.2,1), border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
     }
-    .button:hover { transform: translateY(-1px); border-color: rgba(255,255,255,0.22); }
+    .button:hover { transform: translateY(-1px); border-color: rgba(255,255,255,0.22); box-shadow: 0 10px 28px rgba(0,0,0,0.16); }
+    .button:active { transform: translateY(0) scale(0.985); }
     .button.primary {
       background: linear-gradient(135deg, rgba(255,135,91,0.28), rgba(255,135,91,0.12));
       border-color: rgba(255,135,91,0.46);
@@ -1606,25 +1879,39 @@ final class WebDashboardServer {
     .panel + .panel { margin-top: 18px; }
     .workspace {
       display: grid;
-      gap: 22px;
+      grid-template-rows: auto minmax(0, 1fr);
+      gap: 0;
       height: 100%;
-      overflow: auto;
+      overflow: hidden;
       padding-right: 6px;
       align-content: start;
       background: transparent;
+      overflow-anchor: none;
     }
     .workspace-sticky {
       position: sticky;
       top: 0;
       z-index: 8;
+      align-self: start;
       display: grid;
       gap: 14px;
-      padding: 0;
+      padding: 0 0 4px;
       background: none;
       border-bottom: none;
       border-radius: 24px;
       isolation: isolate;
-      overflow: visible;
+      overflow: hidden;
+      margin-bottom: 0;
+    }
+    .pane-scroll {
+      min-height: 0;
+      overflow: auto;
+      margin-top: -24px;
+      padding-top: 28px;
+      padding-right: 2px;
+      overflow-anchor: none;
+      position: relative;
+      z-index: 1;
     }
     .workspace-sticky::before {
       content: "";
@@ -1671,14 +1958,41 @@ final class WebDashboardServer {
       cursor: pointer;
       font: 600 12px/1 var(--font-body);
       letter-spacing: -0.01em;
+      transition: color 160ms ease, background 160ms ease, border-color 160ms ease, transform 160ms ease;
     }
+    .tab:hover { transform: translateY(-1px); color: var(--text); }
     .tab.active {
       color: var(--text);
       border-color: rgba(255,255,255,0.1);
       background: rgba(255,255,255,0.09);
       box-shadow: inset 0 1px 0 rgba(255,255,255,0.07);
     }
+    body.nav-animating .tab-pane:not([hidden]) {
+      animation: tab-slide-in 260ms cubic-bezier(.2,.9,.2,1) both;
+    }
+    body.project-animating .repo-subhead-main,
+    body.project-animating .repo-subhead-actions {
+      animation: project-swap 300ms cubic-bezier(.2,.9,.2,1) both;
+    }
+    body.project-animating .tab-pane:not([hidden]) .panel,
+    body.project-animating .tab-pane:not([hidden]) .editor-section {
+      animation: project-panel-swap 340ms cubic-bezier(.2,.9,.2,1) both;
+    }
+    body.project-animating .repo-subhead-icon {
+      animation: icon-pop 360ms cubic-bezier(.2,.9,.2,1) both;
+    }
+    .tab-pane {
+      min-width: 0;
+      position: relative;
+      z-index: 1;
+      padding-top: 0;
+      scroll-margin-top: 24px;
+    }
     .tab-pane[hidden] { display: none; }
+    body.settings-animating .settings-pane-grid,
+    body.settings-animating .settings-card:first-child {
+      animation: tab-slide-in 260ms cubic-bezier(.2,.9,.2,1) both;
+    }
     .hero-brand {
       display: flex;
       align-items: center;
@@ -1780,6 +2094,61 @@ final class WebDashboardServer {
       background: linear-gradient(90deg, var(--accent), var(--accent-2));
       border-radius: inherit;
     }
+    .stage-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: rgba(255,255,255,0.035);
+    }
+    .stage-item {
+      display: grid;
+      grid-template-columns: 22px minmax(0, 1fr);
+      align-items: start;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .stage-item.current {
+      color: var(--text);
+      font-weight: 700;
+    }
+    .stage-item .icon {
+      width: 18px;
+      height: 18px;
+      color: currentColor;
+      margin-top: 1px;
+    }
+    .diagnosis-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .diagnosis-card {
+      display: grid;
+      grid-template-columns: 22px minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: start;
+      padding: 12px;
+      border: 1px solid rgba(255,190,85,0.24);
+      border-radius: var(--radius-sm);
+      background: rgba(255,190,85,0.10);
+    }
+    .diagnosis-card .icon {
+      color: var(--warning);
+      width: 18px;
+      height: 18px;
+      margin-top: 2px;
+    }
+    .diagnosis-card strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+    .danger-text {
+      color: var(--danger);
+    }
     .collection {
       display: grid;
       gap: 10px;
@@ -1873,11 +2242,54 @@ final class WebDashboardServer {
       background: rgba(255,255,255,0.08);
       flex: none;
     }
+    .avatar.large { width: 44px; height: 44px; }
+    .avatar.mini { width: 24px; height: 24px; }
     .avatar img {
       width: 100%;
       height: 100%;
       display: block;
       object-fit: cover;
+    }
+    .github-profile-card {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.04);
+      margin-top: 10px;
+    }
+    .github-repo-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+      max-height: 280px;
+      overflow: auto;
+      padding-right: 4px;
+    }
+    .github-repo-option {
+      width: 100%;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.035);
+      color: var(--text);
+      cursor: pointer;
+      text-align: left;
+      transition: transform 160ms ease, background 160ms ease, border-color 160ms ease;
+    }
+    .github-repo-option:hover {
+      transform: translateY(-1px);
+      border-color: var(--line-strong);
+    }
+    .github-repo-option.active {
+      border-color: rgba(255,135,91,0.46);
+      background: linear-gradient(135deg, rgba(255,135,91,0.16), rgba(77,184,255,0.08));
     }
     .avatar-row a,
     .avatar-row span {
@@ -1973,6 +2385,55 @@ final class WebDashboardServer {
       from { opacity: 0; transform: translateY(-8px); }
       to { opacity: 1; transform: translateY(0); }
     }
+    @keyframes ambient-shift {
+      from { background-position: 0% 0%, 100% 0%, 0% 0%; }
+      to { background-position: 6% 4%, 94% 7%, 0% 100%; }
+    }
+    @keyframes hero-sheen {
+      from { --shine-x: -30%; opacity: 0.65; }
+      to { --shine-x: 52%; opacity: 1; }
+    }
+    @keyframes panel-enter {
+      from { opacity: 0; transform: translateY(12px) scale(0.992); filter: blur(4px); }
+      to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+    }
+    @keyframes card-rise {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes tab-slide-in {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes project-swap {
+      from { opacity: 0; transform: translateX(-10px); filter: blur(5px); }
+      to { opacity: 1; transform: translateX(0); filter: blur(0); }
+    }
+    @keyframes project-panel-swap {
+      from { opacity: 0; transform: translateY(12px) scale(0.992); filter: blur(6px); }
+      to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+    }
+    @keyframes icon-pop {
+      0% { transform: scale(0.86) rotate(-3deg); filter: blur(3px); opacity: 0.5; }
+      65% { transform: scale(1.06) rotate(1deg); filter: blur(0); opacity: 1; }
+      100% { transform: scale(1) rotate(0); filter: blur(0); opacity: 1; }
+    }
+    @keyframes modal-backdrop-in {
+      from { opacity: 0; backdrop-filter: blur(0); }
+      to { opacity: 1; backdrop-filter: blur(8px); }
+    }
+    @keyframes modal-card-in {
+      from { opacity: 0; transform: translateY(16px) scale(0.975); filter: blur(8px); }
+      to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 1ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 1ms !important;
+        scroll-behavior: auto !important;
+      }
+    }
     .floating-save {
       position: fixed;
       right: 28px;
@@ -1990,6 +2451,9 @@ final class WebDashboardServer {
       padding: 24px;
       z-index: 30;
     }
+    body.modal-animating .modal-backdrop {
+      animation: modal-backdrop-in 240ms ease-out both;
+    }
     .modal-card {
       width: min(920px, 100%);
       max-height: calc(100vh - 48px);
@@ -1999,6 +2463,9 @@ final class WebDashboardServer {
       background: rgba(16, 20, 28, 0.98);
       box-shadow: 0 28px 70px rgba(0,0,0,0.44);
       padding: 22px;
+    }
+    body.modal-animating .modal-card {
+      animation: modal-card-in 280ms cubic-bezier(.2,.9,.2,1) both;
     }
     .modal-card.settings-modal {
       width: min(1180px, 100%);
@@ -2390,6 +2857,7 @@ final class WebDashboardServer {
       .shell { height: auto; overflow: visible; }
       .main-grid { display: block; height: auto; }
       .workspace { overflow: visible; }
+      .pane-scroll { overflow: visible; padding-top: 12px; }
       .settings-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .workspace-sticky {
         position: sticky;
@@ -2508,9 +2976,11 @@ final class WebDashboardServer {
             <div id="repo-subhead" class="repo-subhead"></div>
             <div class="topnav" id="top-nav"></div>
           </div>
-          <section class="tab-pane" id="pane-status"></section>
-          <section class="tab-pane" id="pane-builds"></section>
-          <section class="tab-pane" id="pane-configuration"></section>
+          <div class="pane-scroll">
+            <section class="tab-pane" id="pane-status"></section>
+            <section class="tab-pane" id="pane-builds"></section>
+            <section class="tab-pane" id="pane-configuration"></section>
+          </div>
         </div>
       </main>
     </section>
@@ -2542,6 +3012,10 @@ final class WebDashboardServer {
       explorerModal: null,
       mobileSidebarOpen: false,
       addRepoInspectionPreview: null,
+      githubRepos: [],
+      githubReposLoading: false,
+      githubReposError: '',
+      selectedGitHubRepoId: null,
       toasts: [],
       toastTimerId: null,
       saving: false,
@@ -2620,13 +3094,15 @@ final class WebDashboardServer {
       fallbackOwner: '',
       fallbackRepo: '',
       fallbackBranch: 'main',
-      selectedScheme: ''
+      selectedScheme: '',
+      githubCloneURL: ''
     };
 
     const securityDraft = {
       currentPassword: '',
       newPassword: '',
-      inviteUsername: ''
+      inviteUsername: '',
+      githubToken: ''
     };
 
     async function fetchState({ preserveDraft = true, clearStatus = true } = {}) {
@@ -2787,11 +3263,36 @@ final class WebDashboardServer {
       wireActionButtons();
     }
 
+    function animateNavigation(kind) {
+      const className = kind === 'settings'
+        ? 'settings-animating'
+        : kind === 'project'
+          ? 'project-animating'
+          : kind === 'modal'
+            ? 'modal-animating'
+            : 'nav-animating';
+      document.body.classList.remove(className);
+      // Force a style flush so repeat clicks restart the transition cleanly.
+      void document.body.offsetWidth;
+      document.body.classList.add(className);
+      window.setTimeout(() => document.body.classList.remove(className), kind === 'modal' ? 420 : 340);
+    }
+
+    function resetWorkspaceScroll() {
+      const workspace = document.querySelector('.pane-scroll');
+      if (!workspace) return;
+      workspace.scrollTop = 0;
+      window.requestAnimationFrame(() => {
+        workspace.scrollTop = 0;
+      });
+    }
+
     function openSettingsModal(pane = null) {
       state.settingsModalOpen = true;
       state.settingsPane = pane || state.settingsPane || 'general';
       state.addRepoWizardOpen = false;
       state.explorerModal = null;
+      animateNavigation('modal');
       render();
       if (state.settingsPane === 'account' && !state.securityState && !state.securityLoading) {
         fetchSecurityState()
@@ -2807,6 +3308,7 @@ final class WebDashboardServer {
       state.explorerModal = kind;
       state.settingsModalOpen = false;
       state.addRepoWizardOpen = false;
+      animateNavigation('modal');
       render();
     }
 
@@ -2888,10 +3390,15 @@ final class WebDashboardServer {
       if (queued > 0) detailParts.push(`${queued} queued`);
       if (failures > 0 && building > 0) detailParts.push(`${failures} failing`);
 
+      const github = state.securityState?.currentGitHub;
+      const accountPill = github?.avatarURL
+        ? `<button class="summary-pill account-pill" type="button" data-action="open-security" title="@${escapeHtmlAttr(github.login)}" aria-label="Open Account & Security"><span class="avatar mini"><img src="${escapeHtmlAttr(github.avatarURL)}" alt=""></span></button>`
+        : `<button class="summary-pill" type="button" data-action="open-security" title="Account & Security" aria-label="Open Account & Security">${icon('user')}</button>`;
+
       statsNode.innerHTML = [
         summaryPill('repos', `Repos ${total}`, `${enabled} enabled`),
         summaryPill('activity', `Activity ${activeLabel}`, detailParts.join(' • ')),
-        `<button class="summary-pill" type="button" data-action="open-security" title="Account & Security" aria-label="Open Account & Security">${icon('user')}</button>`,
+        accountPill,
         `<button class="summary-pill" type="button" data-action="open-settings" title="ShipHook Settings" aria-label="Open ShipHook Settings">${icon('gear')}</button>`
       ].join('');
 
@@ -3046,6 +3553,17 @@ final class WebDashboardServer {
       if (!addRepoDraft.selectedScheme && schemes.length) {
         addRepoDraft.selectedScheme = preview.inspection.suggestedScheme || schemes[0];
       }
+      const githubLinked = !!state.securityState?.currentGitHub;
+      const selectedGitHubRepo = state.githubRepos.find(repo => String(repo.id) === String(state.selectedGitHubRepoId));
+      const githubRepoRows = state.githubRepos.length ? state.githubRepos.map(repo => `
+        <button class="github-repo-option ${String(repo.id) === String(state.selectedGitHubRepoId) ? 'active' : ''}" data-action="select-github-repo" data-github-repo-id="${repo.id}">
+          <span>
+            <strong>${escapeHtml(repo.fullName)}</strong>
+            <span class="tiny">${escapeHtml(repo.defaultBranch)}${repo.isPrivate ? ' · Private' : ''}${repo.isFork ? ' · Fork' : ''}</span>
+          </span>
+          ${icon(String(repo.id) === String(state.selectedGitHubRepoId) ? 'check' : 'repo')}
+        </button>
+      `).join('') : '';
 
       node.innerHTML = `
         <div class="modal-backdrop">
@@ -3056,6 +3574,24 @@ final class WebDashboardServer {
             </div>
             <div class="grid two">
               <div class="card">
+                ${sectionTitle('github', 'From GitHub')}
+                ${githubLinked ? `
+                  <div class="toolbar">
+                    <button class="button secondary" data-action="load-github-repos">${icon('refresh')}<span>${state.githubRepos.length ? 'Reload Repositories' : 'Load My Repositories'}</span></button>
+                    ${selectedGitHubRepo ? `<button class="button primary" data-action="clone-inspect-github-repo">${icon('download')}<span>Clone & Inspect</span></button>` : ''}
+                  </div>
+                  ${state.githubReposLoading ? '<div class="empty">Loading GitHub repositories...</div>' : ''}
+                  ${state.githubReposError ? `<p class="danger-text">${escapeHtml(state.githubReposError)}</p>` : ''}
+                  ${githubRepoRows ? `<div class="github-repo-list">${githubRepoRows}</div>` : '<div class="empty">Load your GitHub repositories, then choose one to clone and inspect.</div>'}
+                ` : `
+                  <div class="empty">Link your GitHub account in Account settings to add repositories from GitHub.</div>
+                  <div class="toolbar">
+                    <button class="button secondary" data-action="open-settings-pane" data-settings-pane="account">${icon('user')}<span>Open Account Settings</span></button>
+                  </div>
+                `}
+              </div>
+              <div class="card">
+                ${sectionTitle('folder', 'Local Checkout')}
                 <div class="field-grid single">
                   ${textInput('Local Checkout Path', 'addRepo.localCheckoutPath', addRepoDraft.localCheckoutPath)}
                   ${textInput('Fallback Owner', 'addRepo.fallbackOwner', addRepoDraft.fallbackOwner)}
@@ -3066,25 +3602,26 @@ final class WebDashboardServer {
                   <button class="button secondary" data-action="inspect-repo">${icon('search')}<span>Inspect Checkout</span></button>
                 </div>
               </div>
-              <div class="card">
-                ${preview ? `
-                  <div class="tiny">Inspection result</div>
-                  <strong>${escapeHtml(preview.suggestedRepository.name || preview.suggestedRepository.id)}</strong>
-                  <p>${escapeHtml((preview.inspection.owner || addRepoDraft.fallbackOwner || '') + '/' + (preview.inspection.repo || addRepoDraft.fallbackRepo || ''))}</p>
-                  <div class="field-grid single" style="margin-top: 12px;">
-                    ${schemes.length ? selectInput('Build Scheme', 'addRepo.selectedScheme', addRepoDraft.selectedScheme, schemes.map(scheme => [scheme, scheme])) : readOnlyInput('Build Scheme', addRepoDraft.selectedScheme || preview.inspection.suggestedScheme || 'None found')}
-                  </div>
-                  <div class="link-row tiny">
-                    <span>Workspace: ${escapeHtml(preview.inspection.workspacePath || 'None')}</span>
-                    <span>Project: ${escapeHtml(preview.inspection.projectPath || 'None')}</span>
-                  </div>
-                  <div class="toolbar">
-                    <button class="button primary" data-action="confirm-add-repo">${icon('plus')}<span>Add Repository</span></button>
-                  </div>
-                ` : `
-                  <div class="empty">Point ShipHook at a local checkout, inspect it, then add the generated repository configuration.</div>
-                `}
-              </div>
+            </div>
+            <div class="card" style="margin-top: 14px;">
+              ${sectionTitle('sparkles', 'Inspection Result')}
+              ${preview ? `
+                <div class="tiny">Generated repository configuration</div>
+                <strong>${escapeHtml(preview.suggestedRepository.name || preview.suggestedRepository.id)}</strong>
+                <p>${escapeHtml((preview.inspection.owner || addRepoDraft.fallbackOwner || '') + '/' + (preview.inspection.repo || addRepoDraft.fallbackRepo || ''))}</p>
+                <div class="field-grid single" style="margin-top: 12px;">
+                  ${schemes.length ? selectInput('Build Scheme', 'addRepo.selectedScheme', addRepoDraft.selectedScheme, schemes.map(scheme => [scheme, scheme])) : readOnlyInput('Build Scheme', addRepoDraft.selectedScheme || preview.inspection.suggestedScheme || 'None found')}
+                </div>
+                <div class="link-row tiny">
+                  <span>Workspace: ${escapeHtml(preview.inspection.workspacePath || 'None')}</span>
+                  <span>Project: ${escapeHtml(preview.inspection.projectPath || 'None')}</span>
+                </div>
+                <div class="toolbar">
+                  <button class="button primary" data-action="confirm-add-repo">${icon('plus')}<span>Add Repository</span></button>
+                </div>
+              ` : `
+                <div class="empty">Inspect a local checkout or clone from GitHub to generate the repository configuration.</div>
+              `}
             </div>
           </div>
         </div>
@@ -3150,7 +3687,7 @@ final class WebDashboardServer {
                 ${textInput('Auto Pause After Fails', 'global.autoPauseFailureCount', config.autoPauseFailureCount, 'number')}
                 ${textInput('GitHub Token', 'global.githubToken', config.githubToken, 'password')}
               </div>
-              <p class="settings-note">GitHub token is optional for public repositories, recommended for rate limits, and required for private repositories. ShipHook stores the configured token in your local config file.</p>
+              <p class="settings-note">This is the main agent token for polling, cloning, and publishing. The field is write-only in the webUI: leave it blank to keep the existing token, or enter a new token to replace it.</p>
               <div class="toolbar">
                 <button class="button primary" data-action="save">${icon('save')}<span>Save Configuration</span></button>
                 <button class="button" data-action="reload">${icon('refresh')}<span>Reload From Disk</span></button>
@@ -3191,6 +3728,13 @@ final class WebDashboardServer {
               <p class="settings-note">${escapeHtml(snapshot.global.launchAtLoginStatusMessage || snapshot.global.webDashboardStatusMessage || 'Automation settings are applied locally on this Mac.')}</p>
             </div>
             <div class="settings-stack">
+              <div class="settings-card">
+                ${sectionTitle('refresh', 'Agent Controls')}
+                <p class="settings-note">Restart the ShipHook menu bar agent from the webUI. The dashboard will briefly disconnect while the app relaunches.</p>
+                <div class="toolbar">
+                  <button class="button warn" data-action="restart-agent">${icon('restart')}<span>Restart Agent</span></button>
+                </div>
+              </div>
               <div class="settings-card">
                 ${sectionTitle('globe', 'Dashboard Status')}
                 <div class="summary-list">
@@ -3336,6 +3880,16 @@ final class WebDashboardServer {
       const inviteLink = state.securityInviteLink
         ? `<div class="invite-card"><strong>@${escapeHtml(state.securityInviteLink.username)}</strong><span class="tiny">${escapeHtml(state.securityInviteLink.label)}</span><a href="${escapeHtmlAttr(state.securityInviteLink.url)}">${escapeHtml(state.securityInviteLink.url)}</a></div>`
         : '';
+      const github = security.currentGitHub;
+      const githubIdentity = github ? `
+        <div class="github-profile-card">
+          <span class="avatar large">${github.avatarURL ? `<img src="${escapeHtmlAttr(github.avatarURL)}" alt="">` : ''}</span>
+          <div>
+            <strong>${escapeHtml(github.name || '@' + github.login)}</strong>
+            <div class="tiny">@${escapeHtml(github.login)}${github.linkedAt ? ' · linked ' + escapeHtml(formatDate(github.linkedAt)) : ''}</div>
+          </div>
+        </div>
+      ` : '';
 
       return `
         <div class="settings-pane-grid">
@@ -3357,6 +3911,24 @@ final class WebDashboardServer {
                 <button class="button" data-action="security-register-passkey">${icon('key')}<span>Add Passkey</span></button>
               </div>
               ${state.securityStatus ? `<p class="settings-note">${escapeHtml(state.securityStatus)}</p>` : ''}
+            </div>
+            <div class="settings-card">
+              ${sectionTitle('github', 'GitHub Account')}
+              ${github ? `
+                ${githubIdentity}
+                <p class="settings-note">This GitHub link belongs to your webUI account. ShipHook's main agent still uses the global agent token for polling and publishing.</p>
+                <div class="toolbar">
+                  <button class="button warn" data-action="security-unlink-github">${icon('close')}<span>Unlink GitHub</span></button>
+                </div>
+              ` : `
+                <p class="settings-note">Link your own GitHub account to use your avatar in the webUI and add repositories from your accessible GitHub repos. This does not replace the main ShipHook agent token.</p>
+                <div class="field-grid single">
+                  ${textInput('Personal GitHub Token', 'security.githubToken', securityDraft.githubToken, 'password')}
+                </div>
+                <div class="toolbar">
+                  <button class="button secondary" data-action="security-link-github">${icon('github')}<span>Link GitHub</span></button>
+                </div>
+              `}
             </div>
             <div class="settings-card">
               ${sectionTitle('repo', 'Administrators')}
@@ -3408,6 +3980,38 @@ final class WebDashboardServer {
         activityTone(statusLabel)
       );
       const channelText = repo.runtime.releaseChannel === 'beta' ? 'Channel: Beta' : 'Channel: Stable';
+      const stageMessages = repo.runtime.stageMessages || [];
+      const stageList = stageMessages.length ? `
+        <div class="stage-list">
+          ${stageMessages.map((message, index) => `
+            <div class="stage-item ${index === stageMessages.length - 1 ? 'current' : ''}">
+              ${icon(index === stageMessages.length - 1 ? 'activity' : 'check')}
+              <span>${escapeHtml(message)}</span>
+            </div>
+          `).join('')}
+        </div>
+      ` : '<div class="empty">No build activity yet.</div>';
+      const suggestions = repo.runtime.lastErrorSuggestions || [];
+      const suggestionCards = suggestions.length ? `
+        <div class="diagnosis-list">
+          ${suggestions.map(suggestion => `
+            <div class="diagnosis-card">
+              ${icon('sparkles')}
+              <div>
+                <strong>${escapeHtml(suggestion.title)}</strong>
+                <div class="tiny">${escapeHtml(suggestion.detail)}</div>
+              </div>
+              <button class="button" data-action="error-suggestion" data-suggestion-action="${escapeHtmlAttr(suggestion.action)}" data-repo-id="${repo.id}">${escapeHtml(suggestion.buttonLabel)}</button>
+            </div>
+          `).join('')}
+        </div>
+      ` : '';
+      const logActions = repo.runtime.lastLogPath ? `
+        <div class="toolbar" style="margin-top: 12px;">
+          <a class="button" href="/api/log?repo=${encodeURIComponent(repo.id)}">${icon('download')}<span>Download Full Log</span></a>
+        </div>
+        <div class="tiny mono" style="margin-top: 10px;">${escapeHtml(repo.runtime.lastLogPath)}</div>
+      ` : '';
 
       node.innerHTML = `
         <section class="panel">
@@ -3422,16 +4026,15 @@ final class WebDashboardServer {
           <p>${escapeHtml(channelText)}</p>
           <p>Published version: ${escapeHtml(repo.publishedVersion || 'None')}</p>
           ${progress}
-          ${repo.runtime.lastError ? `<p>${escapeHtml(repo.runtime.lastError)}</p>` : ''}
+          ${repo.runtime.lastError ? `<p class="danger-text">${escapeHtml(repo.runtime.lastError)}</p>${suggestionCards}` : ''}
           <div class="row tiny" style="margin-top: 10px;">
             ${repo.runtime.buildStartedAt ? `<span>${escapeHtml(formatDate(repo.runtime.buildStartedAt))}</span>` : ''}
-            ${repo.runtime.lastLogPath ? `<span class="mono">${escapeHtml(repo.runtime.lastLogPath)}</span>` : ''}
           </div>
         </section>
         <section class="panel">
-          ${sectionTitle('terminal', 'Live Output', 'h2')}
-          ${repo.runtime.lastLog ? `<div class="log-panel">${escapeHtml(repo.runtime.lastLog)}</div>` : '<div class="empty">No output yet.</div>'}
-          ${repo.runtime.lastLogPath ? `<div class="tiny mono" style="margin-top: 10px;">${escapeHtml(repo.runtime.lastLogPath)}</div>` : ''}
+          ${sectionTitle('activity', 'Build Progress', 'h2')}
+          ${stageList}
+          ${logActions}
         </section>
       `;
     }
@@ -3737,11 +4340,15 @@ final class WebDashboardServer {
         overview: '<svg viewBox="0 0 24 24"><path d="M4 5h7v6H4z"/><path d="M13 5h7v10h-7z"/><path d="M4 13h7v6H4z"/><path d="M13 17h7v2h-7z"/></svg>',
         repos: '<svg viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v16H6.5A2.5 2.5 0 0 0 4 22z"/><path d="M8 8h8"/><path d="M8 12h8"/></svg>',
         repo: '<svg viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v16H6.5A2.5 2.5 0 0 0 4 22z"/><path d="M8 8h8"/><path d="M8 12h8"/></svg>',
+        github: '<svg viewBox="0 0 24 24"><path d="M12 2.8a9.2 9.2 0 0 0-2.9 17.94c.46.08.63-.2.63-.44v-1.55c-2.58.56-3.12-1.1-3.12-1.1-.42-1.06-1.03-1.34-1.03-1.34-.84-.58.06-.57.06-.57.93.07 1.42.96 1.42.96.83 1.42 2.17 1.01 2.7.77.08-.6.32-1.01.58-1.24-2.06-.23-4.22-1.03-4.22-4.58 0-1.01.36-1.84.95-2.49-.1-.23-.41-1.18.09-2.45 0 0 .78-.25 2.54.95a8.8 8.8 0 0 1 4.62 0c1.76-1.2 2.54-.95 2.54-.95.5 1.27.19 2.22.09 2.45.59.65.95 1.48.95 2.49 0 3.56-2.17 4.35-4.24 4.58.33.29.63.86.63 1.74v2.58c0 .24.17.52.64.43A9.2 9.2 0 0 0 12 2.8Z"/></svg>',
         'repo-refresh': '<svg viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v16H6.5A2.5 2.5 0 0 0 4 22z"/><path d="M8 8h6"/><path d="M8 12h5"/><path d="M16 9a3.5 3.5 0 1 1-1 6.86"/><path d="M16 7v2h-2"/></svg>',
         settings: '<svg viewBox="0 0 24 24"><path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/><circle cx="12" cy="12" r="4"/></svg>',
         user: '<svg viewBox="0 0 24 24"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/><path d="M4 20a8 8 0 0 1 16 0"/></svg>',
         gear: '<svg viewBox="0 0 24 24"><path d="M10.55 2.52h2.9l.43 2.14a7.92 7.92 0 0 1 1.72.71l1.87-1.14 2.05 2.05-1.14 1.87c.29.55.53 1.13.71 1.72l2.14.43v2.9l-2.14.43a7.92 7.92 0 0 1-.71 1.72l1.14 1.87-2.05 2.05-1.87-1.14a7.92 7.92 0 0 1-1.72.71l-.43 2.14h-2.9l-.43-2.14a7.92 7.92 0 0 1-1.72-.71l-1.87 1.14-2.05-2.05 1.14-1.87a7.92 7.92 0 0 1-.71-1.72L2.52 13.45v-2.9l2.14-.43c.18-.59.42-1.17.71-1.72L4.23 6.53l2.05-2.05 1.87 1.14c.55-.29 1.13-.53 1.72-.71zm1.45 6.23a3.25 3.25 0 1 0 0 6.5 3.25 3.25 0 0 0 0-6.5Z"/></svg>',
+        restart: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/><path d="M12 8v5l3 2"/></svg>',
         refresh: '<svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>',
+        check: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 6-7"/></svg>',
+        download: '<svg viewBox="0 0 24 24"><path d="M12 4v10"/><path d="m7 9 5 5 5-5"/><path d="M5 20h14"/></svg>',
         save: '<svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v6h8V4"/><path d="M9 18h6"/></svg>',
         play: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4z"/></svg>',
         pause: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 9v6"/><path d="M14 9v6"/></svg>',
@@ -3891,6 +4498,89 @@ final class WebDashboardServer {
       renderModal();
     }
 
+    async function linkGitHubFromSettings() {
+      const token = securityDraft.githubToken.trim();
+      if (!token) {
+        throw new Error('Enter a GitHub token first.');
+      }
+      await securityRequest('/api/github/link', { token }, 'GitHub account linked.');
+      securityDraft.githubToken = '';
+      state.githubRepos = [];
+      state.githubReposError = '';
+      renderModal();
+    }
+
+    async function unlinkGitHubFromSettings() {
+      await securityRequest('/api/github/unlink', {}, 'GitHub account unlinked.');
+      state.githubRepos = [];
+      state.selectedGitHubRepoId = null;
+      renderModal();
+    }
+
+    async function loadGitHubRepositories() {
+      state.githubReposLoading = true;
+      state.githubReposError = '';
+      renderModal();
+      try {
+        const response = await fetch('/api/github/repositories');
+        if (response.status === 401) {
+          window.location.href = '/';
+          return;
+        }
+        const payload = await response.json();
+        if (!response.ok || payload.ok === false) {
+          throw new Error(payload.error || 'Could not load GitHub repositories.');
+        }
+        state.githubRepos = payload.repositories || [];
+        state.selectedGitHubRepoId = state.selectedGitHubRepoId || state.githubRepos[0]?.id || null;
+      } catch (error) {
+        state.githubReposError = error.message || String(error);
+      } finally {
+        state.githubReposLoading = false;
+        renderModal();
+      }
+    }
+
+    async function cloneInspectSelectedGitHubRepository() {
+      const repo = state.githubRepos.find(item => String(item.id) === String(state.selectedGitHubRepoId));
+      if (!repo) {
+        throw new Error('Choose a GitHub repository first.');
+      }
+      const owner = repo.ownerLogin;
+      const name = repo.name;
+      addRepoDraft.fallbackOwner = owner;
+      addRepoDraft.fallbackRepo = name;
+      addRepoDraft.fallbackBranch = repo.defaultBranch || 'main';
+      addRepoDraft.githubCloneURL = repo.cloneURL || `https://github.com/${owner}/${name}.git`;
+      addRepoDraft.localCheckoutPath = addRepoDraft.localCheckoutPath || `~/Developer/${name}`;
+
+      const response = await fetch('/api/github/clone-inspect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          owner,
+          repo: name,
+          branch: addRepoDraft.fallbackBranch,
+          cloneURL: addRepoDraft.githubCloneURL,
+          localCheckoutPath: addRepoDraft.localCheckoutPath
+        })
+      });
+      if (response.status === 401) {
+        window.location.href = '/';
+        return;
+      }
+      const payload = await response.json();
+      if (payload.snapshot) {
+        applySnapshot(payload.snapshot);
+      }
+      if (!response.ok || payload.ok === false) {
+        throw new Error(payload.error || 'Could not clone and inspect repository.');
+      }
+      state.addRepoInspectionPreview = payload.inspectionPreview || null;
+      setStatus({ kind: 'ok', message: payload.message || 'GitHub repository inspected.' });
+      renderModal();
+    }
+
     async function registerPasskeyFromDashboard() {
       if (!window.PublicKeyCredential || !navigator.credentials?.create) {
         throw new Error('This browser does not support passkey creation.');
@@ -4000,6 +4690,31 @@ final class WebDashboardServer {
       return config;
     }
 
+    async function performErrorSuggestion(action, repoId) {
+      switch (action) {
+        case 'recloneRepository':
+          if (window.confirm('Reclone this repository locally? ShipHook will delete the current checkout folder and clone it again.')) {
+            await runCommand({ type: 'recloneRepository', repositoryID: repoId }, 'Repository recloned.');
+          }
+          break;
+        case 'openSigningSettings':
+          state.settingsPane = 'signing';
+          openSettingsModal();
+          break;
+        case 'openGeneralSettings':
+          state.settingsPane = 'general';
+          openSettingsModal();
+          break;
+        case 'openRepositoryConfiguration':
+          state.activePane = 'configuration';
+          render();
+          resetWorkspaceScroll();
+          break;
+        default:
+          setStatus({ kind: 'info', message: 'No automatic recovery action is available for this suggestion yet.' });
+      }
+    }
+
     document.addEventListener('click', async event => {
       const target = event.target.closest('[data-action], [data-select-repo]');
       if (!target) return;
@@ -4007,9 +4722,14 @@ final class WebDashboardServer {
 
       const selectedRepo = target.getAttribute('data-select-repo');
       if (selectedRepo) {
+        const didChangeProject = state.selectedRepoId !== selectedRepo;
         state.selectedRepoId = selectedRepo;
         state.mobileSidebarOpen = false;
+        if (didChangeProject) {
+          animateNavigation('project');
+        }
         render();
+        resetWorkspaceScroll();
         return;
       }
 
@@ -4018,7 +4738,9 @@ final class WebDashboardServer {
         switch (action) {
           case 'set-pane':
             state.activePane = target.dataset.pane;
+            animateNavigation('main');
             render();
+            resetWorkspaceScroll();
             break;
           case 'toggle-config-section':
             state.configSections[target.dataset.section] = !state.configSections[target.dataset.section];
@@ -4035,8 +4757,12 @@ final class WebDashboardServer {
           case 'open-settings':
             openSettingsModal();
             break;
+          case 'open-settings-pane':
+            openSettingsModal(target.dataset.settingsPane || 'general');
+            break;
           case 'set-settings-pane':
             state.settingsPane = target.dataset.settingsPane || 'general';
+            animateNavigation('settings');
             renderModal();
             if (state.settingsPane === 'account' && !state.securityState && !state.securityLoading) {
               await fetchSecurityState();
@@ -4059,6 +4785,10 @@ final class WebDashboardServer {
             state.addRepoInspectionPreview = null;
             state.explorerModal = null;
             state.settingsModalOpen = false;
+            animateNavigation('modal');
+            if (!state.securityState && !state.securityLoading) {
+              await fetchSecurityState().catch(() => {});
+            }
             renderModal();
             break;
           case 'close-add-repo':
@@ -4077,6 +4807,26 @@ final class WebDashboardServer {
               }
             }, 'Inspection succeeded.');
             renderModal();
+            break;
+          case 'load-github-repos':
+            await loadGitHubRepositories();
+            break;
+          case 'select-github-repo':
+            state.selectedGitHubRepoId = target.dataset.githubRepoId;
+            {
+              const repo = state.githubRepos.find(item => String(item.id) === String(state.selectedGitHubRepoId));
+              if (repo) {
+                addRepoDraft.fallbackOwner = repo.ownerLogin;
+                addRepoDraft.fallbackRepo = repo.name;
+                addRepoDraft.fallbackBranch = repo.defaultBranch || 'main';
+                addRepoDraft.githubCloneURL = repo.cloneURL || `https://github.com/${repo.ownerLogin}/${repo.name}.git`;
+                addRepoDraft.localCheckoutPath = `~/Developer/${repo.name}`;
+              }
+            }
+            renderModal();
+            break;
+          case 'clone-inspect-github-repo':
+            await cloneInspectSelectedGitHubRepository();
             break;
           case 'confirm-add-repo':
             await runCommand({
@@ -4103,6 +4853,11 @@ final class WebDashboardServer {
           case 'reload':
             await runCommand({ type: 'reloadConfiguration' }, 'Configuration reloaded.');
             break;
+          case 'restart-agent':
+            if (window.confirm('Restart the ShipHook agent? The web dashboard will briefly disconnect while the app relaunches.')) {
+              await runCommand({ type: 'restartAgent' }, 'Restarting ShipHook.');
+            }
+            break;
           case 'poll-all':
             await runCommand({ type: 'pollAll' }, 'Polling all repositories.');
             break;
@@ -4113,6 +4868,9 @@ final class WebDashboardServer {
             if (window.confirm('Reclone this repository locally? ShipHook will delete the current checkout folder and clone it again.')) {
               await runCommand({ type: 'recloneRepository', repositoryID: target.dataset.repoId }, 'Repository recloned.');
             }
+            break;
+          case 'error-suggestion':
+            await performErrorSuggestion(target.dataset.suggestionAction, target.dataset.repoId);
             break;
           case 'set-repo-enabled':
             await runCommand({
@@ -4165,6 +4923,14 @@ final class WebDashboardServer {
             break;
           case 'security-register-passkey':
             await registerPasskeyFromDashboard();
+            break;
+          case 'security-link-github':
+            await linkGitHubFromSettings();
+            break;
+          case 'security-unlink-github':
+            if (window.confirm('Unlink GitHub from your webUI account?')) {
+              await unlinkGitHubFromSettings();
+            }
             break;
           case 'security-invite-admin':
             await inviteAdminFromSettings();
@@ -4278,7 +5044,9 @@ final class WebDashboardServer {
       target[segments.at(-1)] = value;
     }
 
-    fetchState({ preserveDraft: false }).then(() => {
+    fetchState({ preserveDraft: false }).then(async () => {
+      await fetchSecurityState().catch(() => {});
+      renderOverview();
       scheduleAutoRefresh();
     }).catch(error => {
       setStatus({ kind: 'error', message: error.message || String(error) });
@@ -4403,6 +5171,10 @@ private struct WebDashboardFinishPasskeyAuthenticationRequest: Codable {
     var userHandle: String?
 }
 
+private final class WebDashboardAsyncResultBox<T>: @unchecked Sendable {
+    var result: Result<T, Error>?
+}
+
 private final class WebDashboardSecurityController {
     private enum PasswordAlgorithm: String, Codable {
         case legacyIteratedSHA256 = "iterated-sha256"
@@ -4513,6 +5285,11 @@ private final class WebDashboardSecurityController {
             var mustChangePassword: Bool
             var passwordSetupToken: String?
             var createdAt: Date
+            var githubLogin: String?
+            var githubName: String?
+            var githubAvatarURL: String?
+            var githubProfileURL: String?
+            var githubLinkedAt: Date?
         }
 
         var username: String
@@ -4702,7 +5479,8 @@ private final class WebDashboardSecurityController {
                         username: admin.username,
                         mustChangePassword: admin.mustChangePassword,
                         createdAt: admin.createdAt,
-                        isCurrentUser: admin.username.caseInsensitiveCompare(currentUsername) == .orderedSame
+                        isCurrentUser: admin.username.caseInsensitiveCompare(currentUsername) == .orderedSame,
+                        github: Self.githubProfile(from: admin)
                     )
                 }
             let passkeys = settings.passkeys
@@ -4732,6 +5510,7 @@ private final class WebDashboardSecurityController {
             return WebDashboardSecurityStateResponse(
                 ok: true,
                 currentUsername: currentUsername,
+                currentGitHub: adminLocked(username: currentUsername).flatMap(Self.githubProfile(from:)),
                 admins: admins,
                 passkeys: passkeys,
                 auditEntries: audit
@@ -4948,6 +5727,55 @@ private final class WebDashboardSecurityController {
             sessions = sessions.filter { $0.value.username.caseInsensitiveCompare(username) != .orderedSame }
             try persistSettingsLocked()
             appendAuditEntryLocked(username: currentUsername, action: "admin.deleted", detail: "@\(username)", request: request)
+        }
+    }
+
+    func linkGitHubProfile(_ profile: GitHubAuthenticatedUser, token: String, request: HttpRequest) throws -> WebDashboardAuthMessageResponse {
+        try queue.sync {
+            guard let username = currentUsernameUnlocked(request: request),
+                  let index = settings.admins.firstIndex(where: { $0.username.caseInsensitiveCompare(username) == .orderedSame }) else {
+                throw SecurityError.unauthorized
+            }
+            try Self.storeGitHubToken(token, for: username)
+            settings.admins[index].githubLogin = profile.login
+            settings.admins[index].githubName = profile.name
+            settings.admins[index].githubAvatarURL = profile.avatarURL?.absoluteString
+            settings.admins[index].githubProfileURL = profile.profileURL?.absoluteString
+            settings.admins[index].githubLinkedAt = Date()
+            try persistSettingsLocked()
+            appendAuditEntryLocked(username: username, action: "account.github.linked", detail: "@\(profile.login)", request: request)
+            return WebDashboardAuthMessageResponse(ok: true, message: "Linked GitHub account @\(profile.login).")
+        }
+    }
+
+    func unlinkGitHubProfile(request: HttpRequest) throws -> WebDashboardAuthMessageResponse {
+        try queue.sync {
+            guard let username = currentUsernameUnlocked(request: request),
+                  let index = settings.admins.firstIndex(where: { $0.username.caseInsensitiveCompare(username) == .orderedSame }) else {
+                throw SecurityError.unauthorized
+            }
+            let oldLogin = settings.admins[index].githubLogin
+            settings.admins[index].githubLogin = nil
+            settings.admins[index].githubName = nil
+            settings.admins[index].githubAvatarURL = nil
+            settings.admins[index].githubProfileURL = nil
+            settings.admins[index].githubLinkedAt = nil
+            try Self.deleteGitHubToken(for: username)
+            try persistSettingsLocked()
+            appendAuditEntryLocked(username: username, action: "account.github.unlinked", detail: oldLogin.map { "@\($0)" }, request: request)
+            return WebDashboardAuthMessageResponse(ok: true, message: "GitHub account unlinked.")
+        }
+    }
+
+    func githubTokenForCurrentUser(request: HttpRequest) throws -> String {
+        try queue.sync {
+            guard let username = currentUsernameUnlocked(request: request) else {
+                throw SecurityError.unauthorized
+            }
+            guard let token = try Self.loadGitHubToken(for: username), !token.isEmpty else {
+                throw SecurityError.invalidInput("Link your GitHub account first.")
+            }
+            return token
         }
     }
 
@@ -5878,7 +6706,12 @@ private final class WebDashboardSecurityController {
                     passwordAlgorithm: generatePasswordHash ? PasswordAlgorithm.pbkdf2SHA256.rawValue : nil,
                     mustChangePassword: mustChangePassword,
                     passwordSetupToken: passwordSetupToken,
-                    createdAt: Date()
+                    createdAt: Date(),
+                    githubLogin: nil,
+                    githubName: nil,
+                    githubAvatarURL: nil,
+                    githubProfileURL: nil,
+                    githubLinkedAt: nil
                 )
             )
         }
@@ -5913,6 +6746,72 @@ private final class WebDashboardSecurityController {
 
     private func adminLocked(username: String) -> StoredSettings.Admin? {
         settings.admins.first { $0.username.caseInsensitiveCompare(username) == .orderedSame }
+    }
+
+    private static func githubProfile(from admin: StoredSettings.Admin) -> WebDashboardSecurityStateResponse.GitHubProfile? {
+        guard let login = admin.githubLogin, !login.isEmpty else {
+            return nil
+        }
+        return WebDashboardSecurityStateResponse.GitHubProfile(
+            login: login,
+            name: admin.githubName,
+            avatarURL: admin.githubAvatarURL,
+            profileURL: admin.githubProfileURL,
+            linkedAt: admin.githubLinkedAt
+        )
+    }
+
+    private static func githubKeychainAccount(for username: String) -> String {
+        "webui:\(username.lowercased())"
+    }
+
+    private static func storeGitHubToken(_ token: String, for username: String) throws {
+        let account = githubKeychainAccount(for: username)
+        let data = Data(token.utf8)
+        let baseQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "ShipHook.WebDashboard.GitHubToken",
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(baseQuery as CFDictionary)
+        var addQuery = baseQuery
+        addQuery[kSecValueData as String] = data
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        guard status == errSecSuccess else {
+            throw SecurityError.invalidInput("Could not store GitHub token in Keychain.")
+        }
+    }
+
+    private static func loadGitHubToken(for username: String) throws -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "ShipHook.WebDashboard.GitHubToken",
+            kSecAttrAccount as String: githubKeychainAccount(for: username),
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound {
+            return nil
+        }
+        guard status == errSecSuccess, let data = result as? Data else {
+            throw SecurityError.invalidInput("Could not read GitHub token from Keychain.")
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func deleteGitHubToken(for username: String) throws {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "ShipHook.WebDashboard.GitHubToken",
+            kSecAttrAccount as String: githubKeychainAccount(for: username)
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw SecurityError.invalidInput("Could not remove GitHub token from Keychain.")
+        }
     }
 
     func currentUsername(request: HttpRequest) -> String? {
@@ -5951,7 +6850,12 @@ private final class WebDashboardSecurityController {
                     passwordAlgorithm: settings.passwordAlgorithm ?? PasswordAlgorithm.legacyIteratedSHA256.rawValue,
                     mustChangePassword: false,
                     passwordSetupToken: nil,
-                    createdAt: Date()
+                    createdAt: Date(),
+                    githubLogin: nil,
+                    githubName: nil,
+                    githubAvatarURL: nil,
+                    githubProfileURL: nil,
+                    githubLinkedAt: nil
                 )
             ]
             settings.passwordConfigured = true

@@ -32,7 +32,9 @@ enum NotarizationError: LocalizedError {
 enum PipelineStage {
     case syncing(String)
     case planningRelease
+    case building
     case archiving
+    case signing
     case notarizing
     case publishing
 }
@@ -247,14 +249,14 @@ struct PipelineRunner {
             guard let xcode = repository.xcode else {
                 throw NSError(domain: "ShipHook", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing xcode build configuration for \(repository.name)."])
             }
-            onStageChange?(.archiving)
+            onStageChange?(.building)
             let outcome = try runXcodeBuild(repository: repository, xcode, workingDirectory: workingDirectory, environment: baseEnvironment, onOutput: appendOutput)
             artifactPath = outcome.artifactPath
         case .shell:
             guard let shell = repository.shell else {
                 throw NSError(domain: "ShipHook", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing shell build configuration for \(repository.name)."])
             }
-            onStageChange?(.archiving)
+            onStageChange?(.building)
             _ = try commandRunner.run(shell.command, currentDirectory: workingDirectory, environment: baseEnvironment, onOutput: appendOutput)
             artifactPath = shell.artifactPath.expandingTildeInPath
         }
@@ -278,6 +280,7 @@ struct PipelineRunner {
             checkoutPath: checkoutPath,
             onOutput: appendOutput
         )
+        onStageChange?(.signing)
         try signingInspector.verifyBuiltApp(at: artifactPath, expectedTeamID: expectedTeamID)
         try notarizeAndStapleAppIfNeeded(
             artifactPath: artifactPath,

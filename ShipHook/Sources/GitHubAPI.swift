@@ -53,8 +53,70 @@ struct GitHubCommitAuthor: Equatable, Hashable {
     var profileURL: URL?
 }
 
+struct GitHubAuthenticatedUser: Codable, Equatable, Hashable {
+    var login: String
+    var name: String?
+    var avatarURL: URL?
+    var profileURL: URL?
+}
+
+struct GitHubRepositorySummary: Codable, Equatable, Hashable, Identifiable {
+    var id: Int
+    var name: String
+    var fullName: String
+    var ownerLogin: String
+    var defaultBranch: String
+    var htmlURL: URL?
+    var cloneURL: URL?
+    var sshURL: String?
+    var isPrivate: Bool
+    var isFork: Bool
+    var pushedAt: Date?
+}
+
 struct GitHubAPI {
     private let session: URLSession = .shared
+
+    func authenticatedUser(token: String?) async throws -> GitHubAuthenticatedUser {
+        let url = URL(string: "https://api.github.com/user")!
+        var request = makeRequest(url: url, token: token)
+        request.httpMethod = "GET"
+
+        let (data, response) = try await session.data(for: request)
+        try validateResponse(data: data, response: response)
+        let payload = try JSONDecoder.github.decode(UserResponse.self, from: data)
+        return GitHubAuthenticatedUser(
+            login: payload.login,
+            name: payload.name,
+            avatarURL: URL(string: payload.avatarURL),
+            profileURL: URL(string: payload.htmlURL)
+        )
+    }
+
+    func listAuthenticatedRepositories(token: String?, perPage: Int = 100) async throws -> [GitHubRepositorySummary] {
+        let url = URL(string: "https://api.github.com/user/repos?per_page=\(max(1, min(perPage, 100)))&sort=pushed&affiliation=owner,collaborator,organization_member")!
+        var request = makeRequest(url: url, token: token)
+        request.httpMethod = "GET"
+
+        let (data, response) = try await session.data(for: request)
+        try validateResponse(data: data, response: response)
+        let payload = try JSONDecoder.github.decode([RepositoryResponse].self, from: data)
+        return payload.map { repository in
+            GitHubRepositorySummary(
+                id: repository.id,
+                name: repository.name,
+                fullName: repository.fullName,
+                ownerLogin: repository.owner.login,
+                defaultBranch: repository.defaultBranch,
+                htmlURL: URL(string: repository.htmlURL),
+                cloneURL: URL(string: repository.cloneURL),
+                sshURL: repository.sshURL,
+                isPrivate: repository.private,
+                isFork: repository.fork,
+                pushedAt: repository.pushedAt
+            )
+        }
+    }
 
     func latestBranchSnapshot(
         owner: String,
@@ -345,4 +407,50 @@ private struct CommitResponse: Decodable {
 
     var author: Author?
     var commit: CommitDetails
+}
+
+private struct UserResponse: Decodable {
+    var login: String
+    var name: String?
+    var avatarURL: String
+    var htmlURL: String
+
+    enum CodingKeys: String, CodingKey {
+        case login
+        case name
+        case avatarURL = "avatar_url"
+        case htmlURL = "html_url"
+    }
+}
+
+private struct RepositoryResponse: Decodable {
+    struct Owner: Decodable {
+        var login: String
+    }
+
+    var id: Int
+    var name: String
+    var fullName: String
+    var owner: Owner
+    var defaultBranch: String
+    var htmlURL: String
+    var cloneURL: String
+    var sshURL: String
+    var `private`: Bool
+    var fork: Bool
+    var pushedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case fullName = "full_name"
+        case owner
+        case defaultBranch = "default_branch"
+        case htmlURL = "html_url"
+        case cloneURL = "clone_url"
+        case sshURL = "ssh_url"
+        case `private` = "private"
+        case fork
+        case pushedAt = "pushed_at"
+    }
 }

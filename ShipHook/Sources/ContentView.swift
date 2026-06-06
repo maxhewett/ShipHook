@@ -402,8 +402,12 @@ struct ContentView: View {
             return "Syncing"
         case .planningRelease:
             return "Planning"
+        case .building:
+            return "Building"
         case .archiving:
             return "Archiving"
+        case .signing:
+            return "Signing"
         case .notarizing:
             return ShipHookLocale.notarising
         case .publishing:
@@ -420,13 +424,17 @@ struct ContentView: View {
         case .syncing:
             return (1, 5, "Syncing")
         case .planningRelease:
-            return (2, 5, "Planning")
+            return (2, 7, "Planning")
+        case .building:
+            return (3, 7, detail ?? "Building")
         case .archiving:
-            return (3, 5, detail ?? "Archiving")
+            return (4, 7, detail ?? "Archiving")
+        case .signing:
+            return (5, 7, detail ?? "Signing")
         case .notarizing:
-            return (4, 5, detail ?? ShipHookLocale.notarising)
+            return (6, 7, detail ?? ShipHookLocale.notarising)
         case .publishing:
-            return (5, 5, detail ?? "Publishing")
+            return (7, 7, detail ?? "Publishing")
         }
     }
 
@@ -1181,10 +1189,7 @@ private struct RepositoryEditor: View {
     @State private var buildExplorerPage = 0
     @State private var buildDetailsCandidate: BuildRecord?
     @State private var managerBuildDetailsCandidate: BuildRecord?
-    @State private var followLogOutput = true
     @State private var copiedLogToastVisible = false
-
-    private let logBottomAnchorID = "shiphook-log-bottom-anchor"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1201,7 +1206,7 @@ private struct RepositoryEditor: View {
                 switch selectedTab {
                 case .status:
                     statusPanel
-                    activityLogPanel
+                    stageOutputPanel
                 case .builds:
                     buildHistoryPanel
                     releaseExplorerPanel
@@ -1388,10 +1393,18 @@ private struct RepositoryEditor: View {
             }
 
             if let error = runtimeState.lastError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
+                VStack(alignment: .leading, spacing: 10) {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+
+                    if !runtimeState.lastErrorSuggestions.isEmpty {
+                        ForEach(runtimeState.lastErrorSuggestions) { suggestion in
+                            errorSuggestionRow(suggestion)
+                        }
+                    }
+                }
             }
 
             HStack(alignment: .top, spacing: 18) {
@@ -1419,67 +1432,59 @@ private struct RepositoryEditor: View {
         .glassSection()
     }
 
-    private var activityLogPanel: some View {
+    private var stageOutputPanel: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label("Live Output", systemImage: "text.alignleft")
+                Label("Build Progress", systemImage: "point.3.connected.trianglepath.dotted")
                     .font(.title3.bold())
                 Spacer()
-                Button {
-                    followLogOutput.toggle()
-                } label: {
-                    Label(followLogOutput ? "Live" : "Paused", systemImage: followLogOutput ? "play.circle.fill" : "pause.circle.fill")
+                if let logPath = runtimeState.lastLogPath, !logPath.isEmpty {
+                    Button {
+                        revealLatestLog()
+                    } label: {
+                        Label("Reveal Log", systemImage: "arrow.down.doc")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
                 Button {
                     copyLatestLogToPasteboard()
                 } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
+                    Label("Copy Log Tail", systemImage: "doc.on.doc")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(runtimeState.lastLog.isEmpty)
             }
 
-            if runtimeState.lastLog.isEmpty {
+            if runtimeState.stageMessages.isEmpty {
                 VStack(spacing: 8) {
-                    Image(systemName: "terminal")
+                    Image(systemName: "clock")
                         .font(.title3)
                         .foregroundStyle(.secondary)
-                    Text("No output yet.")
+                    Text("No build activity yet.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                .frame(maxWidth: .infinity, minHeight: 180)
+                .frame(maxWidth: .infinity, minHeight: 120)
                 .background(.regularMaterial.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView(.vertical) {
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(runtimeState.lastLog)
-                                .font(.system(.caption, design: .monospaced))
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(runtimeState.stageMessages.enumerated()), id: \.offset) { index, message in
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: index == runtimeState.stageMessages.count - 1 ? "smallcircle.filled.circle" : "checkmark.circle")
+                                .foregroundStyle(index == runtimeState.stageMessages.count - 1 ? statusColor : .secondary)
+                                .frame(width: 18)
+                            Text(message)
+                                .font(.caption)
+                                .foregroundStyle(index == runtimeState.stageMessages.count - 1 ? .primary : .secondary)
                                 .textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .topLeading)
-                                .padding(12)
-                            Color.clear
-                                .frame(height: 1)
-                                .id(logBottomAnchorID)
                         }
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 180, maxHeight: 260)
-                    .background(.regularMaterial.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .onAppear {
-                        guard followLogOutput else { return }
-                        scrollLogToBottom(proxy: proxy, animated: false)
-                    }
-                    .onChange(of: runtimeState.lastLog) { _, _ in
-                        guard followLogOutput else { return }
-                        scrollLogToBottom(proxy: proxy, animated: true)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(.regularMaterial.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
 
             if let logPath = runtimeState.lastLogPath, !logPath.isEmpty {
@@ -2142,8 +2147,12 @@ private struct RepositoryEditor: View {
             return "Syncing Repository"
         case .planningRelease:
             return "Planning Release"
+        case .building:
+            return "Building"
         case .archiving:
             return "Archiving"
+        case .signing:
+            return "Signing"
         case .notarizing:
             return ShipHookLocale.notarising
         case .publishing:
@@ -2160,13 +2169,17 @@ private struct RepositoryEditor: View {
         case .syncing:
             return (1, 5, "Syncing")
         case .planningRelease:
-            return (2, 5, "Planning")
+            return (2, 7, "Planning")
+        case .building:
+            return (3, 7, detail ?? "Building")
         case .archiving:
-            return (3, 5, detail ?? "Archiving")
+            return (4, 7, detail ?? "Archiving")
+        case .signing:
+            return (5, 7, detail ?? "Signing")
         case .notarizing:
-            return (4, 5, detail ?? ShipHookLocale.notarising)
+            return (6, 7, detail ?? ShipHookLocale.notarising)
         case .publishing:
-            return (5, 5, detail ?? "Publishing")
+            return (7, 7, detail ?? "Publishing")
         }
     }
 
@@ -2273,16 +2286,48 @@ private struct RepositoryEditor: View {
         }
     }
 
-    private func scrollLogToBottom(proxy: ScrollViewProxy, animated: Bool) {
-        let action = {
-            proxy.scrollTo(logBottomAnchorID, anchor: .bottom)
+    private func revealLatestLog() {
+        guard let logPath = runtimeState.lastLogPath, !logPath.isEmpty else {
+            return
         }
-        if animated {
-            withAnimation(.easeOut(duration: 0.16)) {
-                action()
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: (logPath as NSString).expandingTildeInPath)])
+    }
+
+    @ViewBuilder
+    private func errorSuggestionRow(_ suggestion: BuildErrorSuggestion) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "wand.and.stars")
+                .foregroundStyle(.orange)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(suggestion.title)
+                    .font(.caption.weight(.semibold))
+                Text(suggestion.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-        } else {
-            action()
+            Spacer(minLength: 8)
+            Button(suggestion.buttonLabel) {
+                performErrorSuggestion(suggestion)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(10)
+        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func performErrorSuggestion(_ suggestion: BuildErrorSuggestion) {
+        switch suggestion.action {
+        case .recloneRepository:
+            try? appState.recloneRepository(repository.id)
+        case .openSigningSettings, .openRepositoryConfiguration:
+            selectedTab = .configuration
+            showBuildAutomation = true
+            showSparkleSettings = true
+        case .openGeneralSettings:
+            selectedTab = .configuration
+            showRepositorySetup = true
         }
     }
 

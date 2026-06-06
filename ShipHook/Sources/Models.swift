@@ -543,9 +543,26 @@ enum RepositoryBuildPhase: String {
     case queued
     case syncing
     case planningRelease
+    case building
     case archiving
+    case signing
     case notarizing
     case publishing
+}
+
+enum BuildErrorSuggestionAction: String, Codable, Hashable {
+    case recloneRepository
+    case openSigningSettings
+    case openRepositoryConfiguration
+    case openGeneralSettings
+}
+
+struct BuildErrorSuggestion: Codable, Hashable, Identifiable {
+    var id: String
+    var title: String
+    var detail: String
+    var buttonLabel: String
+    var action: BuildErrorSuggestionAction
 }
 
 struct RepositoryRuntimeState: Identifiable {
@@ -559,9 +576,11 @@ struct RepositoryRuntimeState: Identifiable {
     var buildPhase: RepositoryBuildPhase
     var buildDetail: String?
     var summary: String
+    var stageMessages: [String]
     var lastLog: String
     var lastLogPath: String?
     var lastError: String?
+    var lastErrorSuggestions: [BuildErrorSuggestion]
     var releaseChannel: ReleaseChannel?
     var lastCommitAuthorLogin: String?
     var lastCommitAuthorAvatarURL: URL?
@@ -579,9 +598,11 @@ struct RepositoryRuntimeState: Identifiable {
             buildPhase: .idle,
             buildDetail: nil,
             summary: "Waiting for first poll",
+            stageMessages: [],
             lastLog: "",
             lastLogPath: nil,
             lastError: nil,
+            lastErrorSuggestions: [],
             releaseChannel: nil,
             lastCommitAuthorLogin: nil,
             lastCommitAuthorAvatarURL: nil,
