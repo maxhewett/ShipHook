@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import Security
 import Swifter
@@ -344,6 +345,11 @@ private struct WebDashboardErrorResponse: Encodable {
     var error: String
 }
 
+private struct WebDashboardMessageResponse: Encodable {
+    var ok: Bool
+    var message: String
+}
+
 private struct WebDashboardSecurityStateResponse: Codable {
     struct GitHubProfile: Codable {
         var login: String
@@ -647,6 +653,26 @@ final class WebDashboardServer {
             }
         }
 
+        server.POST["/api/agent/hard-restart"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            guard self.securityController.isAuthorized(request: request) else {
+                return self.unauthorizedJSONResponse(request: request)
+            }
+            self.securityController.recordAuditEvent(
+                action: "dashboard.agent.hard_restart_requested",
+                detail: "Agent data unavailable",
+                request: request,
+                username: self.securityController.currentUsername(request: request)
+            )
+            self.scheduleHardRestart()
+            return self.jsonResponse(
+                for: WebDashboardMessageResponse(ok: true, message: "Hard restart scheduled. ShipHook should reconnect shortly."),
+                request: request
+            )
+        }
+
         server["/security"] = { [weak self] request in
             guard let self else {
                 return .internalServerError
@@ -690,6 +716,27 @@ final class WebDashboardServer {
                 commandHandler(command)
             }
         }
+    }
+
+    private func scheduleHardRestart() {
+        let bundlePath = Bundle.main.bundleURL.path
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let escapedBundlePath = shellEscaped(bundlePath)
+        let command = """
+        /bin/sleep 1; /usr/bin/open -n \(escapedBundlePath); /bin/sleep 2; /bin/kill -KILL \(pid) 2>/dev/null
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-lc", command]
+        try? process.run()
+
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.2) {
+            Darwin.exit(0)
+        }
+    }
+
+    private func shellEscaped(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private func waitForAsync<T>(_ operation: @escaping () async throws -> T) throws -> T {
@@ -1643,6 +1690,14 @@ final class WebDashboardServer {
     .summary-pill .muted {
       color: rgba(255,255,255,0.66);
     }
+    .summary-pill.danger {
+      color: var(--danger);
+      border-color: rgba(255,109,122,0.34);
+      background: linear-gradient(135deg, rgba(255,109,122,0.18), rgba(255,109,122,0.06));
+    }
+    .summary-pill.danger .muted {
+      color: color-mix(in srgb, var(--danger) 74%, var(--muted));
+    }
     .mobile-sidebar-toggle {
       display: none;
     }
@@ -2148,6 +2203,40 @@ final class WebDashboardServer {
     }
     .danger-text {
       color: var(--danger);
+    }
+    .agent-unavailable {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
+      border: 1px solid rgba(255,109,122,0.26);
+      background:
+        radial-gradient(circle at top left, rgba(255,109,122,0.18), transparent 34%),
+        rgba(16, 20, 28, 0.9);
+    }
+    .agent-unavailable-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 16px;
+      display: inline-grid;
+      place-items: center;
+      color: var(--danger);
+      background: rgba(255,109,122,0.12);
+      border: 1px solid rgba(255,109,122,0.24);
+    }
+    .agent-unavailable-icon .icon {
+      width: 22px;
+      height: 22px;
+    }
+    .agent-unavailable h2 {
+      margin: 0 0 6px;
+      font: 700 22px/1.1 var(--font-body);
+      letter-spacing: -0.03em;
+    }
+    .agent-unavailable p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 780px;
     }
     .collection {
       display: grid;
@@ -2793,6 +2882,16 @@ final class WebDashboardServer {
       .audit-row {
         background: rgba(255,255,255,0.80);
       }
+      .agent-unavailable {
+        background:
+          radial-gradient(circle at top left, rgba(209,78,92,0.13), transparent 34%),
+          rgba(255,255,255,0.86);
+        border-color: rgba(209,78,92,0.22);
+      }
+      .agent-unavailable-icon {
+        background: rgba(209,78,92,0.10);
+        border-color: rgba(209,78,92,0.20);
+      }
       .audit-icon {
         background: rgba(24,34,51,0.05);
       }
@@ -3018,6 +3117,9 @@ final class WebDashboardServer {
       selectedGitHubRepoId: null,
       toasts: [],
       toastTimerId: null,
+      agentUnavailable: false,
+      agentUnavailableMessage: '',
+      hardRestarting: false,
       saving: false,
       refreshTimerId: null,
       refreshInFlight: false
@@ -3105,13 +3207,29 @@ final class WebDashboardServer {
       githubToken: ''
     };
 
+    async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(url, { ...options, signal: controller.signal });
+      } finally {
+        window.clearTimeout(timer);
+      }
+    }
+
     async function fetchState({ preserveDraft = true, clearStatus = true } = {}) {
-      const response = await fetch('/api/state');
+      const response = await fetchWithTimeout('/api/state');
       if (response.status === 401) {
         window.location.href = '/';
         return;
       }
+      if (!response.ok) {
+        throw new Error(`Could not fetch agent data (${response.status}).`);
+      }
       const snapshot = await response.json();
+      state.agentUnavailable = false;
+      state.agentUnavailableMessage = '';
+      state.hardRestarting = false;
       applySnapshot(snapshot, { preserveDraft });
       if (clearStatus) {
         setStatus(null);
@@ -3177,7 +3295,7 @@ final class WebDashboardServer {
     }
 
     async function runCommand(payload, successMessage) {
-      const response = await fetch('/api/command', {
+      const response = await fetchWithTimeout('/api/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -3196,6 +3314,30 @@ final class WebDashboardServer {
       state.addRepoInspectionPreview = data.inspectionPreview || null;
       setStatus({ kind: 'ok', message: data.message || successMessage || 'Done.' });
       return data;
+    }
+
+    function markAgentUnavailable(error) {
+      state.agentUnavailable = true;
+      state.agentUnavailableMessage = error?.name === 'AbortError'
+        ? 'ShipHook did not respond to the dashboard data request in time. The web server is alive, but the main agent may be hung.'
+        : (error?.message || String(error) || 'ShipHook could not provide dashboard data.');
+      render();
+    }
+
+    async function hardRestartAgent() {
+      state.hardRestarting = true;
+      setStatus({ kind: 'info', message: 'Requesting hard restart. The dashboard may disconnect briefly.' });
+      render();
+      try {
+        const response = await fetchWithTimeout('/api/agent/hard-restart', { method: 'POST' }, 2500);
+        if (response.status === 401) {
+          window.location.href = '/';
+          return;
+        }
+      } catch {
+        // A disconnect is expected if the agent exits before the response completes.
+      }
+      window.setTimeout(() => runAutoRefresh().catch(() => {}), 3000);
     }
 
     function refreshIntervalMillis() {
@@ -3221,8 +3363,8 @@ final class WebDashboardServer {
       state.refreshInFlight = true;
       try {
         await fetchState({ preserveDraft: true, clearStatus: false });
-      } catch {
-        // Keep the last known UI state; a later refresh can recover.
+      } catch (error) {
+        markAgentUnavailable(error);
       } finally {
         state.refreshInFlight = false;
         scheduleAutoRefresh();
@@ -3250,6 +3392,11 @@ final class WebDashboardServer {
 
     function render() {
       document.body.classList.toggle('sidebar-open', !!state.mobileSidebarOpen);
+      if (state.agentUnavailable && !state.snapshot) {
+        renderUnavailableLayout();
+        wireActionButtons();
+        return;
+      }
       renderStatus();
       renderOverview();
       renderRepoList();
@@ -3261,6 +3408,17 @@ final class WebDashboardServer {
       renderFloatingSave();
       renderModal();
       wireActionButtons();
+    }
+
+    function renderUnavailableLayout() {
+      renderStatus();
+      renderOverview();
+      renderRepoList();
+      renderRepoSubhead();
+      renderTopNav();
+      renderAgentUnavailablePane();
+      renderFloatingSave();
+      renderModal();
     }
 
     function animateNavigation(kind) {
@@ -3368,7 +3526,12 @@ final class WebDashboardServer {
       const statsNode = document.getElementById('overview-stats');
       const snapshot = state.snapshot;
       if (!snapshot) {
-        statsNode.innerHTML = '';
+        statsNode.innerHTML = state.agentUnavailable
+          ? [
+            `<div class="summary-pill danger">${icon('warning')}<span>Agent unavailable</span><span class="divider">/</span><span class="muted">data offline</span></div>`,
+            `<button class="summary-pill danger" type="button" data-action="hard-restart-agent" title="Hard restart ShipHook" aria-label="Hard restart ShipHook">${icon('restart')}<span>${state.hardRestarting ? 'Restarting' : 'Hard Restart'}</span></button>`
+          ].join('')
+          : '';
         return;
       }
 
@@ -3408,7 +3571,9 @@ final class WebDashboardServer {
       const node = document.getElementById('repo-list');
       const repositories = state.snapshot?.repositories ?? [];
       if (!repositories.length) {
-        node.innerHTML = '<div class="empty">No repositories configured yet.</div>';
+        node.innerHTML = state.agentUnavailable
+          ? '<div class="empty">Repository data is unavailable while the ShipHook agent is not responding.</div>'
+          : '<div class="empty">No repositories configured yet.</div>';
         return;
       }
 
@@ -3444,6 +3609,29 @@ final class WebDashboardServer {
       document.getElementById('pane-status').hidden = state.activePane !== 'status';
       document.getElementById('pane-builds').hidden = state.activePane !== 'builds';
       document.getElementById('pane-configuration').hidden = state.activePane !== 'configuration';
+    }
+
+    function renderAgentUnavailablePane() {
+      const message = state.agentUnavailableMessage || 'ShipHook could not provide dashboard data.';
+      document.getElementById('pane-status').hidden = false;
+      document.getElementById('pane-builds').hidden = true;
+      document.getElementById('pane-configuration').hidden = true;
+      document.getElementById('pane-status').innerHTML = `
+        <section class="panel agent-unavailable">
+          <div class="agent-unavailable-icon">${icon('warning')}</div>
+          <div>
+            <h2>Agent data unavailable</h2>
+            <p>${escapeHtml(message)}</p>
+            <div class="toolbar">
+              <button class="button warn" type="button" data-action="hard-restart-agent">${icon('restart')}<span>${state.hardRestarting ? 'Restarting ShipHook...' : 'Hard Restart Agent'}</span></button>
+              <button class="button" type="button" data-action="retry-agent-state">${icon('refresh')}<span>Retry</span></button>
+            </div>
+            <p class="tiny" style="margin-top: 12px;">This restart path bypasses the main app state, so it can still work when SwiftUI or the main actor is wedged.</p>
+          </div>
+        </section>
+      `;
+      document.getElementById('pane-builds').innerHTML = '';
+      document.getElementById('pane-configuration').innerHTML = '';
     }
 
     function renderRepoSubhead() {
@@ -4347,6 +4535,7 @@ final class WebDashboardServer {
         gear: '<svg viewBox="0 0 24 24"><path d="M10.55 2.52h2.9l.43 2.14a7.92 7.92 0 0 1 1.72.71l1.87-1.14 2.05 2.05-1.14 1.87c.29.55.53 1.13.71 1.72l2.14.43v2.9l-2.14.43a7.92 7.92 0 0 1-.71 1.72l1.14 1.87-2.05 2.05-1.87-1.14a7.92 7.92 0 0 1-1.72.71l-.43 2.14h-2.9l-.43-2.14a7.92 7.92 0 0 1-1.72-.71l-1.87 1.14-2.05-2.05 1.14-1.87a7.92 7.92 0 0 1-.71-1.72L2.52 13.45v-2.9l2.14-.43c.18-.59.42-1.17.71-1.72L4.23 6.53l2.05-2.05 1.87 1.14c.55-.29 1.13-.53 1.72-.71zm1.45 6.23a3.25 3.25 0 1 0 0 6.5 3.25 3.25 0 0 0 0-6.5Z"/></svg>',
         restart: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/><path d="M12 8v5l3 2"/></svg>',
         refresh: '<svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>',
+        warning: '<svg viewBox="0 0 24 24"><path d="M12 3 2.8 20h18.4z"/><path d="M12 9v5"/><path d="M12 17h.01"/></svg>',
         check: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 6-7"/></svg>',
         download: '<svg viewBox="0 0 24 24"><path d="M12 4v10"/><path d="m7 9 5 5 5-5"/><path d="M5 20h14"/></svg>',
         save: '<svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v6h8V4"/><path d="M9 18h6"/></svg>',
@@ -4858,6 +5047,14 @@ final class WebDashboardServer {
               await runCommand({ type: 'restartAgent' }, 'Restarting ShipHook.');
             }
             break;
+          case 'hard-restart-agent':
+            if (window.confirm('Hard restart ShipHook? Use this when the dashboard cannot fetch agent data. The web dashboard will briefly disconnect.')) {
+              await hardRestartAgent();
+            }
+            break;
+          case 'retry-agent-state':
+            await fetchState({ preserveDraft: true, clearStatus: false });
+            break;
           case 'poll-all':
             await runCommand({ type: 'pollAll' }, 'Polling all repositories.');
             break;
@@ -5049,6 +5246,7 @@ final class WebDashboardServer {
       renderOverview();
       scheduleAutoRefresh();
     }).catch(error => {
+      markAgentUnavailable(error);
       setStatus({ kind: 'error', message: error.message || String(error) });
       scheduleAutoRefresh();
     });

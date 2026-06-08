@@ -11,8 +11,44 @@ enum CommandError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .nonZeroExit(result):
-            return "Command failed with exit code \(result.exitCode).\n\(result.output)"
+            return "Command failed with exit code \(result.exitCode).\n\(Self.outputSummary(result.output))"
         }
+    }
+
+    private static func outputSummary(_ output: String) -> String {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "No command output was captured."
+        }
+
+        let lines = trimmed.split(separator: "\n", omittingEmptySubsequences: false)
+        let interestingLines = lines.filter { line in
+            let lowercased = line.lowercased()
+            return lowercased.contains("error:")
+                || lowercased.contains("fatal:")
+                || lowercased.contains("failed")
+                || lowercased.contains("permission denied")
+                || lowercased.contains("could not")
+        }
+        let selectedLines = (interestingLines.isEmpty ? Array(lines.suffix(12)) : Array(interestingLines.suffix(10)))
+        let summary = selectedLines
+            .map { line -> String in
+                let text = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+                if text.count > 360 {
+                    return "\(text.prefix(360))..."
+                }
+                return text
+            }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+
+        if !summary.isEmpty {
+            return summary
+        }
+        if trimmed.count > 360 {
+            return "\(trimmed.prefix(360))..."
+        }
+        return trimmed
     }
 }
 

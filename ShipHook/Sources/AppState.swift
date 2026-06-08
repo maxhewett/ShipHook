@@ -63,6 +63,8 @@ final class AppState: ObservableObject {
     private var logBuffers: [String: String] = [:]
     private var logFlushTasks: [String: Task<Void, Never>] = [:]
     private var consecutiveBuildFailures: [String: Int] = [:]
+    private var isIntentionalShutdown = false
+    private var terminationObserver: NSObjectProtocol?
     private let ignoredCommitMarkers = ["[shiphook skip]", "[skip shiphook]"]
     private let notarizationProfilesDefaultsKey = "ShipHookKnownNotarizationProfiles"
     private var lastSavedConfiguration: AppConfiguration = .default
@@ -92,6 +94,15 @@ final class AppState: ObservableObject {
     )
 
     init() {
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.prepareForIntentionalShutdown()
+            }
+        }
         loadConfiguration()
         loadBuildHistory()
         refreshSigningIdentities()
@@ -103,6 +114,9 @@ final class AppState: ObservableObject {
     }
 
     deinit {
+        if let terminationObserver {
+            NotificationCenter.default.removeObserver(terminationObserver)
+        }
         pollingTask?.cancel()
     }
 
@@ -652,6 +666,7 @@ final class AppState: ObservableObject {
             }
 
         case .restartAgent:
+            prepareForIntentionalShutdown()
             restartAgentFromWebDashboard()
             return webDashboardResponse(message: "Restarting ShipHook. The dashboard will reconnect after the app relaunches.")
 
@@ -685,6 +700,11 @@ final class AppState: ObservableObject {
                 NSApp.terminate(nil)
             }
         }
+    }
+
+    private func prepareForIntentionalShutdown() {
+        isIntentionalShutdown = true
+        pollingTask?.cancel()
     }
 
     func publishedVersion(for repository: RepositoryConfiguration) -> String? {
@@ -1747,14 +1767,16 @@ final class AppState: ObservableObject {
         summary: String,
         incrementsFailureStreak: Bool
     ) {
+        let errorDescription = Self.conciseErrorDescription(error)
+        let shouldCountFailure = incrementsFailureStreak && !isIntentionalShutdown
         var streak = consecutiveBuildFailures[repository.id] ?? 0
-        if incrementsFailureStreak {
+        if shouldCountFailure {
             streak += 1
             consecutiveBuildFailures[repository.id] = streak
         }
 
         let autoPauseThreshold = max(1, configuration.autoPauseFailureCount)
-        let shouldAutoPause = incrementsFailureStreak && streak >= autoPauseThreshold
+        let shouldAutoPause = shouldCountFailure && streak >= autoPauseThreshold
         if shouldAutoPause {
             setRepositoryEnabled(repository.id, enabled: false)
             persistConfigurationQuietly()
@@ -1765,29 +1787,31 @@ final class AppState: ObservableObject {
             $0.buildStartedAt = nil
             $0.buildPhase = .idle
             $0.buildDetail = nil
-            $0.lastError = error.localizedDescription
-            $0.lastErrorSuggestions = Self.errorSuggestions(for: error.localizedDescription, log: $0.lastLog)
+            $0.lastError = errorDescription
+            $0.lastErrorSuggestions = Self.errorSuggestions(for: errorDescription, log: $0.lastLog)
             if let snapshot {
                 $0.releaseChannel = releaseChannel(for: snapshot)
             }
             if $0.lastLog.isEmpty {
-                $0.lastLog = error.localizedDescription
+                $0.lastLog = errorDescription
             }
-            appendStageMessage("Build failed: \(error.localizedDescription)", to: &$0.stageMessages)
+            appendStageMessage("Build failed: \(errorDescription)", to: &$0.stageMessages)
             if shouldAutoPause {
-                $0.summary = "Build paused after \(streak) consecutive failures. Last error: \(error.localizedDescription)"
+                $0.summary = "Build paused after \(streak) consecutive failures. Last error: \(errorDescription)"
             } else {
                 $0.summary = summary
             }
         }
 
-        postFailureDiscordWebhookIfNeeded(
-            repository: repository,
-            snapshot: snapshot,
-            error: error,
-            failureCount: streak,
-            autoPaused: shouldAutoPause
-        )
+        if shouldCountFailure {
+            postFailureDiscordWebhookIfNeeded(
+                repository: repository,
+                snapshot: snapshot,
+                error: error,
+                failureCount: streak,
+                autoPaused: shouldAutoPause
+            )
+        }
 
         if shouldAutoPause {
             postAutoPauseDiscordWebhookIfNeeded(
@@ -1797,6 +1821,44 @@ final class AppState: ObservableObject {
                 failureCount: streak
             )
         }
+    }
+
+    private static func conciseErrorDescription(_ error: Error) -> String {
+        let raw = error.localizedDescription
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else {
+            return "The command failed."
+        }
+
+        let lines = raw.split(separator: "\n", omittingEmptySubsequences: false)
+        let interestingLines = lines.filter { line in
+            let lowercased = line.lowercased()
+            return lowercased.contains("error:")
+                || lowercased.contains("fatal:")
+                || lowercased.contains("failed")
+                || lowercased.contains("exit code")
+                || lowercased.contains("permission denied")
+                || lowercased.contains("could not")
+        }
+        let selectedLines = (interestingLines.isEmpty ? Array(lines.suffix(12)) : Array(interestingLines.suffix(8)))
+        let summary = selectedLines
+            .map { line in
+                let text = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+                if text.count > 360 {
+                    return "\(text.prefix(360))..."
+                }
+                return text
+            }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+
+        if !summary.isEmpty {
+            return summary
+        }
+        if raw.count > 360 {
+            return "\(raw.prefix(360))..."
+        }
+        return raw
     }
 
     private func setRepositoryEnabled(_ repositoryID: String, enabled: Bool) {
