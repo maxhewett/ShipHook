@@ -609,6 +609,14 @@ final class AppState: ObservableObject {
             triggerManualPoll(for: repositoryID)
             return webDashboardResponse(message: "Polling repository.")
 
+        case let .pullRepository(repositoryID):
+            do {
+                try pullRepository(repositoryID)
+                return webDashboardResponse(message: "Repository pulled.")
+            } catch {
+                return webDashboardResponse(error: error.localizedDescription)
+            }
+
         case let .recloneRepository(repositoryID):
             do {
                 try recloneRepository(repositoryID)
@@ -994,6 +1002,71 @@ final class AppState: ObservableObject {
                 $0.buildDetail = nil
                 $0.summary = "Reclone failed"
                 $0.lastError = error.localizedDescription
+            }
+            throw error
+        }
+    }
+
+    func pullRepository(_ repositoryID: String) throws {
+        guard let repository = configuration.repositories.first(where: { $0.id == repositoryID }) else {
+            throw NSError(domain: "ShipHook", code: 920, userInfo: [NSLocalizedDescriptionKey: "Repository not found."])
+        }
+        if inFlightBuilds.contains(repositoryID)
+            || activeBuildRepositoryID == repositoryID
+            || queuedBuilds[repositoryID] != nil {
+            throw NSError(domain: "ShipHook", code: 921, userInfo: [NSLocalizedDescriptionKey: "This repository is currently being checked or built. Let that finish before pulling."])
+        }
+
+        let checkoutPath = (repository.localCheckoutPath as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: checkoutPath + "/.git") else {
+            throw NSError(domain: "ShipHook", code: 922, userInfo: [NSLocalizedDescriptionKey: "Local checkout is missing or is not a Git repository."])
+        }
+
+        updateState(for: repositoryID) {
+            $0.activity = .polling
+            $0.buildStartedAt = nil
+            $0.buildPhase = .syncing
+            $0.buildDetail = nil
+            $0.lastError = nil
+            $0.lastCheckDate = Date()
+            $0.summary = "Pulling latest \(repository.branch)"
+            $0.stageMessages = ["Pulling latest repository state"]
+        }
+
+        do {
+            let branch = shellSingleQuoted(repository.branch)
+            let result = try commandRunner.run(
+                "git fetch origin \(branch) && git checkout \(branch) && git pull --ff-only origin \(branch)",
+                currentDirectory: checkoutPath,
+                environment: [:]
+            )
+            let sha = try? commandRunner
+                .run("git rev-parse HEAD", currentDirectory: checkoutPath, environment: [:])
+                .output
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            updateState(for: repositoryID) {
+                $0.activity = .idle
+                $0.buildPhase = .idle
+                $0.buildDetail = nil
+                $0.lastLog = tailLines(from: result.output, limit: 120)
+                $0.lastLogPath = "\(checkoutPath)/.shiphook/logs/\(repositoryID)-latest.log"
+                $0.lastError = nil
+                if let sha, !sha.isEmpty {
+                    $0.lastSeenSHA = sha
+                    $0.summary = "Pulled latest commit \(sha.prefix(7))"
+                } else {
+                    $0.summary = "Repository pulled."
+                }
+                $0.stageMessages = ["Repository pulled locally"]
+            }
+        } catch {
+            updateState(for: repositoryID) {
+                $0.activity = .failed
+                $0.buildPhase = .idle
+                $0.buildDetail = nil
+                $0.lastError = Self.conciseErrorDescription(error)
+                $0.summary = "Pull failed"
+                appendStageMessage("Pull failed: \($0.lastError ?? error.localizedDescription)", to: &$0.stageMessages)
             }
             throw error
         }

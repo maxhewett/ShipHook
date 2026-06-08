@@ -186,6 +186,7 @@ enum WebDashboardCommand: Codable {
     case removeRepository(String)
     case pollAll
     case pollRepository(String)
+    case pullRepository(String)
     case recloneRepository(String)
     case setRepositoryEnabled(repositoryID: String, enabled: Bool)
     case resetBuildState(String)
@@ -216,6 +217,7 @@ enum WebDashboardCommand: Codable {
         case removeRepository
         case pollAll
         case pollRepository
+        case pullRepository
         case recloneRepository
         case setRepositoryEnabled
         case resetBuildState
@@ -248,6 +250,8 @@ enum WebDashboardCommand: Codable {
             self = .pollAll
         case .pollRepository:
             self = .pollRepository(try container.decode(String.self, forKey: .repositoryID))
+        case .pullRepository:
+            self = .pullRepository(try container.decode(String.self, forKey: .repositoryID))
         case .recloneRepository:
             self = .recloneRepository(try container.decode(String.self, forKey: .repositoryID))
         case .setRepositoryEnabled:
@@ -300,6 +304,9 @@ enum WebDashboardCommand: Codable {
             try container.encode(CommandType.pollAll, forKey: .type)
         case let .pollRepository(repositoryID):
             try container.encode(CommandType.pollRepository, forKey: .type)
+            try container.encode(repositoryID, forKey: .repositoryID)
+        case let .pullRepository(repositoryID):
+            try container.encode(CommandType.pullRepository, forKey: .type)
             try container.encode(repositoryID, forKey: .repositoryID)
         case let .recloneRepository(repositoryID):
             try container.encode(CommandType.recloneRepository, forKey: .type)
@@ -382,12 +389,80 @@ private struct WebDashboardSecurityStateResponse: Codable {
         var remoteAddress: String?
     }
 
+    struct APIToken: Codable {
+        var id: String
+        var name: String
+        var prefix: String
+        var createdAt: Date
+        var lastUsedAt: Date?
+    }
+
     var ok: Bool
     var currentUsername: String
     var currentGitHub: GitHubProfile?
     var admins: [Admin]
     var passkeys: [Passkey]
+    var apiTokens: [APIToken]
     var auditEntries: [AuditEntry]
+}
+
+private struct WebDashboardAPITokenCreateRequest: Codable {
+    var name: String
+}
+
+private struct WebDashboardAPITokenCreateResponse: Codable {
+    var ok: Bool
+    var id: String
+    var name: String
+    var prefix: String
+    var token: String
+    var message: String
+}
+
+private struct WebDashboardAPITokenDeleteRequest: Codable {
+    var id: String
+}
+
+private struct WebDashboardAPIRepositoryActionRequest: Codable {
+    var repositoryID: String?
+}
+
+private struct WebDashboardAPIRepositoryActionResponse: Codable {
+    var ok: Bool
+    var message: String
+    var repositoryID: String?
+    var snapshot: WebDashboardSnapshot?
+}
+
+private struct WebDashboardAPILogTailResponse: Codable {
+    var ok: Bool
+    var repositoryID: String
+    var path: String
+    var tail: String
+}
+
+private struct WebDashboardAPIFileListResponse: Codable {
+    struct Entry: Codable {
+        var name: String
+        var path: String
+        var kind: String
+        var size: Int64?
+    }
+
+    var ok: Bool
+    var repositoryID: String
+    var path: String
+    var entries: [Entry]
+}
+
+private struct WebDashboardAPIFileReadResponse: Codable {
+    var ok: Bool
+    var repositoryID: String
+    var path: String
+    var encoding: String
+    var content: String
+    var truncated: Bool
+    var size: Int64
 }
 
 final class WebDashboardServer {
@@ -552,6 +627,20 @@ final class WebDashboardServer {
             return self.handleAdminDelete(request: request)
         }
 
+        server.POST["/api/auth/tokens"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleAPITokenCreate(request: request)
+        }
+
+        server.POST["/api/auth/tokens/revoke"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            return self.handleAPITokenRevoke(request: request)
+        }
+
         server.POST["/api/auth/passkeys/register/begin"] = { [weak self] request in
             guard let self else {
                 return .internalServerError
@@ -616,6 +705,102 @@ final class WebDashboardServer {
                 return self.unauthorizedJSONResponse(request: request)
             }
             return self.jsonResponse(for: self.currentSnapshot(), request: request)
+        }
+
+        server["/api"] = { [weak self] request in
+            guard let self else {
+                return .internalServerError
+            }
+            guard self.securityController.isAuthorized(request: request) else {
+                return self.rootResponse(for: request)
+            }
+            return self.htmlResponse(self.apiDocumentationHTML(), request: request)
+        }
+
+        server["/api/v1/repositories"] = { [weak self] request in
+            guard let self else { return .internalServerError }
+            return self.handleAPIRepositories(request: request)
+        }
+
+        server["/api/v1/repository"] = { [weak self] request in
+            guard let self else { return .internalServerError }
+            return self.handleAPIRepository(request: request)
+        }
+
+        server["/api/v1/status"] = { [weak self] request in
+            guard let self else { return .internalServerError }
+            return self.handleAPIStatus(request: request)
+        }
+
+        server["/api/v1/log"] = { [weak self] request in
+            guard let self else { return .internalServerError }
+            return self.handleAPILog(request: request)
+        }
+
+        server["/api/v1/files/list"] = { [weak self] request in
+            guard let self else { return .internalServerError }
+            return self.handleAPIFileList(request: request)
+        }
+
+        server["/api/v1/files/read"] = { [weak self] request in
+            guard let self else { return .internalServerError }
+            return self.handleAPIFileRead(request: request)
+        }
+
+        server.POST["/api/v1/check"] = { [weak self] request in
+            guard let self else { return .internalServerError }
+            return self.handleAPICommand(request: request, command: "check")
+        }
+
+        server.POST["/api/v1/build"] = { [weak self] request in
+            guard let self else { return .internalServerError }
+            return self.handleAPICommand(request: request, command: "build")
+        }
+
+        server.POST["/api/v1/pull"] = { [weak self] request in
+            guard let self else { return .internalServerError }
+            return self.handleAPICommand(request: request, command: "pull")
+        }
+
+        server.POST["/api/v1/reclone"] = { [weak self] request in
+            guard let self else { return .internalServerError }
+            return self.handleAPICommand(request: request, command: "reclone")
+        }
+
+        server.POST["/api/v1/restart"] = { [weak self] request in
+            guard let self else { return .internalServerError }
+            guard self.securityController.isAuthorized(request: request) else {
+                return self.unauthorizedJSONResponse(request: request)
+            }
+            self.securityController.recordAuditEvent(
+                action: "api.agent.restart_requested",
+                detail: nil,
+                request: request,
+                username: self.securityController.currentUsername(request: request)
+            )
+            let response = self.perform(.restartAgent)
+            return self.jsonResponse(
+                for: WebDashboardAPIRepositoryActionResponse(ok: response.ok, message: response.message ?? response.error ?? "Restart requested.", repositoryID: nil, snapshot: response.snapshot),
+                request: request
+            )
+        }
+
+        server.POST["/api/v1/hard-restart"] = { [weak self] request in
+            guard let self else { return .internalServerError }
+            guard self.securityController.isAuthorized(request: request) else {
+                return self.unauthorizedJSONResponse(request: request)
+            }
+            self.securityController.recordAuditEvent(
+                action: "api.agent.hard_restart_requested",
+                detail: nil,
+                request: request,
+                username: self.securityController.currentUsername(request: request)
+            )
+            self.scheduleHardRestart()
+            return self.jsonResponse(
+                for: WebDashboardMessageResponse(ok: true, message: "Hard restart scheduled. ShipHook should reconnect shortly."),
+                request: request
+            )
         }
 
         server["/api/log"] = { [weak self] request in
@@ -849,6 +1034,119 @@ final class WebDashboardServer {
         Self.htmlTemplate
     }
 
+    private func apiDocumentationHTML() -> String {
+        """
+        <!doctype html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>ShipHook API</title>
+          <style>
+            :root { color-scheme: dark light; --bg:#10141c; --panel:#161b25; --text:#f7efe6; --muted:#aab4c2; --accent:#ff875b; --accent2:#4db8ff; --danger:#ff6d7a; --line:rgba(255,255,255,.1); }
+            @media (prefers-color-scheme: light) { :root { --bg:#f4f8fc; --panel:#fff; --text:#172033; --muted:#617089; --line:rgba(23,32,51,.12); } }
+            * { box-sizing:border-box; } body { margin:0; min-height:100vh; font:14px/1.5 ui-sans-serif, system-ui; color:var(--text); background:radial-gradient(circle at 12% 0%, rgba(255,135,91,.18), transparent 28%), linear-gradient(180deg,var(--bg), color-mix(in srgb,var(--bg) 88%, #4db8ff)); }
+            main { width:min(1180px, calc(100vw - 28px)); margin:0 auto; padding:34px 0 60px; }
+            .masthead, .card { border:1px solid var(--line); background:color-mix(in srgb,var(--panel) 90%, transparent); border-radius:24px; box-shadow:0 24px 80px rgba(0,0,0,.18); }
+            .masthead { display:flex; justify-content:space-between; gap:18px; align-items:center; padding:18px 20px; margin-bottom:18px; }
+            h1 { margin:0; font:800 34px/1 ui-serif, Georgia, serif; letter-spacing:-.04em; } h2 { margin:0 0 10px; font-size:18px; } h3 { margin:0 0 8px; font-size:15px; }
+            p { margin:0 0 12px; color:var(--muted); } code, pre, input, textarea, select { font:12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+            .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; } .stack { display:grid; gap:16px; }
+            .card { padding:18px; overflow:hidden; } .endpoint { display:grid; gap:10px; border-top:1px solid var(--line); padding-top:14px; margin-top:14px; }
+            .method { display:inline-flex; width:max-content; padding:4px 8px; border-radius:999px; color:var(--accent2); border:1px solid color-mix(in srgb,var(--accent2) 38%, transparent); background:color-mix(in srgb,var(--accent2) 12%, transparent); font-weight:800; }
+            .method.post { color:var(--accent); border-color:color-mix(in srgb,var(--accent) 38%, transparent); background:color-mix(in srgb,var(--accent) 12%, transparent); }
+            button, a.button { display:inline-flex; align-items:center; justify-content:center; gap:8px; border:1px solid var(--line); background:color-mix(in srgb,var(--accent) 16%, transparent); color:var(--text); border-radius:14px; padding:9px 12px; cursor:pointer; text-decoration:none; }
+            button:hover, a.button:hover { border-color:color-mix(in srgb,var(--accent) 48%, transparent); }
+            input, textarea, select { width:100%; border:1px solid var(--line); border-radius:14px; padding:10px 12px; background:rgba(0,0,0,.12); color:var(--text); }
+            label { display:grid; gap:6px; color:var(--muted); } pre { white-space:pre-wrap; overflow:auto; max-height:420px; padding:14px; border-radius:16px; background:rgba(0,0,0,.18); border:1px solid var(--line); }
+            .toolbar { display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; } .tiny { font-size:12px; color:var(--muted); } .danger { color:var(--danger); }
+            @media (max-width: 820px) { .grid, .masthead { grid-template-columns:1fr; display:grid; } }
+          </style>
+        </head>
+        <body>
+          <main>
+            <section class="masthead">
+              <div><h1>ShipHook API</h1><p>Authenticated agent API for build orchestration, repository recovery, status, logs, and safe file inspection.</p></div>
+              <a class="button" href="/">Back to dashboard</a>
+            </section>
+            <div class="grid">
+              <section class="card">
+                <h2>Bearer Tokens</h2>
+                <p>Create a token for scripts or services. Tokens are stored hashed and only shown once.</p>
+                <label>Token name<input id="token-name" value="automation"></label>
+                <div class="toolbar"><button id="create-token">Generate Token</button></div>
+                <pre id="token-output">No token generated yet.</pre>
+              </section>
+              <section class="card">
+                <h2>Try It</h2>
+                <p>Uses your current web session. For scripts, add <code>Authorization: Bearer shiphook_...</code>.</p>
+                <label>Repository ID<input id="repo-id" placeholder="repo-..."></label>
+                <label>File path<input id="file-path" placeholder="README.md"></label>
+                <div class="toolbar">
+                  <button data-try="status">Status</button>
+                  <button data-try="check">Check / Build</button>
+                  <button data-try="pull">Pull</button>
+                  <button data-try="reclone">Reclone</button>
+                  <button data-try="log">Log Tail</button>
+                  <button data-try="file">Read File</button>
+                </div>
+                <pre id="try-output">Choose an action.</pre>
+              </section>
+            </div>
+            <section class="card" style="margin-top:16px;">
+              <h2>Endpoints</h2>
+              <div class="endpoint"><span class="method">GET</span><h3>/api/v1/repositories</h3><p>List configured repositories with runtime state, recent builds, and releases.</p></div>
+              <div class="endpoint"><span class="method">GET</span><h3>/api/v1/repository?id=REPOSITORY_ID</h3><p>Fetch one repository snapshot.</p></div>
+              <div class="endpoint"><span class="method">GET</span><h3>/api/v1/status?id=REPOSITORY_ID</h3><p>Fetch one runtime status. Omit <code>id</code> for the full dashboard snapshot.</p></div>
+              <div class="endpoint"><span class="method">GET</span><h3>/api/v1/log?id=REPOSITORY_ID&amp;tail=200</h3><p>Return the latest log tail as JSON. Use <code>/api/log?repo=...</code> to download the full log.</p></div>
+              <div class="endpoint"><span class="method post">POST</span><h3>/api/v1/check</h3><p>Body: <code>{"repositoryID":"repo-id"}</code>. Omit repositoryID to check all repositories. This may build if ShipHook sees work to do.</p></div>
+              <div class="endpoint"><span class="method post">POST</span><h3>/api/v1/build</h3><p>Alias for check/manual build trigger.</p></div>
+              <div class="endpoint"><span class="method post">POST</span><h3>/api/v1/pull</h3><p>Pull latest branch state locally without publishing.</p></div>
+              <div class="endpoint"><span class="method post">POST</span><h3>/api/v1/reclone</h3><p>Delete and reclone the configured local checkout. Requires <code>repositoryID</code>.</p></div>
+              <div class="endpoint"><span class="method post">POST</span><h3>/api/v1/restart</h3><p>Soft restart the ShipHook agent.</p></div>
+              <div class="endpoint"><span class="method post">POST</span><h3>/api/v1/hard-restart</h3><p>Recovery restart that bypasses the main actor. Use only when the agent is wedged.</p></div>
+              <div class="endpoint"><span class="method">GET</span><h3>/api/v1/files/list?repositoryID=...&amp;path=Sources</h3><p>List visible files inside the checkout. Hidden folders, <code>.git</code>, and <code>.shiphook</code> are blocked.</p></div>
+              <div class="endpoint"><span class="method">GET</span><h3>/api/v1/files/read?repositoryID=...&amp;path=README.md</h3><p>Read UTF-8 text files up to 256 KB inside the checkout.</p></div>
+            </section>
+            <section class="card" style="margin-top:16px;">
+              <h2>cURL Example</h2>
+              <pre>curl -H 'Authorization: Bearer shiphook_xxx' https://example.com/api/v1/status
+
+        curl -X POST -H 'Authorization: Bearer shiphook_xxx' \\
+          -H 'Content-Type: application/json' \\
+          -d '{"repositoryID":"repo-abc"}' \\
+          https://example.com/api/v1/build</pre>
+            </section>
+          </main>
+          <script>
+            const out = document.getElementById('try-output');
+            const print = (node, value) => node.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+            async function jsonFetch(url, options = {}) {
+              const response = await fetch(url, { headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }, ...options });
+              const text = await response.text();
+              try { return JSON.parse(text); } catch { return text; }
+            }
+            document.getElementById('create-token').onclick = async () => {
+              const name = document.getElementById('token-name').value || 'automation';
+              print(document.getElementById('token-output'), await jsonFetch('/api/auth/tokens', { method:'POST', body: JSON.stringify({ name }) }));
+            };
+            document.querySelectorAll('[data-try]').forEach(button => button.onclick = async () => {
+              const id = document.getElementById('repo-id').value.trim();
+              const path = document.getElementById('file-path').value.trim();
+              const action = button.dataset.try;
+              let result;
+              if (action === 'status') result = await jsonFetch(id ? `/api/v1/status?id=${encodeURIComponent(id)}` : '/api/v1/status');
+              if (action === 'log') result = await jsonFetch(`/api/v1/log?id=${encodeURIComponent(id)}&tail=120`);
+              if (action === 'file') result = await jsonFetch(`/api/v1/files/read?repositoryID=${encodeURIComponent(id)}&path=${encodeURIComponent(path)}`);
+              if (['check','pull','reclone'].includes(action)) result = await jsonFetch(`/api/v1/${action}`, { method:'POST', body: JSON.stringify({ repositoryID: id }) });
+              print(out, result);
+            });
+          </script>
+        </body>
+        </html>
+        """
+    }
+
     private func rootResponse(for request: HttpRequest) -> HttpResponse {
         if securityController.isAuthorized(request: request) {
             if securityController.requiresPasswordChange(request: request) {
@@ -1036,6 +1334,28 @@ final class WebDashboardServer {
         }
     }
 
+    private func handleAPITokenCreate(request: HttpRequest) -> HttpResponse {
+        do {
+            let payload = try decodeRequest(WebDashboardAPITokenCreateRequest.self, from: request)
+            return jsonResponse(for: try securityController.createAPIToken(using: payload, request: request), request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func handleAPITokenRevoke(request: HttpRequest) -> HttpResponse {
+        do {
+            let payload = try decodeRequest(WebDashboardAPITokenDeleteRequest.self, from: request)
+            return jsonResponse(for: try securityController.revokeAPIToken(using: payload, request: request), request: request)
+        } catch let error as WebDashboardSecurityController.SecurityError {
+            return authErrorResponse(error, request: request)
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
     private func handleBeginPasskeyRegistration(request: HttpRequest) -> HttpResponse {
         do {
             let response = try securityController.beginPasskeyRegistration(request: request)
@@ -1167,6 +1487,171 @@ final class WebDashboardServer {
         }
     }
 
+    private func handleAPIRepositories(request: HttpRequest) -> HttpResponse {
+        guard securityController.isAuthorized(request: request) else {
+            return unauthorizedJSONResponse(request: request)
+        }
+        return jsonResponse(for: currentSnapshot().repositories, request: request)
+    }
+
+    private func handleAPIRepository(request: HttpRequest) -> HttpResponse {
+        guard securityController.isAuthorized(request: request) else {
+            return unauthorizedJSONResponse(request: request)
+        }
+        guard let repositoryID = queryValue("id", in: request),
+              let repository = currentSnapshot().repositories.first(where: { $0.id == repositoryID }) else {
+            return errorResponse(message: "Repository not found.", request: request)
+        }
+        return jsonResponse(for: repository, request: request)
+    }
+
+    private func handleAPIStatus(request: HttpRequest) -> HttpResponse {
+        guard securityController.isAuthorized(request: request) else {
+            return unauthorizedJSONResponse(request: request)
+        }
+        let snapshot = currentSnapshot()
+        guard let repositoryID = queryValue("id", in: request) else {
+            return jsonResponse(for: snapshot, request: request)
+        }
+        guard let repository = snapshot.repositories.first(where: { $0.id == repositoryID }) else {
+            return errorResponse(message: "Repository not found.", request: request)
+        }
+        return jsonResponse(for: repository.runtime, request: request)
+    }
+
+    private func handleAPILog(request: HttpRequest) -> HttpResponse {
+        guard securityController.isAuthorized(request: request) else {
+            return unauthorizedJSONResponse(request: request)
+        }
+        guard let repositoryID = queryValue("id", in: request) else {
+            return errorResponse(message: "Missing repository id.", request: request)
+        }
+        let lineLimit = min(max(Int(queryValue("tail", in: request) ?? "200") ?? 200, 1), 2_000)
+        guard let repository = currentSnapshot().repositories.first(where: { $0.id == repositoryID }),
+              let logPath = repository.runtime.lastLogPath,
+              !logPath.isEmpty else {
+            return errorResponse(message: "No log is available for this repository yet.", request: request)
+        }
+        let logURL = URL(fileURLWithPath: (logPath as NSString).expandingTildeInPath)
+        guard FileManager.default.fileExists(atPath: logURL.path),
+              let content = try? String(contentsOf: logURL, encoding: .utf8) else {
+            return errorResponse(message: "The latest log file could not be read.", request: request)
+        }
+        let tail = content.split(separator: "\n", omittingEmptySubsequences: false).suffix(lineLimit).map(String.init).joined(separator: "\n")
+        return jsonResponse(
+            for: WebDashboardAPILogTailResponse(ok: true, repositoryID: repositoryID, path: logURL.path, tail: tail),
+            request: request
+        )
+    }
+
+    private func handleAPICommand(request: HttpRequest, command: String) -> HttpResponse {
+        guard securityController.isAuthorized(request: request) else {
+            return unauthorizedJSONResponse(request: request)
+        }
+        do {
+            let payload = try decodeRequest(WebDashboardAPIRepositoryActionRequest.self, from: request)
+            let repositoryID = payload.repositoryID
+            let response: WebDashboardCommandResponse
+            switch command {
+            case "check", "build":
+                if let repositoryID, !repositoryID.isEmpty {
+                    response = perform(.pollRepository(repositoryID))
+                } else {
+                    response = perform(.pollAll)
+                }
+            case "pull":
+                guard let repositoryID, !repositoryID.isEmpty else {
+                    return errorResponse(message: "repositoryID is required for pull.", request: request)
+                }
+                response = perform(.pullRepository(repositoryID))
+            case "reclone":
+                guard let repositoryID, !repositoryID.isEmpty else {
+                    return errorResponse(message: "repositoryID is required for reclone.", request: request)
+                }
+                response = perform(.recloneRepository(repositoryID))
+            default:
+                return errorResponse(message: "Unknown API command.", request: request)
+            }
+            securityController.recordAuditEvent(
+                action: "api.repository.\(command)",
+                detail: repositoryID,
+                request: request,
+                username: securityController.currentUsername(request: request)
+            )
+            return jsonResponse(
+                for: WebDashboardAPIRepositoryActionResponse(
+                    ok: response.ok,
+                    message: response.message ?? response.error ?? "Command submitted.",
+                    repositoryID: repositoryID,
+                    snapshot: response.snapshot
+                ),
+                request: request
+            )
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func handleAPIFileList(request: HttpRequest) -> HttpResponse {
+        guard securityController.isAuthorized(request: request) else {
+            return unauthorizedJSONResponse(request: request)
+        }
+        do {
+            let (repository, relativePath, url) = try resolvedAPIFileURL(request: request)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                return errorResponse(message: "Path is not a directory.", request: request)
+            }
+            let entries = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey], options: [.skipsHiddenFiles])
+                .filter { !$0.lastPathComponent.hasPrefix(".") }
+                .prefix(200)
+                .map { entry -> WebDashboardAPIFileListResponse.Entry in
+                    let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+                    let childRelative = relativePath.isEmpty ? entry.lastPathComponent : "\(relativePath)/\(entry.lastPathComponent)"
+                    return WebDashboardAPIFileListResponse.Entry(
+                        name: entry.lastPathComponent,
+                        path: childRelative,
+                        kind: values?.isDirectory == true ? "directory" : "file",
+                        size: values?.fileSize.map(Int64.init)
+                    )
+                }
+            return jsonResponse(
+                for: WebDashboardAPIFileListResponse(ok: true, repositoryID: repository.id, path: relativePath, entries: Array(entries)),
+                request: request
+            )
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
+    private func handleAPIFileRead(request: HttpRequest) -> HttpResponse {
+        guard securityController.isAuthorized(request: request) else {
+            return unauthorizedJSONResponse(request: request)
+        }
+        do {
+            let (repository, relativePath, url) = try resolvedAPIFileURL(request: request)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+                return errorResponse(message: "Path is not a file.", request: request)
+            }
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+            guard size <= 256 * 1024 else {
+                return errorResponse(message: "File is too large for API read. Limit is 256 KB.", request: request)
+            }
+            let data = try Data(contentsOf: url)
+            guard let content = String(data: data, encoding: .utf8) else {
+                return errorResponse(message: "Only UTF-8 text files can be read through this API.", request: request)
+            }
+            return jsonResponse(
+                for: WebDashboardAPIFileReadResponse(ok: true, repositoryID: repository.id, path: relativePath, encoding: "utf-8", content: content, truncated: false, size: size),
+                request: request
+            )
+        } catch {
+            return errorResponse(message: error.localizedDescription, request: request)
+        }
+    }
+
     private func authErrorResponse(_ error: WebDashboardSecurityController.SecurityError, request: HttpRequest) -> HttpResponse {
         let response = WebDashboardAuthMessageResponse(ok: false, message: nil, error: error.userMessage, passkeysAvailable: securityController.hasRegisteredPasskeys)
         let encoder = JSONEncoder.webDashboard
@@ -1200,6 +1685,8 @@ final class WebDashboardServer {
             return ("dashboard.poll.all", nil)
         case let .pollRepository(repositoryID):
             return ("dashboard.poll.repository", repositoryID)
+        case let .pullRepository(repositoryID):
+            return ("dashboard.repository.pulled", repositoryID)
         case let .recloneRepository(repositoryID):
             return ("dashboard.repository.recloned", repositoryID)
         case let .setRepositoryEnabled(repositoryID, enabled):
@@ -1223,6 +1710,41 @@ final class WebDashboardServer {
 
     private func decodeRequest<T: Decodable>(_ type: T.Type, from request: HttpRequest) throws -> T {
         try JSONDecoder.webDashboard.decode(T.self, from: Data(request.body))
+    }
+
+    private func queryValue(_ name: String, in request: HttpRequest) -> String? {
+        request.queryParams.first(where: { $0.0 == name })?.1
+    }
+
+    private func resolvedAPIFileURL(request: HttpRequest) throws -> (repository: WebDashboardSnapshot.Repository, relativePath: String, url: URL) {
+        guard let repositoryID = queryValue("repositoryID", in: request) ?? queryValue("id", in: request) else {
+            throw NSError(domain: "ShipHookAPI", code: 100, userInfo: [NSLocalizedDescriptionKey: "Missing repositoryID."])
+        }
+        let snapshot = currentSnapshot()
+        guard let repository = snapshot.repositories.first(where: { $0.id == repositoryID }) else {
+            throw NSError(domain: "ShipHookAPI", code: 101, userInfo: [NSLocalizedDescriptionKey: "Repository not found."])
+        }
+
+        let rawRelativePath = (queryValue("path", in: request) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawRelativePath.hasPrefix("/") else {
+            throw NSError(domain: "ShipHookAPI", code: 102, userInfo: [NSLocalizedDescriptionKey: "Path must be relative to the repository checkout."])
+        }
+        let relativeComponents = rawRelativePath
+            .split(separator: "/")
+            .map(String.init)
+        guard !relativeComponents.contains(".."),
+              !relativeComponents.contains(".git"),
+              !relativeComponents.contains(".shiphook") else {
+            throw NSError(domain: "ShipHookAPI", code: 103, userInfo: [NSLocalizedDescriptionKey: "Path is not available through the API."])
+        }
+
+        let baseURL = URL(fileURLWithPath: (repository.configuration.localCheckoutPath as NSString).expandingTildeInPath).standardizedFileURL
+        let targetURL = relativeComponents.reduce(baseURL) { $0.appendingPathComponent($1) }.standardizedFileURL
+        guard targetURL.path == baseURL.path || targetURL.path.hasPrefix(baseURL.path + "/") else {
+            throw NSError(domain: "ShipHookAPI", code: 104, userInfo: [NSLocalizedDescriptionKey: "Path escapes the repository checkout."])
+        }
+        return (repository, relativeComponents.joined(separator: "/"), targetURL)
     }
 
     private func decodeAuthSetupRequest(from request: HttpRequest) throws -> WebDashboardAuthSetupRequest {
@@ -3108,6 +3630,7 @@ final class WebDashboardServer {
       securityLoading: false,
       securityStatus: '',
       securityInviteLink: null,
+      securityCreatedToken: '',
       explorerModal: null,
       mobileSidebarOpen: false,
       addRepoInspectionPreview: null,
@@ -3204,7 +3727,8 @@ final class WebDashboardServer {
       currentPassword: '',
       newPassword: '',
       inviteUsername: '',
-      githubToken: ''
+      githubToken: '',
+      apiTokenName: 'automation'
     };
 
     async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
@@ -4050,6 +4574,20 @@ final class WebDashboardServer {
         `).join('')
         : '<div class="empty">No passkeys registered yet.</div>';
 
+      const apiTokenRows = (security.apiTokens || []).length
+        ? security.apiTokens.map(token => `
+          <div class="security-row compact">
+            <div class="security-row-main">
+              <strong>${escapeHtml(token.name)}</strong>
+              <span class="tiny">${escapeHtml(token.prefix)}... · created ${escapeHtml(formatDate(token.createdAt))}${token.lastUsedAt ? ' · last used ' + escapeHtml(formatDate(token.lastUsedAt)) : ''}</span>
+            </div>
+            <div class="security-row-actions">
+              <button class="button warn" data-action="security-revoke-api-token" data-token-id="${escapeHtmlAttr(token.id)}">${icon('trash')}<span>Revoke</span></button>
+            </div>
+          </div>
+        `).join('')
+        : '<div class="empty">No API tokens created yet.</div>';
+
       const auditRows = security.auditEntries.length
         ? security.auditEntries.map(entry => `
           <div class="audit-row">
@@ -4134,6 +4672,19 @@ final class WebDashboardServer {
             <div class="settings-card">
               ${sectionTitle('key', 'Passkeys')}
               <div class="security-list">${passkeyRows}</div>
+            </div>
+            <div class="settings-card">
+              ${sectionTitle('terminal', 'API Access')}
+              <p class="settings-note">Create bearer tokens for scripts and external systems. Tokens are only shown once and can be used with <code>Authorization: Bearer ...</code>.</p>
+              <div class="security-list">${apiTokenRows}</div>
+              <div class="field-grid single" style="margin-top: 14px;">
+                ${textInput('New Token Name', 'security.apiTokenName', securityDraft.apiTokenName)}
+              </div>
+              <div class="toolbar">
+                <button class="button secondary" data-action="security-create-api-token">${icon('plus')}<span>Create API Token</span></button>
+                <a class="button" href="/api">${icon('terminal')}<span>API Docs</span></a>
+              </div>
+              ${state.securityCreatedToken ? `<div class="invite-card"><strong>Copy this token now</strong><span class="tiny">ShipHook will not show it again.</span><code>${escapeHtml(state.securityCreatedToken)}</code></div>` : ''}
             </div>
             <div class="settings-card audit-card">
               ${sectionTitle('history', 'Audit Log')}
@@ -4706,6 +5257,25 @@ final class WebDashboardServer {
       renderModal();
     }
 
+    async function createAPITokenFromSettings() {
+      const name = securityDraft.apiTokenName.trim();
+      if (!name) {
+        throw new Error('Enter a token name first.');
+      }
+      const result = await securityRequest('/api/auth/tokens', { name }, 'API token created.');
+      state.securityCreatedToken = result?.token || '';
+      securityDraft.apiTokenName = 'automation';
+      renderModal();
+    }
+
+    async function revokeAPITokenFromSettings(id) {
+      await securityRequest('/api/auth/tokens/revoke', { id }, 'API token revoked.');
+      if (state.securityCreatedToken) {
+        state.securityCreatedToken = '';
+      }
+      renderModal();
+    }
+
     async function loadGitHubRepositories() {
       state.githubReposLoading = true;
       state.githubReposError = '';
@@ -5129,6 +5699,14 @@ final class WebDashboardServer {
               await unlinkGitHubFromSettings();
             }
             break;
+          case 'security-create-api-token':
+            await createAPITokenFromSettings();
+            break;
+          case 'security-revoke-api-token':
+            if (window.confirm('Revoke this API token? Any scripts using it will stop working immediately.')) {
+              await revokeAPITokenFromSettings(target.dataset.tokenId);
+            }
+            break;
           case 'security-invite-admin':
             await inviteAdminFromSettings();
             break;
@@ -5490,6 +6068,16 @@ private final class WebDashboardSecurityController {
             var githubLinkedAt: Date?
         }
 
+        struct APIToken: Codable {
+            var id: String
+            var username: String
+            var name: String
+            var prefix: String
+            var tokenHash: String
+            var createdAt: Date
+            var lastUsedAt: Date?
+        }
+
         var username: String
         var publicBaseURL: String?
         var sessionDurationHours: Int
@@ -5500,6 +6088,7 @@ private final class WebDashboardSecurityController {
         var passwordAlgorithm: String?
         var admins: [Admin]
         var passkeys: [Passkey]
+        var apiTokens: [APIToken]
 
         enum CodingKeys: String, CodingKey {
             case username
@@ -5512,6 +6101,7 @@ private final class WebDashboardSecurityController {
             case passwordAlgorithm
             case admins
             case passkeys
+            case apiTokens
         }
 
         static let empty = StoredSettings(
@@ -5524,7 +6114,8 @@ private final class WebDashboardSecurityController {
             passwordIterations: nil,
             passwordAlgorithm: nil,
             admins: [],
-            passkeys: []
+            passkeys: [],
+            apiTokens: []
         )
 
         init(
@@ -5537,7 +6128,8 @@ private final class WebDashboardSecurityController {
             passwordIterations: Int?,
             passwordAlgorithm: String?,
             admins: [Admin],
-            passkeys: [Passkey]
+            passkeys: [Passkey],
+            apiTokens: [APIToken]
         ) {
             self.username = username
             self.publicBaseURL = publicBaseURL
@@ -5549,6 +6141,7 @@ private final class WebDashboardSecurityController {
             self.passwordAlgorithm = passwordAlgorithm
             self.admins = admins
             self.passkeys = passkeys
+            self.apiTokens = apiTokens
         }
 
         init(from decoder: Decoder) throws {
@@ -5571,6 +6164,7 @@ private final class WebDashboardSecurityController {
             passwordAlgorithm = try container.decodeIfPresent(String.self, forKey: .passwordAlgorithm)
             admins = try container.decodeIfPresent([Admin].self, forKey: .admins) ?? []
             passkeys = decodedPasskeys
+            apiTokens = try container.decodeIfPresent([APIToken].self, forKey: .apiTokens) ?? []
         }
     }
 
@@ -5705,12 +6299,25 @@ private final class WebDashboardSecurityController {
                     remoteAddress: entry.remoteAddress
                 )
             }
+            let apiTokens = settings.apiTokens
+                .filter { $0.username.caseInsensitiveCompare(currentUsername) == .orderedSame }
+                .sorted { $0.createdAt > $1.createdAt }
+                .map { token in
+                    WebDashboardSecurityStateResponse.APIToken(
+                        id: token.id,
+                        name: token.name,
+                        prefix: token.prefix,
+                        createdAt: token.createdAt,
+                        lastUsedAt: token.lastUsedAt
+                    )
+                }
             return WebDashboardSecurityStateResponse(
                 ok: true,
                 currentUsername: currentUsername,
                 currentGitHub: adminLocked(username: currentUsername).flatMap(Self.githubProfile(from:)),
                 admins: admins,
                 passkeys: passkeys,
+                apiTokens: apiTokens,
                 auditEntries: audit
             )
         }
@@ -5725,6 +6332,9 @@ private final class WebDashboardSecurityController {
     func isAuthorized(request: HttpRequest) -> Bool {
         queue.sync {
             pruneExpiredSessionsLocked()
+            if bearerUsernameLocked(request: request) != nil {
+                return true
+            }
             guard let sessionID = sessionID(from: request),
                   let session = sessions[sessionID],
                   session.expiresAt > Date() else {
@@ -5732,6 +6342,61 @@ private final class WebDashboardSecurityController {
             }
             sessions[sessionID]?.expiresAt = Date().addingTimeInterval(TimeInterval(max(1, settings.sessionDurationHours)) * 3600)
             return true
+        }
+    }
+
+    func createAPIToken(using payload: WebDashboardAPITokenCreateRequest, request: HttpRequest) throws -> WebDashboardAPITokenCreateResponse {
+        guard isAuthorized(request: request) else {
+            throw SecurityError.unauthorized
+        }
+        let name = payload.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            throw SecurityError.invalidInput("Token name is required.")
+        }
+        return try queue.sync {
+            guard let username = currentUsernameUnlocked(request: request) else {
+                throw SecurityError.unauthorized
+            }
+            let token = "shiphook_\(randomData(length: 32).base64URLEncodedString())"
+            let record = StoredSettings.APIToken(
+                id: UUID().uuidString,
+                username: username,
+                name: name,
+                prefix: String(token.prefix(18)),
+                tokenHash: Self.apiTokenHash(token),
+                createdAt: Date(),
+                lastUsedAt: nil
+            )
+            settings.apiTokens.append(record)
+            try persistSettingsLocked()
+            appendAuditEntryLocked(username: username, action: "api_token.created", detail: name, request: request)
+            return WebDashboardAPITokenCreateResponse(
+                ok: true,
+                id: record.id,
+                name: record.name,
+                prefix: record.prefix,
+                token: token,
+                message: "API token created. Copy it now; ShipHook will not show it again."
+            )
+        }
+    }
+
+    func revokeAPIToken(using payload: WebDashboardAPITokenDeleteRequest, request: HttpRequest) throws -> WebDashboardAuthMessageResponse {
+        guard isAuthorized(request: request) else {
+            throw SecurityError.unauthorized
+        }
+        let tokenID = payload.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try queue.sync {
+            guard let username = currentUsernameUnlocked(request: request) else {
+                throw SecurityError.unauthorized
+            }
+            guard let token = settings.apiTokens.first(where: { $0.id == tokenID && $0.username.caseInsensitiveCompare(username) == .orderedSame }) else {
+                throw SecurityError.invalidInput("API token not found.")
+            }
+            settings.apiTokens.removeAll { $0.id == tokenID && $0.username.caseInsensitiveCompare(username) == .orderedSame }
+            try persistSettingsLocked()
+            appendAuditEntryLocked(username: username, action: "api_token.revoked", detail: token.name, request: request)
+            return WebDashboardAuthMessageResponse(ok: true, message: "API token revoked.", passkeysAvailable: !settings.passkeys.isEmpty)
         }
     }
 
@@ -7014,6 +7679,9 @@ private final class WebDashboardSecurityController {
 
     func currentUsername(request: HttpRequest) -> String? {
         queue.sync {
+            if let username = bearerUsernameLocked(request: request) {
+                return username
+            }
             guard let sessionID = sessionID(from: request) else { return nil }
             return sessions[sessionID]?.username
         }
@@ -7030,8 +7698,32 @@ private final class WebDashboardSecurityController {
     }
 
     private func currentUsernameUnlocked(request: HttpRequest) -> String? {
+        if let username = bearerUsernameLocked(request: request) {
+            return username
+        }
         guard let sessionID = sessionID(from: request) else { return nil }
         return sessions[sessionID]?.username
+    }
+
+    private func bearerUsernameLocked(request: HttpRequest) -> String? {
+        guard let header = request.headers["authorization"] ?? request.headers["Authorization"] else {
+            return nil
+        }
+        let parts = header.split(separator: " ", maxSplits: 1).map(String.init)
+        guard parts.count == 2, parts[0].caseInsensitiveCompare("Bearer") == .orderedSame else {
+            return nil
+        }
+        let rawToken = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard rawToken.hasPrefix("shiphook_") else {
+            return nil
+        }
+        let hash = Self.apiTokenHash(rawToken)
+        guard let index = settings.apiTokens.firstIndex(where: { $0.tokenHash == hash }) else {
+            return nil
+        }
+        settings.apiTokens[index].lastUsedAt = Date()
+        try? persistSettingsLocked()
+        return settings.apiTokens[index].username
     }
 
     private func migrateLegacySettingsLocked() {
@@ -7142,6 +7834,11 @@ private final class WebDashboardSecurityController {
         var bytes = [UInt8](repeating: 0, count: length)
         _ = SecRandomCopyBytes(kSecRandomDefault, length, &bytes)
         return Data(bytes)
+    }
+
+    private static func apiTokenHash(_ token: String) -> String {
+        let digest = SHA256.hash(data: Data(token.utf8))
+        return Data(digest).base64EncodedString()
     }
 
     private func decodeClientData(from base64URL: String, expectedType: String, challenge: PendingChallenge) throws -> [String: String] {
