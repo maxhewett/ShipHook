@@ -21,6 +21,7 @@ ShipHook is a macOS app used to automate signing & deployment of other macOS app
 - [`ShipHook/Resources/SampleConfig.json`](/Users/max/Developer/ShipHook/ShipHook/Resources/SampleConfig.json): starter config copied to Application Support on first launch
 - [`publish_sparkle_release.sh`](/Users/max/Developer/ShipHook/publish_sparkle_release.sh): reusable Sparkle/appcast publishing script
 - [`DEVELOPER_ID_SETUP.md`](/Users/max/Developer/ShipHook/DEVELOPER_ID_SETUP.md): how to create and install a `Developer ID Application` certificate
+- [`SHIPHOOK_APP_INTEGRATION.md`](/Users/max/Developer/ShipHook/SHIPHOOK_APP_INTEGRATION.md): how target apps should integrate with ShipHook, Sparkle What's New, and delta updates
 
 ## What ShipHook Automates
 
@@ -67,6 +68,7 @@ Each repository supports:
 - `shell` build mode
 - per-repo environment values
 - Sparkle appcast URL and auto-increment build behavior
+- release mode: automated background releases or manual check-only releases
 - signing overrides for team, identity, and sign style
 - a publish command fed by ShipHook environment variables
 
@@ -89,10 +91,13 @@ SHIPHOOK_LOCAL_CHECKOUT_PATH
 SHIPHOOK_RELEASE_NOTES_PATH
 SHIPHOOK_ARTIFACT_PATH
 SHIPHOOK_APPCAST_URL
+SHIPHOOK_SPARKLE_DELTA_UPDATES
 SHIPHOOK_BUNDLED_PUBLISH_SCRIPT
 ```
 
 If `Release Notes Path Override` is empty, ShipHook generates an HTML release-notes page from the commit title and body for the SHA being published, then sets `SHIPHOOK_RELEASE_NOTES_PATH` to that generated file automatically.
+
+The bundled publish script uses that HTML file for Sparkle's release notes link and What's New window. GitHub release bodies are created from Markdown/plain text; HTML release-note documents are converted before `gh release create` so GitHub does not show the raw HTML page source.
 
 If the commit message contains `[beta]`, `[shiphook beta]`, `[pre-release]`, or `[prerelease]`, ShipHook sets `SHIPHOOK_RELEASE_CHANNEL=beta` and publishes to the beta channel instead of stable.
 
@@ -127,6 +132,10 @@ chore(shiphook): update appcast for AppName 1.2.3 [shiphook skip]
 ```
 
 ShipHook ignores commits containing `[shiphook skip]` or `[skip shiphook]`, which prevents infinite rebuild loops.
+
+## App Compatibility
+
+Point app developers at [`SHIPHOOK_APP_INTEGRATION.md`](/Users/max/Developer/ShipHook/SHIPHOOK_APP_INTEGRATION.md) for the target-app setup checklist, including Sparkle feed keys, the What's New window, manual release mode, versioned release notes, and delta-update requirements.
 
 ## Signing
 

@@ -15,6 +15,7 @@ Optional:
   --repo-owner <value>            GitHub owner/org; falls back to origin remote
   --repo-name <value>             GitHub repo name; falls back to origin remote
   --release-notes <path>          HTML file copied into the docs site
+  --github-release-notes <path>   Markdown/plain-text file used for the GitHub release body
   --docs-dir <path>               Docs output directory (default: ./docs)
   --releases-dir <path>           Archive output directory (default: ./release-artifacts)
   --tag-prefix <value>            Git tag prefix (default: v)
@@ -35,6 +36,7 @@ VERSION=""
 ARTIFACT=""
 APP_NAME=""
 RELEASE_NOTES_PATH=""
+GITHUB_RELEASE_NOTES_PATH=""
 REPO_OWNER=""
 REPO_NAME=""
 DOCS_DIR=""
@@ -63,6 +65,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --release-notes)
       RELEASE_NOTES_PATH="$2"
+      shift 2
+      ;;
+    --github-release-notes)
+      GITHUB_RELEASE_NOTES_PATH="$2"
       shift 2
       ;;
     --repo-owner)
@@ -164,6 +170,14 @@ if [[ -n "$RELEASE_NOTES_PATH" ]]; then
   RELEASE_NOTES_PATH="$(resolve_path "$RELEASE_NOTES_PATH")"
   if [[ ! -f "$RELEASE_NOTES_PATH" ]]; then
     echo "Release notes not found: $RELEASE_NOTES_PATH" >&2
+    exit 1
+  fi
+fi
+
+if [[ -n "$GITHUB_RELEASE_NOTES_PATH" ]]; then
+  GITHUB_RELEASE_NOTES_PATH="$(resolve_path "$GITHUB_RELEASE_NOTES_PATH")"
+  if [[ ! -f "$GITHUB_RELEASE_NOTES_PATH" ]]; then
+    echo "GitHub release notes not found: $GITHUB_RELEASE_NOTES_PATH" >&2
     exit 1
   fi
 fi
@@ -279,6 +293,79 @@ fi
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+make_github_release_notes() {
+  local input_path="$1"
+  local output_path="$2"
+
+  python3 - <<'PY' "$input_path" "$output_path" "$RELEASE_TITLE"
+from html.parser import HTMLParser
+from pathlib import Path
+import re
+import sys
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+fallback_title = sys.argv[3]
+raw = source.read_text(encoding="utf-8", errors="replace")
+lower = raw[:4096].lower()
+
+if "<html" not in lower and "<!doctype" not in lower:
+    destination.write_text(raw.strip() + "\n", encoding="utf-8")
+    raise SystemExit(0)
+
+class NotesParser(HTMLParser):
+    block_tags = {"p", "div", "section", "article", "main", "header", "footer", "li", "br", "h1", "h2", "h3", "h4", "h5", "h6"}
+
+    def __init__(self):
+        super().__init__()
+        self.parts = []
+        self.skip_depth = 0
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in {"script", "style", "title"}:
+            self.skip_depth += 1
+            return
+        if self.skip_depth:
+            return
+        if tag in self.block_tags:
+            self.parts.append("\n")
+        if tag == "a":
+            href = dict(attrs).get("href")
+            if href:
+                self.links.append(href)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in {"script", "style", "title"} and self.skip_depth:
+            self.skip_depth -= 1
+            return
+        if self.skip_depth:
+            return
+        if tag in self.block_tags:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if not self.skip_depth:
+            self.parts.append(data)
+
+parser = NotesParser()
+parser.feed(raw)
+text = "".join(parser.parts)
+lines = []
+for line in text.splitlines():
+    collapsed = re.sub(r"\s+", " ", line).strip()
+    if collapsed:
+        lines.append(collapsed)
+
+body = "\n\n".join(lines).strip()
+if not body:
+    body = fallback_title
+destination.write_text(body + "\n", encoding="utf-8")
+PY
+}
+
 cp "$ARCHIVE_PATH" "$TMP_DIR/"
 
 if [[ -n "$RELEASE_NOTES_PATH" ]]; then
@@ -288,11 +375,25 @@ if [[ -n "$RELEASE_NOTES_PATH" ]]; then
   RELEASE_NOTES_URL="${CHANNEL_PAGES_BASE_URL}/release-notes/${RELEASE_NOTES_BASENAME}"
 fi
 
+if [[ -z "$GITHUB_RELEASE_NOTES_PATH" && -n "$RELEASE_NOTES_PATH" ]]; then
+  GITHUB_RELEASE_NOTES_PATH="$TMP_DIR/github-release-notes.md"
+  make_github_release_notes "$RELEASE_NOTES_PATH" "$GITHUB_RELEASE_NOTES_PATH"
+fi
+
 CMD=("$GENERATE_APPCAST" "$TMP_DIR")
+HELP_TEXT="$("$GENERATE_APPCAST" -h 2>&1 || true)"
 if [[ -n "${SPARKLE_PRIVATE_KEY_PATH:-}" ]]; then
-  HELP_TEXT="$("$GENERATE_APPCAST" -h 2>&1 || true)"
   if grep -q -- '--ed-key-file' <<<"$HELP_TEXT"; then
     CMD+=("--ed-key-file" "$SPARKLE_PRIVATE_KEY_PATH")
+  fi
+fi
+
+if [[ "${SHIPHOOK_SPARKLE_DELTA_UPDATES:-0}" == "1" ]]; then
+  if grep -q -- '--generate-deltas' <<<"$HELP_TEXT"; then
+    echo "Sparkle delta updates are enabled for this repository."
+    CMD+=("--generate-deltas")
+  else
+    echo "Sparkle delta updates requested, but this generate_appcast does not advertise --generate-deltas. Continuing with a full update."
   fi
 fi
 
@@ -323,8 +424,8 @@ publish_release_if_possible() {
   fi
 
   local notes_args=()
-  if [[ -n "$RELEASE_NOTES_PATH" ]]; then
-    notes_args=(--notes-file "$RELEASE_NOTES_PATH")
+  if [[ -n "$GITHUB_RELEASE_NOTES_PATH" ]]; then
+    notes_args=(--notes-file "$GITHUB_RELEASE_NOTES_PATH")
   else
     notes_args=(--notes "$RELEASE_TITLE")
   fi

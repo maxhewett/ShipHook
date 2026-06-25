@@ -3662,6 +3662,7 @@ final class WebDashboardServer {
       id: '',
       name: 'New Repository',
       isEnabled: true,
+      releaseMode: 'automated',
       owner: '',
       repo: '',
       branch: 'main',
@@ -3692,6 +3693,7 @@ final class WebDashboardServer {
         appcastURL: '',
         autoIncrementBuild: false,
         skipIfVersionIsNotNewer: true,
+        deltaUpdatesEnabled: false,
         betaIconPath: ''
       },
       notifications: {
@@ -3806,6 +3808,7 @@ final class WebDashboardServer {
     function normalizeRepository(repository) {
       const merged = structuredClone(repositoryDefaults);
       const next = { ...merged, ...repository };
+      next.releaseMode = repository.releaseMode || 'automated';
       next.workingDirectory = repository.workingDirectory ?? '';
       next.releaseNotesPath = repository.releaseNotesPath ?? '';
       next.githubTokenEnvVar = repository.githubTokenEnvVar ?? '';
@@ -4183,7 +4186,7 @@ final class WebDashboardServer {
         <div class="repo-subhead-actions">
           <button class="button secondary" data-action="poll-repo" data-repo-id="${repo.id}">${icon('refresh')}<span>Check Now</span></button>
           <button class="button" data-action="reclone-repo" data-repo-id="${repo.id}">${icon('repo-refresh')}<span>Reclone</span></button>
-          <button class="button" data-action="set-repo-enabled" data-repo-id="${repo.id}" data-enabled="${repo.configuration.isEnabled ? 'false' : 'true'}" title="${repo.configuration.isEnabled ? 'Pause repository' : 'Resume repository'}">${icon(repo.configuration.isEnabled ? 'pause' : 'play')}</button>
+          ${repo.configuration.releaseMode === 'manual' ? '' : `<button class="button" data-action="set-repo-enabled" data-repo-id="${repo.id}" data-enabled="${repo.configuration.isEnabled ? 'false' : 'true'}" title="${repo.configuration.isEnabled ? 'Pause repository' : 'Resume repository'}">${icon(repo.configuration.isEnabled ? 'pause' : 'play')}</button>`}
         </div>
       `;
     }
@@ -4711,12 +4714,14 @@ final class WebDashboardServer {
         <div class="progress"><span style="width:${Math.max(4, repo.progress.fractionComplete * 100)}%"></span></div>
         <div class="tiny" style="margin-top:8px;">Step ${repo.progress.currentStep} of ${repo.progress.totalSteps}: ${escapeHtml(repo.progress.label)}</div>
       ` : '';
-      const statusLabel = repo.configuration.isEnabled ? repo.runtime.activity : 'paused';
-      const statusTitleLabel = repo.configuration.isEnabled ? statusLabel : 'idle';
+      const isManual = repo.configuration.releaseMode === 'manual';
+      const manualIdle = isManual && repo.runtime.activity === 'idle';
+      const statusLabel = manualIdle ? 'manual' : (repo.configuration.isEnabled || isManual ? repo.runtime.activity : 'paused');
+      const statusTitleLabel = (repo.configuration.isEnabled || isManual) ? statusLabel : 'idle';
       const statusBadge = badge(
-        repo.configuration.isEnabled ? 'activity' : 'pause',
+        isManual ? 'check' : (repo.configuration.isEnabled ? 'activity' : 'pause'),
         statusLabel,
-        activityTone(statusLabel)
+        isManual ? 'neutral' : activityTone(statusLabel)
       );
       const channelText = repo.runtime.releaseChannel === 'beta' ? 'Channel: Beta' : 'Channel: Stable';
       const stageMessages = repo.runtime.stageMessages || [];
@@ -4758,7 +4763,7 @@ final class WebDashboardServer {
             <div></div>
             ${statusBadge}
           </div>
-          <strong class="status-title">${icon(repo.configuration.isEnabled ? 'activity' : 'pause')}<span>${escapeHtml(statusTitleLabel.charAt(0).toUpperCase() + statusTitleLabel.slice(1))}</span></strong>
+          <strong class="status-title">${icon(isManual ? 'check' : (repo.configuration.isEnabled ? 'activity' : 'pause'))}<span>${escapeHtml(statusTitleLabel.charAt(0).toUpperCase() + statusTitleLabel.slice(1))}</span></strong>
           <p>${escapeHtml(repo.runtime.summary)}</p>
           ${authorLine(repo.runtime.lastCommitAuthorLogin, repo.runtime.lastCommitAuthorAvatarURL, repo.runtime.lastCommitAuthorProfileURL, 'published this commit')}
           <p>Current version: ${escapeHtml(repo.version || 'Unknown')}</p>
@@ -4861,6 +4866,7 @@ final class WebDashboardServer {
       const repoSummary = summaryList([
         ['Repository', `${draft.owner || 'Unknown'}/${draft.repo || 'Unknown'}`],
         ['Branch', draft.branch || 'main'],
+        ['Release Mode', draft.releaseMode === 'manual' ? 'Manual' : 'Automated'],
         ['Checkout', draft.localCheckoutPath || 'Not set']
       ]);
 
@@ -4879,7 +4885,8 @@ final class WebDashboardServer {
         ['Appcast', draft.sparkle.appcastURL || 'Not set'],
         ['Skip Older Versions', draft.sparkle.skipIfVersionIsNotNewer ? 'Enabled' : 'Disabled'],
         ['Auto Increment Build', draft.sparkle.autoIncrementBuild ? 'Enabled' : 'Disabled'],
-        ['Existing Release Notes', draft.preferExistingReleaseNotesFile ? 'Prefer Existing File' : 'Generate From Commits']
+        ['Existing Release Notes', draft.preferExistingReleaseNotesFile ? 'Prefer Existing File' : 'Generate From Commits'],
+        ['Delta Updates', draft.sparkle.deltaUpdatesEnabled ? 'Enabled' : 'Disabled']
       ]);
 
       const webhookSummary = summaryList([
@@ -4918,8 +4925,12 @@ final class WebDashboardServer {
                   ${textInput('Release Notes Path', 'repo.releaseNotesPath', draft.releaseNotesPath)}
                 </div>
                 <div class="field-grid" style="margin-top: 12px;">
-                  ${toggleInput('Repository Enabled', 'repo.isEnabled', draft.isEnabled)}
+                  ${draft.releaseMode === 'manual' ? '' : toggleInput('Repository Enabled', 'repo.isEnabled', draft.isEnabled)}
                   ${toggleInput('Build On First Seen Commit', 'repo.buildOnFirstSeen', draft.buildOnFirstSeen)}
+                  ${selectInput('Release Mode', 'repo.releaseMode', draft.releaseMode, [
+                    ['automated', 'Automated'],
+                    ['manual', 'Manual']
+                  ])}
                 </div>
               ` : repoSummary}
             </section>
@@ -4956,6 +4967,7 @@ final class WebDashboardServer {
                   ${toggleInput('Auto Increment Build', 'repo.sparkle.autoIncrementBuild', draft.sparkle.autoIncrementBuild)}
                   ${toggleInput('Skip If Version Not Newer', 'repo.sparkle.skipIfVersionIsNotNewer', draft.sparkle.skipIfVersionIsNotNewer)}
                   ${toggleInput('Prefer Existing Versioned Release Notes File', 'repo.preferExistingReleaseNotesFile', draft.preferExistingReleaseNotesFile)}
+                  ${toggleInput('Generate Delta Updates When Supported', 'repo.sparkle.deltaUpdatesEnabled', draft.sparkle.deltaUpdatesEnabled)}
                 </div>
               ` : sparkleSummary}
             </section>
@@ -5022,8 +5034,9 @@ final class WebDashboardServer {
     }
 
     function repoStatusBadge(repo) {
-      const status = repo.configuration.isEnabled ? repo.runtime.activity : 'paused';
-      const iconName = repo.configuration.isEnabled ? 'activity' : 'pause';
+      const manualIdle = repo.configuration.releaseMode === 'manual' && repo.runtime.activity === 'idle';
+      const status = manualIdle ? 'manual' : (repo.configuration.isEnabled || repo.configuration.releaseMode === 'manual' ? repo.runtime.activity : 'paused');
+      const iconName = manualIdle ? 'check' : (repo.configuration.isEnabled || repo.configuration.releaseMode === 'manual' ? 'activity' : 'pause');
       return `<span class="badge icon-only ${activityTone(status)}" title="${escapeHtmlAttr(status)}" aria-label="${escapeHtmlAttr(status)}">${icon(iconName)}<span>${escapeHtml(status)}</span></span>`;
     }
 
@@ -5119,6 +5132,7 @@ final class WebDashboardServer {
         case 'building': return 'live';
         case 'polling': return 'warning';
         case 'paused': return 'warning';
+        case 'manual': return 'neutral';
         default: return '';
       }
     }

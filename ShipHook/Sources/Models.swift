@@ -145,9 +145,15 @@ struct AppConfiguration: Codable, Hashable {
 }
 
 struct RepositoryConfiguration: Codable, Identifiable, Hashable {
+    enum ReleaseMode: String, Codable, CaseIterable {
+        case automated
+        case manual
+    }
+
     var id: String
     var name: String
     var isEnabled: Bool
+    var releaseMode: ReleaseMode
     var owner: String
     var repo: String
     var branch: String
@@ -182,6 +188,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
         case id
         case name
         case isEnabled
+        case releaseMode
         case owner
         case repo
         case branch
@@ -206,6 +213,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
         id: String,
         name: String,
         isEnabled: Bool,
+        releaseMode: ReleaseMode,
         owner: String,
         repo: String,
         branch: String,
@@ -228,6 +236,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
         self.id = id
         self.name = name
         self.isEnabled = isEnabled
+        self.releaseMode = releaseMode
         self.owner = owner
         self.repo = repo
         self.branch = branch
@@ -253,6 +262,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
         id = try container.decode(String.self, forKey: .id)
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? id
         isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        releaseMode = try container.decodeIfPresent(ReleaseMode.self, forKey: .releaseMode) ?? .automated
         owner = try container.decodeIfPresent(String.self, forKey: .owner) ?? ""
         repo = try container.decodeIfPresent(String.self, forKey: .repo) ?? ""
         branch = try container.decodeIfPresent(String.self, forKey: .branch) ?? "main"
@@ -278,6 +288,7 @@ struct RepositoryConfiguration: Codable, Identifiable, Hashable {
             id: "repo-\(UUID().uuidString.prefix(8).lowercased())",
             name: "New Repository",
             isEnabled: true,
+            releaseMode: .automated,
             owner: "",
             repo: "",
             branch: "main",
@@ -310,12 +321,14 @@ struct SparkleConfiguration: Codable, Hashable {
     var appcastURL: String?
     var autoIncrementBuild: Bool
     var skipIfVersionIsNotNewer: Bool
+    var deltaUpdatesEnabled: Bool
     var betaIconPath: String?
 
     static let `default` = SparkleConfiguration(
         appcastURL: nil,
         autoIncrementBuild: false,
         skipIfVersionIsNotNewer: true,
+        deltaUpdatesEnabled: false,
         betaIconPath: nil
     )
 
@@ -323,6 +336,7 @@ struct SparkleConfiguration: Codable, Hashable {
         case appcastURL
         case autoIncrementBuild
         case skipIfVersionIsNotNewer
+        case deltaUpdatesEnabled
         case betaIconPath
     }
 
@@ -330,11 +344,13 @@ struct SparkleConfiguration: Codable, Hashable {
         appcastURL: String?,
         autoIncrementBuild: Bool,
         skipIfVersionIsNotNewer: Bool,
+        deltaUpdatesEnabled: Bool,
         betaIconPath: String?
     ) {
         self.appcastURL = appcastURL
         self.autoIncrementBuild = autoIncrementBuild
         self.skipIfVersionIsNotNewer = skipIfVersionIsNotNewer
+        self.deltaUpdatesEnabled = deltaUpdatesEnabled
         self.betaIconPath = betaIconPath
     }
 
@@ -343,6 +359,7 @@ struct SparkleConfiguration: Codable, Hashable {
         appcastURL = try container.decodeIfPresent(String.self, forKey: .appcastURL)
         autoIncrementBuild = try container.decodeIfPresent(Bool.self, forKey: .autoIncrementBuild) ?? true
         skipIfVersionIsNotNewer = try container.decodeIfPresent(Bool.self, forKey: .skipIfVersionIsNotNewer) ?? true
+        deltaUpdatesEnabled = try container.decodeIfPresent(Bool.self, forKey: .deltaUpdatesEnabled) ?? false
         betaIconPath = try container.decodeIfPresent(String.self, forKey: .betaIconPath)
     }
 
@@ -351,6 +368,7 @@ struct SparkleConfiguration: Codable, Hashable {
         try container.encodeIfPresent(appcastURL, forKey: .appcastURL)
         try container.encode(autoIncrementBuild, forKey: .autoIncrementBuild)
         try container.encode(skipIfVersionIsNotNewer, forKey: .skipIfVersionIsNotNewer)
+        try container.encode(deltaUpdatesEnabled, forKey: .deltaUpdatesEnabled)
         try container.encodeIfPresent(betaIconPath, forKey: .betaIconPath)
     }
 }

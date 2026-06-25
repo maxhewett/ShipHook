@@ -145,6 +145,7 @@ struct PipelineRunner {
             "SHIPHOOK_RELEASE_NOTES_PATH": releaseNotesPath,
             "SHIPHOOK_BUNDLED_PUBLISH_SCRIPT": bundledPublishScript,
             "SHIPHOOK_APPCAST_URL": releasePlan?.appcastURL ?? "",
+            "SHIPHOOK_SPARKLE_DELTA_UPDATES": repository.sparkle?.deltaUpdatesEnabled == true ? "1" : "0",
         ]) { _, rhs in rhs }
 
         if let releasePlan, releasePlan.appliedBuildMutation {

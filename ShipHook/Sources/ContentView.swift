@@ -189,9 +189,10 @@ struct ContentView: View {
     private func repositoryRow(_ repo: RepositoryConfiguration) -> some View {
         let state = appState.repoStates[repo.id] ?? .initial(id: repo.id)
         let isSelected = selectedRepositoryID == repo.id
-        let isDisabled = !repo.isEnabled
-        let statusColor = isDisabled ? pausedAccentColor : color(for: state.activity)
-        let statusSymbol = isDisabled ? "pause.circle.fill" : repositoryStatusSymbol(for: state.activity)
+        let isDisabled = repo.releaseMode == .automated && !repo.isEnabled
+        let isManualIdle = repo.releaseMode == .manual && state.activity == .idle
+        let statusColor = isDisabled ? pausedAccentColor : (isManualIdle ? .secondary : color(for: state.activity))
+        let statusSymbol = isDisabled ? "pause.circle.fill" : (isManualIdle ? "checkmark.circle.fill" : repositoryStatusSymbol(for: state.activity))
         let latestVersion = appState.displayedVersion(for: repo)
         let latestBuild = appState.latestBuildRecord(for: repo.id)
         let channel = state.releaseChannel ?? latestBuild?.releaseChannel
@@ -313,12 +314,14 @@ struct ContentView: View {
                     appState.triggerManualPoll(for: value.id)
                 }
 
-                headerIconButton(
-                    systemImage: value.isEnabled ? "pause.circle" : "play.circle",
-                    accessibilityLabel: value.isEnabled ? "Pause repository" : "Resume repository"
-                ) {
-                    repository.wrappedValue.isEnabled.toggle()
-                    appState.saveConfiguration()
+                if value.releaseMode == .automated {
+                    headerIconButton(
+                        systemImage: value.isEnabled ? "pause.circle" : "play.circle",
+                        accessibilityLabel: value.isEnabled ? "Pause repository" : "Resume repository"
+                    ) {
+                        repository.wrappedValue.isEnabled.toggle()
+                        appState.saveConfiguration()
+                    }
                 }
 
                 Spacer()
@@ -765,6 +768,7 @@ private struct AddRepositoryWizard: View {
                 appcastURL: appcastURL.isEmpty ? nil : appcastURL,
                 autoIncrementBuild: autoIncrementBuild,
                 skipIfVersionIsNotNewer: true,
+                deltaUpdatesEnabled: false,
                 betaIconPath: nil
             )
             repository.signing = SigningConfiguration(
@@ -1761,6 +1765,22 @@ private struct RepositoryEditor: View {
                             Spacer()
                         }
 
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Release Mode", systemImage: "playpause.circle")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            GlassSegmentedControl(
+                                selection: $repository.releaseMode,
+                                options: [
+                                    (.automated, "Automated"),
+                                    (.manual, "Manual")
+                                ]
+                            )
+                            Text(repository.releaseMode == .manual ? "Manual repositories only check and release when you press Check Now." : "Automated repositories are checked by ShipHook's background polling loop.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
                         GlassSegmentedControl(
                             selection: $repository.versionStrategy,
                             options: [
@@ -1952,6 +1972,7 @@ private struct RepositoryEditor: View {
                         Toggle("Skip build when project version is not newer than appcast", isOn: sparkle.skipIfVersionIsNotNewer)
                         Toggle("Auto-increment build when appcast build is not newer", isOn: sparkle.autoIncrementBuild)
                         Toggle("Use existing versioned release notes file when present", isOn: $repository.preferExistingReleaseNotesFile)
+                        Toggle("Generate Sparkle delta updates when supported", isOn: sparkle.deltaUpdatesEnabled)
                     }
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 } else {
@@ -1960,7 +1981,8 @@ private struct RepositoryEditor: View {
                             ("Appcast", appcastURLBinding.wrappedValue, "link"),
                             ("Skip Older Versions", sparkle.wrappedValue.skipIfVersionIsNotNewer ? "Enabled" : "Disabled", "arrow.uturn.backward.circle"),
                             ("Auto Increment Build", sparkle.wrappedValue.autoIncrementBuild ? "Enabled" : "Disabled", "number.circle"),
-                            ("Existing Release Notes", repository.preferExistingReleaseNotesFile ? "Prefer Existing File" : "Generate From Commits", "note.text")
+                            ("Existing Release Notes", repository.preferExistingReleaseNotesFile ? "Prefer Existing File" : "Generate From Commits", "note.text"),
+                            ("Delta Updates", sparkle.wrappedValue.deltaUpdatesEnabled ? "Enabled" : "Disabled", "arrow.triangle.2.circlepath")
                         ])
                         Text("Tap the configure icon to edit Sparkle settings.")
                             .font(.caption)

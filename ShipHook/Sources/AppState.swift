@@ -234,6 +234,7 @@ final class AppState: ObservableObject {
             id: "repo-\(UUID().uuidString.prefix(8).lowercased())",
             name: appName.isEmpty ? repo : appName,
             isEnabled: true,
+            releaseMode: .automated,
             owner: owner,
             repo: repo,
             branch: branch.isEmpty ? "main" : branch,
@@ -263,6 +264,7 @@ final class AppState: ObservableObject {
                 appcastURL: defaultAppcastURL(owner: owner, repo: repo),
                 autoIncrementBuild: false,
                 skipIfVersionIsNotNewer: true,
+                deltaUpdatesEnabled: false,
                 betaIconPath: nil
             ),
             notifications: .default,
@@ -1177,7 +1179,18 @@ final class AppState: ObservableObject {
     }
 
     private func check(repository: RepositoryConfiguration, force: Bool) async {
-        if !repository.isEnabled {
+        if !force && repository.releaseMode == .manual {
+            updateState(for: repository.id) {
+                $0.activity = .idle
+                $0.buildPhase = .idle
+                $0.buildDetail = nil
+                $0.summary = "Manual releases enabled. Use Check Now to inspect this repository."
+                $0.lastCheckDate = Date()
+            }
+            return
+        }
+
+        if repository.releaseMode == .automated && !repository.isEnabled {
             updateState(for: repository.id) {
                 $0.activity = .idle
                 $0.buildPhase = .idle
