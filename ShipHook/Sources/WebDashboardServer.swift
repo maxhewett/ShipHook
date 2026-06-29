@@ -3645,7 +3645,8 @@ final class WebDashboardServer {
       hardRestarting: false,
       saving: false,
       refreshTimerId: null,
-      refreshInFlight: false
+      refreshInFlight: false,
+      localConfigDirty: false
     };
 
     const globalDefaults = {
@@ -3781,7 +3782,7 @@ final class WebDashboardServer {
     }
 
     function applySnapshot(snapshot, { preserveDraft = true } = {}) {
-      const shouldPreserveDraft = preserveDraft && !!state.snapshot?.global?.hasUnsavedChanges && !!state.draftConfig;
+      const shouldPreserveDraft = preserveDraft && (state.localConfigDirty || !!state.snapshot?.global?.hasUnsavedChanges) && !!state.draftConfig;
       state.snapshot = snapshot;
       if (!shouldPreserveDraft) {
         state.draftConfig = makeDraftConfig(snapshot);
@@ -3821,6 +3822,14 @@ final class WebDashboardServer {
       return next;
     }
 
+    function markConfigurationDirty() {
+      state.localConfigDirty = true;
+    }
+
+    function clearConfigurationDirty() {
+      state.localConfigDirty = false;
+    }
+
     async function runCommand(payload, successMessage) {
       const response = await fetchWithTimeout('/api/command', {
         method: 'POST',
@@ -3832,11 +3841,14 @@ final class WebDashboardServer {
         return;
       }
       const data = await response.json();
-      if (data.snapshot) {
-        applySnapshot(data.snapshot);
-      }
       if (!response.ok || data.ok === false) {
         throw new Error(data.error || 'Request failed.');
+      }
+      if (payload.type === 'saveConfiguration' || payload.type === 'reloadConfiguration') {
+        clearConfigurationDirty();
+      }
+      if (data.snapshot) {
+        applySnapshot(data.snapshot, { preserveDraft: payload.type !== 'saveConfiguration' && payload.type !== 'reloadConfiguration' });
       }
       state.addRepoInspectionPreview = data.inspectionPreview || null;
       setStatus({ kind: 'ok', message: data.message || successMessage || 'Done.' });
@@ -4037,7 +4049,7 @@ final class WebDashboardServer {
 
     function renderFloatingSave() {
       const node = document.getElementById('floating-save-root');
-      if (!state.snapshot?.global?.hasUnsavedChanges) {
+      if (!state.localConfigDirty && !state.snapshot?.global?.hasUnsavedChanges) {
         node.innerHTML = '';
         return;
       }
@@ -4883,6 +4895,8 @@ final class WebDashboardServer {
 
       const sparkleSummary = summaryList([
         ['Appcast', draft.sparkle.appcastURL || 'Not set'],
+        ['Appcast Output', readPublishCommandFlag(draft.publishCommand, 'docs-dir', '$SHIPHOOK_LOCAL_CHECKOUT_PATH/docs') || 'Not set'],
+        ['Release Artifacts', readPublishCommandFlag(draft.publishCommand, 'releases-dir', '$SHIPHOOK_LOCAL_CHECKOUT_PATH/release-artifacts') || 'Not set'],
         ['Skip Older Versions', draft.sparkle.skipIfVersionIsNotNewer ? 'Enabled' : 'Disabled'],
         ['Auto Increment Build', draft.sparkle.autoIncrementBuild ? 'Enabled' : 'Disabled'],
         ['Existing Release Notes', draft.preferExistingReleaseNotesFile ? 'Prefer Existing File' : 'Generate From Commits'],
@@ -4963,6 +4977,8 @@ final class WebDashboardServer {
               ${state.configSections.sparkle ? `
                 <div class="field-grid">
                   ${textInput('Appcast URL', 'repo.sparkle.appcastURL', draft.sparkle.appcastURL)}
+                  ${publishCommandFlagInput('Appcast & Release Notes Directory', 'docs-dir', readPublishCommandFlag(draft.publishCommand, 'docs-dir', '$SHIPHOOK_LOCAL_CHECKOUT_PATH/docs'))}
+                  ${publishCommandFlagInput('Release Artifacts Directory', 'releases-dir', readPublishCommandFlag(draft.publishCommand, 'releases-dir', '$SHIPHOOK_LOCAL_CHECKOUT_PATH/release-artifacts'))}
                   ${textInput('Beta Icon Path', 'repo.sparkle.betaIconPath', draft.sparkle.betaIconPath)}
                   ${toggleInput('Auto Increment Build', 'repo.sparkle.autoIncrementBuild', draft.sparkle.autoIncrementBuild)}
                   ${toggleInput('Skip If Version Not Newer', 'repo.sparkle.skipIfVersionIsNotNewer', draft.sparkle.skipIfVersionIsNotNewer)}
@@ -5073,6 +5089,10 @@ final class WebDashboardServer {
       return `<label class="field">${escapeHtml(label)}<input type="text" value="${escapeHtmlAttr(value ?? '')}" readonly class="dim"></label>`;
     }
 
+    function publishCommandFlagInput(label, flag, value) {
+      return `<label class="field">${escapeHtml(label)}<input type="text" value="${escapeHtmlAttr(value ?? '')}" data-publish-flag="${escapeHtmlAttr(flag)}"></label>`;
+    }
+
     function selectInput(label, path, value, options) {
       return `
         <label class="field">${escapeHtml(label)}
@@ -5085,6 +5105,44 @@ final class WebDashboardServer {
 
     function toggleInput(label, path, checked) {
       return `<label class="field toggle"><input type="checkbox" data-field="${path}" ${checked ? 'checked' : ''}><span>${escapeHtml(label)}</span></label>`;
+    }
+
+    function sanitizedPublishFlag(flag) {
+      return String(flag || '').replace(/[^A-Za-z0-9_-]/g, '');
+    }
+
+    function publishFlagPattern(flag) {
+      const safeFlag = sanitizedPublishFlag(flag);
+      return new RegExp(`(?:^|\\s)--${safeFlag}\\s+("[^"]*"|'[^']*'|\\S+)`);
+    }
+
+    function readPublishCommandFlag(command, flag, fallback = '') {
+      const match = String(command || '').match(publishFlagPattern(flag));
+      if (!match) return fallback;
+      const value = match[1] || '';
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        return value.slice(1, -1);
+      }
+      return value;
+    }
+
+    function shellDoubleQuoted(value) {
+      return `"${String(value || '').replace(/(["\\`])/g, '\\$1')}"`;
+    }
+
+    function writePublishCommandFlag(command, flag, value) {
+      const safeFlag = sanitizedPublishFlag(flag);
+      const trimmedValue = String(value || '').trim();
+      const current = String(command || '').trim();
+      const existingPattern = new RegExp(`\\s*--${safeFlag}\\s+("[^"]*"|'[^']*'|\\S+)`);
+      if (!trimmedValue) {
+        return current.replace(existingPattern, '').trim();
+      }
+      const replacement = ` --${safeFlag} ${shellDoubleQuoted(trimmedValue)}`;
+      if (existingPattern.test(current)) {
+        return current.replace(existingPattern, replacement).trim();
+      }
+      return `${current}${replacement}`.trim();
     }
 
     function icon(name) {
@@ -5744,13 +5802,29 @@ final class WebDashboardServer {
 
     document.addEventListener('input', event => {
       const target = event.target;
+      const publishFlag = target.getAttribute('data-publish-flag');
+      if (publishFlag) {
+        const repo = selectedRepoDraft();
+        if (!repo) return;
+        repo.publishCommand = writePublishCommandFlag(repo.publishCommand, publishFlag, target.value);
+        markConfigurationDirty();
+        renderOverview();
+        renderRepoList();
+        renderStatusPane();
+        renderBuildsPane();
+        renderFloatingSave();
+        return;
+      }
+
       const field = target.getAttribute('data-field');
       if (!field) return;
 
       const value = target.type === 'checkbox' ? target.checked : target.value;
+      let changedConfiguration = false;
 
       if (field.startsWith('global.')) {
         updateByPath(state.draftConfig, field.replace('global.', ''), value);
+        changedConfiguration = true;
       } else if (field.startsWith('repo.')) {
         const repo = selectedRepoDraft();
         if (!repo) return;
@@ -5765,6 +5839,7 @@ final class WebDashboardServer {
         } else {
           updateByPath(repo, field.replace('repo.', ''), value);
         }
+        changedConfiguration = true;
       } else if (field.startsWith('notary.')) {
         updateByPath(notarizationDraft, field.replace('notary.', ''), value);
       } else if (field.startsWith('addRepo.')) {
@@ -5774,16 +5849,23 @@ final class WebDashboardServer {
         return;
       }
 
+      if (changedConfiguration) {
+        markConfigurationDirty();
+      }
       renderOverview();
       renderRepoList();
       renderStatusPane();
       renderBuildsPane();
       renderConfigurationPane();
+      renderFloatingSave();
       renderModal();
     });
 
     document.addEventListener('change', async event => {
       const target = event.target;
+      if (target.hasAttribute('data-field') || target.hasAttribute('data-publish-flag')) {
+        target.dispatchEvent(new Event('input', { bubbles: true }));
+      }
       if (target.hasAttribute('data-launch-toggle')) {
         try {
           await runCommand({
