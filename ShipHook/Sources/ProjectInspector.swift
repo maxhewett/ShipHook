@@ -28,7 +28,7 @@ enum ProjectInspectorError: LocalizedError {
 
 struct ProjectInspector {
     private let fileManager = FileManager.default
-    private let commandRunner = ShellCommandRunner()
+    private let processRunner = ProcessCommandRunner()
 
     func inspect(localCheckoutPath: String) throws -> ProjectInspectionResult {
         let root = (localCheckoutPath as NSString).expandingTildeInPath
@@ -44,8 +44,8 @@ struct ProjectInspector {
         }
 
         let schemes = try findSchemes(workspacePath: workspacePath, projectPath: projectPath, root: root)
-        let remote = try? commandRunner.run("git -C '\(root)' remote get-url origin", currentDirectory: root, environment: [:]).output.trimmingCharacters(in: .whitespacesAndNewlines)
-        let branch = try? commandRunner.run("git -C '\(root)' rev-parse --abbrev-ref HEAD", currentDirectory: root, environment: [:]).output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remote = try? processRunner.run("git", arguments: ["remote", "get-url", "origin"], currentDirectory: root).output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let branch = try? processRunner.run("git", arguments: ["rev-parse", "--abbrev-ref", "HEAD"], currentDirectory: root).output.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let parsedRemote = remote.flatMap(parseGitHubRemote(_:))
         let suggestedScheme = suggestScheme(
@@ -69,21 +69,21 @@ struct ProjectInspector {
     }
 
     private func findSchemes(workspacePath: String?, projectPath: String?, root: String) throws -> [String] {
-        var commands: [String] = []
+        var commands: [[String]] = []
         if let workspacePath, !workspacePath.isEmpty {
-            commands.append("xcodebuild -workspace '\(workspacePath)' -list -json")
+            commands.append(["-workspace", workspacePath, "-list", "-json"])
         }
         if let projectPath, !projectPath.isEmpty {
-            commands.append("xcodebuild -project '\(projectPath)' -list -json")
+            commands.append(["-project", projectPath, "-list", "-json"])
         }
         guard !commands.isEmpty else {
             return []
         }
 
         var lastError: Error?
-        for command in commands {
+        for arguments in commands {
             do {
-                let output = try commandRunner.run(command, currentDirectory: root, environment: [:]).output
+                let output = try processRunner.run("xcodebuild", arguments: arguments, currentDirectory: root).output
                 let data = try extractJSON(from: output)
                 let decoded = try JSONDecoder().decode(XcodeListResponse.self, from: data)
                 if !decoded.schemes.isEmpty {

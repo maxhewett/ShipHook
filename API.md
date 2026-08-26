@@ -14,7 +14,7 @@ Automation should use bearer tokens:
 curl -H 'Authorization: Bearer shiphook_xxx' https://shiphook.example.com/api/v1/status
 ```
 
-Create tokens from `/api` or from Account & Security in the web UI. Tokens are stored hashed and are only shown once.
+Create tokens from `/api` or from Account & Security in the web UI. Tokens are stored hashed and are only shown once. Existing tokens and name-only token creation remain legacy full-access for compatibility; new callers should pass explicit scopes.
 
 ## Endpoints
 
@@ -98,10 +98,23 @@ Token management endpoints require an authenticated browser session or an existi
 ### `POST /api/auth/tokens`
 
 ```json
-{ "name": "ci-runner" }
+{
+  "name": "ci-runner",
+  "scopes": ["status", "build"],
+  "expiresInDays": 90
+}
 ```
 
 Returns the plaintext token once.
+
+Scopes:
+
+- `status`: repository list, repository detail, and runtime status.
+- `files`: log and safe file-read/list APIs.
+- `build`: check/build triggers.
+- `pull`: pull and reclone triggers.
+- `admin`: restart and dashboard administration commands.
+- `tokens`: token management and account security state.
 
 ### `POST /api/auth/tokens/revoke`
 

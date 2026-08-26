@@ -121,3 +121,89 @@ struct ShellCommandRunner {
         return result
     }
 }
+
+struct ProcessCommandRunner {
+    func run(
+        _ executable: String,
+        arguments: [String],
+        currentDirectory: String,
+        environment: [String: String] = [:]
+    ) throws -> CommandResult {
+        try run(
+            executable,
+            arguments: arguments,
+            currentDirectory: currentDirectory,
+            environment: environment,
+            onOutput: nil
+        )
+    }
+
+    func run(
+        _ executable: String,
+        arguments: [String],
+        currentDirectory: String,
+        environment: [String: String] = [:],
+        onOutput: ((String) -> Void)?
+    ) throws -> CommandResult {
+        let process = Process()
+        if executable.contains("/") {
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = arguments
+        } else {
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = [executable] + arguments
+        }
+        process.currentDirectoryURL = URL(fileURLWithPath: currentDirectory)
+
+        var mergedEnvironment = ProcessInfo.processInfo.environment
+        environment.forEach { mergedEnvironment[$0.key] = $0.value }
+        process.environment = mergedEnvironment
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        let outputLock = NSLock()
+        var outputData = Data()
+        let handle = pipe.fileHandleForReading
+        handle.readabilityHandler = { fileHandle in
+            let data = fileHandle.availableData
+            guard !data.isEmpty else {
+                return
+            }
+
+            outputLock.lock()
+            outputData.append(data)
+            outputLock.unlock()
+            if let chunk = String(data: data, encoding: .utf8) {
+                onOutput?(chunk)
+            }
+        }
+
+        try process.run()
+        process.waitUntilExit()
+        handle.readabilityHandler = nil
+
+        let remainingData = handle.readDataToEndOfFile()
+        if !remainingData.isEmpty {
+            outputLock.lock()
+            outputData.append(remainingData)
+            outputLock.unlock()
+            if let chunk = String(data: remainingData, encoding: .utf8) {
+                onOutput?(chunk)
+            }
+        }
+
+        outputLock.lock()
+        let finalOutputData = outputData
+        outputLock.unlock()
+        let output = String(data: finalOutputData, encoding: .utf8) ?? ""
+        let result = CommandResult(exitCode: process.terminationStatus, output: output)
+
+        if result.exitCode != 0 {
+            throw CommandError.nonZeroExit(result)
+        }
+
+        return result
+    }
+}

@@ -393,7 +393,9 @@ private struct WebDashboardSecurityStateResponse: Codable {
         var id: String
         var name: String
         var prefix: String
+        var scopes: [String]?
         var createdAt: Date
+        var expiresAt: Date?
         var lastUsedAt: Date?
     }
 
@@ -408,6 +410,9 @@ private struct WebDashboardSecurityStateResponse: Codable {
 
 private struct WebDashboardAPITokenCreateRequest: Codable {
     var name: String
+    var scopes: [String]?
+    var expiresInDays: Int?
+    var expiresAt: Date?
 }
 
 private struct WebDashboardAPITokenCreateResponse: Codable {
@@ -496,6 +501,7 @@ final class WebDashboardServer {
     private let commandHandler: @MainActor (WebDashboardCommand) -> WebDashboardCommandResponse
     private let server = HttpServer()
     private let securityController = WebDashboardSecurityController()
+    private let processRunner = ProcessCommandRunner()
     private var isConfigured = false
     private var currentPort: in_port_t?
     private var status: Status = .stopped
@@ -525,6 +531,7 @@ final class WebDashboardServer {
 
         let resolvedPort = in_port_t(clamping: port)
         do {
+            server.listenAddressIPv4 = "127.0.0.1"
             try server.start(resolvedPort, forceIPv4: true)
             currentPort = resolvedPort
             status = .running(url: "http://localhost:\(resolvedPort)")
@@ -701,7 +708,7 @@ final class WebDashboardServer {
             guard let self else {
                 return .internalServerError
             }
-            guard self.securityController.isAuthorized(request: request) else {
+            guard self.securityController.isAuthorized(request: request, requiringScope: "status") else {
                 return self.unauthorizedJSONResponse(request: request)
             }
             return self.jsonResponse(for: self.currentSnapshot(), request: request)
@@ -769,7 +776,7 @@ final class WebDashboardServer {
 
         server.POST["/api/v1/restart"] = { [weak self] request in
             guard let self else { return .internalServerError }
-            guard self.securityController.isAuthorized(request: request) else {
+            guard self.securityController.isAuthorized(request: request, requiringScope: "admin") else {
                 return self.unauthorizedJSONResponse(request: request)
             }
             self.securityController.recordAuditEvent(
@@ -787,7 +794,7 @@ final class WebDashboardServer {
 
         server.POST["/api/v1/hard-restart"] = { [weak self] request in
             guard let self else { return .internalServerError }
-            guard self.securityController.isAuthorized(request: request) else {
+            guard self.securityController.isAuthorized(request: request, requiringScope: "admin") else {
                 return self.unauthorizedJSONResponse(request: request)
             }
             self.securityController.recordAuditEvent(
@@ -807,7 +814,7 @@ final class WebDashboardServer {
             guard let self else {
                 return .internalServerError
             }
-            guard self.securityController.isAuthorized(request: request) else {
+            guard self.securityController.isAuthorized(request: request, requiringScope: "files") else {
                 return self.unauthorizedJSONResponse(request: request)
             }
             return self.logDownloadResponse(request: request)
@@ -817,11 +824,11 @@ final class WebDashboardServer {
             guard let self else {
                 return .internalServerError
             }
-            guard self.securityController.isAuthorized(request: request) else {
-                return self.unauthorizedJSONResponse(request: request)
-            }
             do {
                 let command = try self.decodeCommand(from: request)
+                guard self.securityController.isAuthorized(request: request, requiringScope: self.requiredScope(for: command)) else {
+                    return self.unauthorizedJSONResponse(request: request)
+                }
                 let response = self.perform(command)
                 if response.ok {
                     let (action, detail) = self.auditDescription(for: command)
@@ -842,7 +849,7 @@ final class WebDashboardServer {
             guard let self else {
                 return .internalServerError
             }
-            guard self.securityController.isAuthorized(request: request) else {
+            guard self.securityController.isAuthorized(request: request, requiringScope: "admin") else {
                 return self.unauthorizedJSONResponse(request: request)
             }
             self.securityController.recordAuditEvent(
@@ -973,9 +980,15 @@ final class WebDashboardServer {
             try fileManager.createDirectory(at: checkoutURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         }
 
-        let command = "git clone --branch \(shellSingleQuoted(branch)) --single-branch \(shellSingleQuoted(cloneURL.absoluteString)) \(shellSingleQuoted(checkoutURL.path))"
-        _ = try ShellCommandRunner().run(
-            command,
+        _ = try processRunner.run(
+            "git",
+            arguments: [
+                "clone",
+                "--branch", branch,
+                "--single-branch",
+                cloneURL.absoluteString,
+                checkoutURL.path
+            ],
             currentDirectory: developerURL.path,
             environment: [
                 "GIT_CONFIG_COUNT": "1",
@@ -983,10 +996,6 @@ final class WebDashboardServer {
                 "GIT_CONFIG_VALUE_0": "Authorization: Bearer \(token)"
             ]
         )
-    }
-
-    private func shellSingleQuoted(_ value: String) -> String {
-        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private func decodeCommand(from request: HttpRequest) throws -> WebDashboardCommand {
@@ -1215,7 +1224,7 @@ final class WebDashboardServer {
     }
 
     private func securityPageResponse(for request: HttpRequest) -> HttpResponse {
-        guard securityController.isAuthorized(request: request) else {
+        guard securityController.isAuthorized(request: request, requiringScope: "admin") else {
             return redirectResponse(to: "/", request: request)
         }
         let forcePassword = request.queryParams.contains { $0.0 == "force-password" && $0.1 == "1" }
@@ -1403,7 +1412,7 @@ final class WebDashboardServer {
     }
 
     private func handleGitHubLink(request: HttpRequest) -> HttpResponse {
-        guard securityController.isAuthorized(request: request) else {
+        guard securityController.isAuthorized(request: request, requiringScope: "admin") else {
             return unauthorizedJSONResponse(request: request)
         }
         do {
@@ -1425,7 +1434,7 @@ final class WebDashboardServer {
     }
 
     private func handleGitHubUnlink(request: HttpRequest) -> HttpResponse {
-        guard securityController.isAuthorized(request: request) else {
+        guard securityController.isAuthorized(request: request, requiringScope: "admin") else {
             return unauthorizedJSONResponse(request: request)
         }
         do {
@@ -1439,7 +1448,7 @@ final class WebDashboardServer {
     }
 
     private func handleGitHubRepositories(request: HttpRequest) -> HttpResponse {
-        guard securityController.isAuthorized(request: request) else {
+        guard securityController.isAuthorized(request: request, requiringScope: "admin") else {
             return unauthorizedJSONResponse(request: request)
         }
         do {
@@ -1456,7 +1465,7 @@ final class WebDashboardServer {
     }
 
     private func handleGitHubCloneInspect(request: HttpRequest) -> HttpResponse {
-        guard securityController.isAuthorized(request: request) else {
+        guard securityController.isAuthorized(request: request, requiringScope: "admin") else {
             return unauthorizedJSONResponse(request: request)
         }
         do {
@@ -1488,14 +1497,14 @@ final class WebDashboardServer {
     }
 
     private func handleAPIRepositories(request: HttpRequest) -> HttpResponse {
-        guard securityController.isAuthorized(request: request) else {
+        guard securityController.isAuthorized(request: request, requiringScope: "status") else {
             return unauthorizedJSONResponse(request: request)
         }
         return jsonResponse(for: currentSnapshot().repositories, request: request)
     }
 
     private func handleAPIRepository(request: HttpRequest) -> HttpResponse {
-        guard securityController.isAuthorized(request: request) else {
+        guard securityController.isAuthorized(request: request, requiringScope: "status") else {
             return unauthorizedJSONResponse(request: request)
         }
         guard let repositoryID = queryValue("id", in: request),
@@ -1506,7 +1515,7 @@ final class WebDashboardServer {
     }
 
     private func handleAPIStatus(request: HttpRequest) -> HttpResponse {
-        guard securityController.isAuthorized(request: request) else {
+        guard securityController.isAuthorized(request: request, requiringScope: "status") else {
             return unauthorizedJSONResponse(request: request)
         }
         let snapshot = currentSnapshot()
@@ -1520,7 +1529,7 @@ final class WebDashboardServer {
     }
 
     private func handleAPILog(request: HttpRequest) -> HttpResponse {
-        guard securityController.isAuthorized(request: request) else {
+        guard securityController.isAuthorized(request: request, requiringScope: "files") else {
             return unauthorizedJSONResponse(request: request)
         }
         guard let repositoryID = queryValue("id", in: request) else {
@@ -1545,7 +1554,7 @@ final class WebDashboardServer {
     }
 
     private func handleAPICommand(request: HttpRequest, command: String) -> HttpResponse {
-        guard securityController.isAuthorized(request: request) else {
+        guard securityController.isAuthorized(request: request, requiringScope: requiredScope(forAPICommand: command)) else {
             return unauthorizedJSONResponse(request: request)
         }
         do {
@@ -1593,7 +1602,7 @@ final class WebDashboardServer {
     }
 
     private func handleAPIFileList(request: HttpRequest) -> HttpResponse {
-        guard securityController.isAuthorized(request: request) else {
+        guard securityController.isAuthorized(request: request, requiringScope: "files") else {
             return unauthorizedJSONResponse(request: request)
         }
         do {
@@ -1625,7 +1634,7 @@ final class WebDashboardServer {
     }
 
     private func handleAPIFileRead(request: HttpRequest) -> HttpResponse {
-        guard securityController.isAuthorized(request: request) else {
+        guard securityController.isAuthorized(request: request, requiringScope: "files") else {
             return unauthorizedJSONResponse(request: request)
         }
         do {
@@ -1708,6 +1717,30 @@ final class WebDashboardServer {
         }
     }
 
+    private func requiredScope(forAPICommand command: String) -> String {
+        switch command {
+        case "check", "build":
+            return "build"
+        case "pull", "reclone":
+            return "pull"
+        default:
+            return "admin"
+        }
+    }
+
+    private func requiredScope(for command: WebDashboardCommand) -> String {
+        switch command {
+        case .pollAll, .pollRepository:
+            return "build"
+        case .pullRepository, .recloneRepository:
+            return "pull"
+        case .refreshReleases:
+            return "status"
+        default:
+            return "admin"
+        }
+    }
+
     private func decodeRequest<T: Decodable>(_ type: T.Type, from request: HttpRequest) throws -> T {
         try JSONDecoder.webDashboard.decode(T.self, from: Data(request.body))
     }
@@ -1739,8 +1772,8 @@ final class WebDashboardServer {
             throw NSError(domain: "ShipHookAPI", code: 103, userInfo: [NSLocalizedDescriptionKey: "Path is not available through the API."])
         }
 
-        let baseURL = URL(fileURLWithPath: (repository.configuration.localCheckoutPath as NSString).expandingTildeInPath).standardizedFileURL
-        let targetURL = relativeComponents.reduce(baseURL) { $0.appendingPathComponent($1) }.standardizedFileURL
+        let baseURL = URL(fileURLWithPath: (repository.configuration.localCheckoutPath as NSString).expandingTildeInPath).standardizedFileURL.resolvingSymlinksInPath()
+        let targetURL = relativeComponents.reduce(baseURL) { $0.appendingPathComponent($1) }.standardizedFileURL.resolvingSymlinksInPath()
         guard targetURL.path == baseURL.path || targetURL.path.hasPrefix(baseURL.path + "/") else {
             throw NSError(domain: "ShipHookAPI", code: 104, userInfo: [NSLocalizedDescriptionKey: "Path escapes the repository checkout."])
         }
@@ -3731,7 +3764,9 @@ final class WebDashboardServer {
       newPassword: '',
       inviteUsername: '',
       githubToken: '',
-      apiTokenName: 'automation'
+      apiTokenName: 'automation',
+      apiTokenScopes: ['status', 'files', 'build'],
+      apiTokenExpiresInDays: ''
     };
 
     async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
@@ -4594,7 +4629,7 @@ final class WebDashboardServer {
           <div class="security-row compact">
             <div class="security-row-main">
               <strong>${escapeHtml(token.name)}</strong>
-              <span class="tiny">${escapeHtml(token.prefix)}... · created ${escapeHtml(formatDate(token.createdAt))}${token.lastUsedAt ? ' · last used ' + escapeHtml(formatDate(token.lastUsedAt)) : ''}</span>
+              <span class="tiny">${escapeHtml(token.prefix)}... · ${escapeHtml((token.scopes || []).length ? token.scopes.join(', ') : 'legacy full access')} · created ${escapeHtml(formatDate(token.createdAt))}${token.expiresAt ? ' · expires ' + escapeHtml(formatDate(token.expiresAt)) : ''}${token.lastUsedAt ? ' · last used ' + escapeHtml(formatDate(token.lastUsedAt)) : ''}</span>
             </div>
             <div class="security-row-actions">
               <button class="button warn" data-action="security-revoke-api-token" data-token-id="${escapeHtmlAttr(token.id)}">${icon('trash')}<span>Revoke</span></button>
@@ -4694,6 +4729,15 @@ final class WebDashboardServer {
               <div class="security-list">${apiTokenRows}</div>
               <div class="field-grid single" style="margin-top: 14px;">
                 ${textInput('New Token Name', 'security.apiTokenName', securityDraft.apiTokenName)}
+                ${textInput('Expires In Days', 'security.apiTokenExpiresInDays', securityDraft.apiTokenExpiresInDays, 'number')}
+              </div>
+              <div class="badges" style="margin-top: 12px;">
+                ${apiScopeToggle('status', 'Status')}
+                ${apiScopeToggle('files', 'Logs & Files')}
+                ${apiScopeToggle('build', 'Build')}
+                ${apiScopeToggle('pull', 'Pull/Reclone')}
+                ${apiScopeToggle('admin', 'Admin')}
+                ${apiScopeToggle('tokens', 'Tokens')}
               </div>
               <div class="toolbar">
                 <button class="button secondary" data-action="security-create-api-token">${icon('plus')}<span>Create API Token</span></button>
@@ -4712,6 +4756,11 @@ final class WebDashboardServer {
 
     function settingsTabButton(id, iconName, label) {
       return `<button class="settings-tab ${state.settingsPane === id ? 'active' : ''}" data-action="set-settings-pane" data-settings-pane="${id}">${icon(iconName)}<span>${escapeHtml(label)}</span></button>`;
+    }
+
+    function apiScopeToggle(scope, label) {
+      const checked = (securityDraft.apiTokenScopes || []).includes(scope);
+      return `<label class="badge"><input type="checkbox" data-api-token-scope="${escapeHtmlAttr(scope)}" ${checked ? 'checked' : ''}> ${escapeHtml(label)}</label>`;
     }
 
     function renderStatusPane() {
@@ -5334,9 +5383,18 @@ final class WebDashboardServer {
       if (!name) {
         throw new Error('Enter a token name first.');
       }
-      const result = await securityRequest('/api/auth/tokens', { name }, 'API token created.');
+      const expiresInDays = Number(securityDraft.apiTokenExpiresInDays || 0);
+      const requestPayload = {
+        name,
+        scopes: securityDraft.apiTokenScopes || []
+      };
+      if (Number.isFinite(expiresInDays) && expiresInDays > 0) {
+        requestPayload.expiresInDays = Math.round(expiresInDays);
+      }
+      const result = await securityRequest('/api/auth/tokens', requestPayload, 'API token created.');
       state.securityCreatedToken = result?.token || '';
       securityDraft.apiTokenName = 'automation';
+      securityDraft.apiTokenExpiresInDays = '';
       renderModal();
     }
 
@@ -5816,6 +5874,18 @@ final class WebDashboardServer {
         return;
       }
 
+      if (target.hasAttribute('data-api-token-scope')) {
+        const scope = target.getAttribute('data-api-token-scope');
+        const scopes = new Set(securityDraft.apiTokenScopes || []);
+        if (target.checked) {
+          scopes.add(scope);
+        } else {
+          scopes.delete(scope);
+        }
+        securityDraft.apiTokenScopes = Array.from(scopes);
+        return;
+      }
+
       const field = target.getAttribute('data-field');
       if (!field) return;
 
@@ -5863,7 +5933,7 @@ final class WebDashboardServer {
 
     document.addEventListener('change', async event => {
       const target = event.target;
-      if (target.hasAttribute('data-field') || target.hasAttribute('data-publish-flag')) {
+      if (target.hasAttribute('data-field') || target.hasAttribute('data-publish-flag') || target.hasAttribute('data-api-token-scope')) {
         target.dispatchEvent(new Event('input', { bubbles: true }));
       }
       if (target.hasAttribute('data-launch-toggle')) {
@@ -6170,7 +6240,9 @@ private final class WebDashboardSecurityController {
             var name: String
             var prefix: String
             var tokenHash: String
+            var scopes: [String]?
             var createdAt: Date
+            var expiresAt: Date?
             var lastUsedAt: Date?
         }
 
@@ -6355,7 +6427,7 @@ private final class WebDashboardSecurityController {
     }
 
     func securityState(request: HttpRequest) throws -> WebDashboardSecurityStateResponse {
-        guard isAuthorized(request: request) else {
+        guard isAuthorized(request: request, requiringScope: "tokens") else {
             throw SecurityError.unauthorized
         }
         return queue.sync {
@@ -6403,7 +6475,9 @@ private final class WebDashboardSecurityController {
                         id: token.id,
                         name: token.name,
                         prefix: token.prefix,
+                        scopes: token.scopes,
                         createdAt: token.createdAt,
+                        expiresAt: token.expiresAt,
                         lastUsedAt: token.lastUsedAt
                     )
                 }
@@ -6420,20 +6494,29 @@ private final class WebDashboardSecurityController {
     }
 
     func isBootstrapRequestAllowed(request: HttpRequest) -> Bool {
-        let host = request.headers["host"]?.split(separator: ":").first.map(String.init)?.lowercased()
+        let host = header("host", in: request)?.split(separator: ":").first.map(String.init)?.lowercased()
         let address = request.address?.lowercased() ?? ""
         return (host == "localhost" || host == "127.0.0.1") && (address == "127.0.0.1" || address == "::1" || address == "localhost")
     }
 
-    func isAuthorized(request: HttpRequest) -> Bool {
+    func isAuthorized(request: HttpRequest, requiringScope scope: String? = nil) -> Bool {
         queue.sync {
             pruneExpiredSessionsLocked()
-            if bearerUsernameLocked(request: request) != nil {
+            if bearerUsernameLocked(request: request, requiringScope: scope) != nil {
                 return true
             }
             guard let sessionID = sessionID(from: request),
                   let session = sessions[sessionID],
                   session.expiresAt > Date() else {
+                return false
+            }
+            guard isSafeMethod(request) || hasSameOriginMutationHeader(request) else {
+                appendAuditEntryLocked(
+                    username: session.username,
+                    action: "security.csrf.rejected",
+                    detail: "\(request.method) \(request.path)",
+                    request: request
+                )
                 return false
             }
             sessions[sessionID]?.expiresAt = Date().addingTimeInterval(TimeInterval(max(1, settings.sessionDurationHours)) * 3600)
@@ -6442,7 +6525,7 @@ private final class WebDashboardSecurityController {
     }
 
     func createAPIToken(using payload: WebDashboardAPITokenCreateRequest, request: HttpRequest) throws -> WebDashboardAPITokenCreateResponse {
-        guard isAuthorized(request: request) else {
+        guard isAuthorized(request: request, requiringScope: "tokens") else {
             throw SecurityError.unauthorized
         }
         let name = payload.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -6454,13 +6537,17 @@ private final class WebDashboardSecurityController {
                 throw SecurityError.unauthorized
             }
             let token = "shiphook_\(randomData(length: 32).base64URLEncodedString())"
+            let scopes = Self.normalizedTokenScopes(payload.scopes)
+            let expiresAt = Self.expiryDate(explicit: payload.expiresAt, days: payload.expiresInDays)
             let record = StoredSettings.APIToken(
                 id: UUID().uuidString,
                 username: username,
                 name: name,
                 prefix: String(token.prefix(18)),
                 tokenHash: Self.apiTokenHash(token),
+                scopes: scopes,
                 createdAt: Date(),
+                expiresAt: expiresAt,
                 lastUsedAt: nil
             )
             settings.apiTokens.append(record)
@@ -6478,7 +6565,7 @@ private final class WebDashboardSecurityController {
     }
 
     func revokeAPIToken(using payload: WebDashboardAPITokenDeleteRequest, request: HttpRequest) throws -> WebDashboardAuthMessageResponse {
-        guard isAuthorized(request: request) else {
+        guard isAuthorized(request: request, requiringScope: "tokens") else {
             throw SecurityError.unauthorized
         }
         let tokenID = payload.id.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -6575,13 +6662,13 @@ private final class WebDashboardSecurityController {
     }
 
     func changePassword(using payload: WebDashboardPasswordChangeRequest, request: HttpRequest) throws {
-        guard isAuthorized(request: request) else {
+        guard isAuthorized(request: request, requiringScope: "admin") else {
             throw SecurityError.unauthorized
         }
         guard payload.newPassword.count >= 14 else {
             throw SecurityError.weakPassword
         }
-        try queue.sync {
+        return try queue.sync {
             guard let username = currentUsernameUnlocked(request: request),
                   let record = try? loadPasswordRecordLocked(for: username),
                   verifyPassword(payload.currentPassword, record: record) else {
@@ -6616,7 +6703,7 @@ private final class WebDashboardSecurityController {
     }
 
     func inviteAdmin(username rawUsername: String, request: HttpRequest) throws -> WebDashboardAdminLinkResponse {
-        guard isAuthorized(request: request) else {
+        guard isAuthorized(request: request, requiringScope: "admin") else {
             throw SecurityError.unauthorized
         }
         let username = rawUsername.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -6641,7 +6728,7 @@ private final class WebDashboardSecurityController {
     }
 
     func createPasswordResetLink(for rawUsername: String, request: HttpRequest) throws -> WebDashboardAdminLinkResponse {
-        guard isAuthorized(request: request) else {
+        guard isAuthorized(request: request, requiringScope: "admin") else {
             throw SecurityError.unauthorized
         }
         let username = rawUsername.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -6664,11 +6751,11 @@ private final class WebDashboardSecurityController {
     }
 
     func deleteAdmin(username rawUsername: String, request: HttpRequest) throws {
-        guard isAuthorized(request: request) else {
+        guard isAuthorized(request: request, requiringScope: "admin") else {
             throw SecurityError.unauthorized
         }
         let username = rawUsername.trimmingCharacters(in: .whitespacesAndNewlines)
-        try queue.sync {
+        return try queue.sync {
             guard let currentUsername = currentUsernameUnlocked(request: request) else {
                 throw SecurityError.unauthorized
             }
@@ -6690,7 +6777,10 @@ private final class WebDashboardSecurityController {
     }
 
     func linkGitHubProfile(_ profile: GitHubAuthenticatedUser, token: String, request: HttpRequest) throws -> WebDashboardAuthMessageResponse {
-        try queue.sync {
+        guard isAuthorized(request: request, requiringScope: "admin") else {
+            throw SecurityError.unauthorized
+        }
+        return try queue.sync {
             guard let username = currentUsernameUnlocked(request: request),
                   let index = settings.admins.firstIndex(where: { $0.username.caseInsensitiveCompare(username) == .orderedSame }) else {
                 throw SecurityError.unauthorized
@@ -6708,7 +6798,10 @@ private final class WebDashboardSecurityController {
     }
 
     func unlinkGitHubProfile(request: HttpRequest) throws -> WebDashboardAuthMessageResponse {
-        try queue.sync {
+        guard isAuthorized(request: request, requiringScope: "admin") else {
+            throw SecurityError.unauthorized
+        }
+        return try queue.sync {
             guard let username = currentUsernameUnlocked(request: request),
                   let index = settings.admins.firstIndex(where: { $0.username.caseInsensitiveCompare(username) == .orderedSame }) else {
                 throw SecurityError.unauthorized
@@ -6727,7 +6820,10 @@ private final class WebDashboardSecurityController {
     }
 
     func githubTokenForCurrentUser(request: HttpRequest) throws -> String {
-        try queue.sync {
+        guard isAuthorized(request: request, requiringScope: "admin") else {
+            throw SecurityError.unauthorized
+        }
+        return try queue.sync {
             guard let username = currentUsernameUnlocked(request: request) else {
                 throw SecurityError.unauthorized
             }
@@ -6739,7 +6835,7 @@ private final class WebDashboardSecurityController {
     }
 
     func beginPasskeyRegistration(request: HttpRequest) throws -> WebDashboardPasskeyRegistrationOptionsResponse {
-        guard isAuthorized(request: request) else {
+        guard isAuthorized(request: request, requiringScope: "admin") else {
             throw SecurityError.unauthorized
         }
         let rp = try relyingParty(for: request)
@@ -6775,7 +6871,7 @@ private final class WebDashboardSecurityController {
     }
 
     func finishPasskeyRegistration(using payload: WebDashboardFinishPasskeyRegistrationRequest, request: HttpRequest) throws -> WebDashboardAuthMessageResponse {
-        guard isAuthorized(request: request) else {
+        guard isAuthorized(request: request, requiringScope: "admin") else {
             throw SecurityError.unauthorized
         }
         return try queue.sync {
@@ -7495,11 +7591,56 @@ private final class WebDashboardSecurityController {
     }
 
     private func requestHost(for request: HttpRequest) -> String? {
-        request.headers["host"]?.split(separator: ":").first.map(String.init)?.lowercased()
+        header("host", in: request)?.split(separator: ":").first.map(String.init)?.lowercased()
+    }
+
+    private func header(_ name: String, in request: HttpRequest) -> String? {
+        request.headers.first { key, _ in
+            key.caseInsensitiveCompare(name) == .orderedSame
+        }?.value
+    }
+
+    private func isSafeMethod(_ request: HttpRequest) -> Bool {
+        let method = request.method.uppercased()
+        return method == "GET" || method == "HEAD" || method == "OPTIONS"
+    }
+
+    private func hasSameOriginMutationHeader(_ request: HttpRequest) -> Bool {
+        guard let expectedOrigin = resolvedRequestOrigin(for: request) else {
+            return false
+        }
+        if let origin = header("origin", in: request), !origin.isEmpty {
+            return originsMatch(origin, expectedOrigin)
+        }
+        if let referer = header("referer", in: request), !referer.isEmpty {
+            return originsMatch(referer, expectedOrigin)
+        }
+        return false
+    }
+
+    private func originsMatch(_ candidate: String, _ expected: String) -> Bool {
+        guard let candidate = URLComponents(string: candidate),
+              let expected = URLComponents(string: expected),
+              let candidateScheme = candidate.scheme?.lowercased(),
+              let expectedScheme = expected.scheme?.lowercased(),
+              let candidateHost = candidate.host?.lowercased(),
+              let expectedHost = expected.host?.lowercased() else {
+            return false
+        }
+        return candidateScheme == expectedScheme
+            && candidateHost == expectedHost
+            && effectivePort(candidate) == effectivePort(expected)
+    }
+
+    private func effectivePort(_ components: URLComponents) -> Int {
+        if let port = components.port {
+            return port
+        }
+        return components.scheme?.lowercased() == "https" ? 443 : 80
     }
 
     private func resolvedRequestOrigin(for request: HttpRequest) -> String? {
-        guard let host = request.headers["host"] else {
+        guard let host = header("host", in: request) else {
             return nil
         }
         let scheme = isSecureRequest(request) ? "https" : "http"
@@ -7775,7 +7916,7 @@ private final class WebDashboardSecurityController {
 
     func currentUsername(request: HttpRequest) -> String? {
         queue.sync {
-            if let username = bearerUsernameLocked(request: request) {
+            if let username = bearerUsernameLocked(request: request, requiringScope: nil) {
                 return username
             }
             guard let sessionID = sessionID(from: request) else { return nil }
@@ -7794,14 +7935,14 @@ private final class WebDashboardSecurityController {
     }
 
     private func currentUsernameUnlocked(request: HttpRequest) -> String? {
-        if let username = bearerUsernameLocked(request: request) {
+        if let username = bearerUsernameLocked(request: request, requiringScope: nil) {
             return username
         }
         guard let sessionID = sessionID(from: request) else { return nil }
         return sessions[sessionID]?.username
     }
 
-    private func bearerUsernameLocked(request: HttpRequest) -> String? {
+    private func bearerUsernameLocked(request: HttpRequest, requiringScope scope: String?) -> String? {
         guard let header = request.headers["authorization"] ?? request.headers["Authorization"] else {
             return nil
         }
@@ -7817,9 +7958,46 @@ private final class WebDashboardSecurityController {
         guard let index = settings.apiTokens.firstIndex(where: { $0.tokenHash == hash }) else {
             return nil
         }
+        let token = settings.apiTokens[index]
+        if let expiresAt = token.expiresAt, expiresAt <= Date() {
+            return nil
+        }
+        if let scope, !Self.token(token, allows: scope) {
+            return nil
+        }
         settings.apiTokens[index].lastUsedAt = Date()
         try? persistSettingsLocked()
         return settings.apiTokens[index].username
+    }
+
+    private static func normalizedTokenScopes(_ rawScopes: [String]?) -> [String]? {
+        guard let rawScopes else {
+            return nil
+        }
+        let allowedScopes = Set(["status", "files", "build", "pull", "admin", "tokens"])
+        let scopes = Set(
+            rawScopes
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .filter { allowedScopes.contains($0) }
+        )
+        return scopes.isEmpty ? nil : scopes.sorted()
+    }
+
+    private static func expiryDate(explicit: Date?, days: Int?) -> Date? {
+        if let explicit {
+            return explicit
+        }
+        guard let days, days > 0 else {
+            return nil
+        }
+        return Calendar(identifier: .gregorian).date(byAdding: .day, value: min(days, 3650), to: Date())
+    }
+
+    private static func token(_ token: StoredSettings.APIToken, allows scope: String) -> Bool {
+        guard let scopes = token.scopes, !scopes.isEmpty else {
+            return true
+        }
+        return scopes.contains(scope)
     }
 
     private func migrateLegacySettingsLocked() {

@@ -48,7 +48,7 @@ enum ReleasePlannerError: LocalizedError {
 }
 
 struct ReleasePlanner {
-    private let commandRunner = ShellCommandRunner()
+    private let processRunner = ProcessCommandRunner()
 
     func prepareRelease(for repository: RepositoryConfiguration, channel: ReleaseChannel = .stable) throws -> ReleasePlan? {
         guard repository.buildMode == .xcodeArchive, let xcode = repository.xcode else {
@@ -114,17 +114,17 @@ struct ReleasePlanner {
     func inspectProjectVersion(xcode: XcodeBuildConfiguration) throws -> AppVersion {
         let workingDirectory = ((xcode.sanitizedWorkspacePath ?? xcode.projectPath ?? "") as NSString).expandingTildeInPath
         let root = URL(fileURLWithPath: workingDirectory).deletingLastPathComponent().path
-        let targetFlag: String
+        var arguments: [String] = []
         if let workspacePath = xcode.sanitizedWorkspacePath, !workspacePath.isEmpty {
-            targetFlag = "-workspace '\((workspacePath as NSString).expandingTildeInPath)'"
+            arguments += ["-workspace", (workspacePath as NSString).expandingTildeInPath]
         } else if let projectPath = xcode.projectPath, !projectPath.isEmpty {
-            targetFlag = "-project '\((projectPath as NSString).expandingTildeInPath)'"
+            arguments += ["-project", (projectPath as NSString).expandingTildeInPath]
         } else {
             throw ReleasePlannerError.xcodeProjectRequired
         }
 
-        let command = "xcodebuild \(targetFlag) -scheme '\(xcode.scheme)' -configuration '\(xcode.configuration)' -showBuildSettings -json"
-        let output = try commandRunner.run(command, currentDirectory: root, environment: [:]).output
+        arguments += ["-scheme", xcode.scheme, "-configuration", xcode.configuration, "-showBuildSettings", "-json"]
+        let output = try processRunner.run("xcodebuild", arguments: arguments, currentDirectory: root).output
         let data = try JSONExtraction.extract(from: output)
         let response = try JSONDecoder().decode([BuildSettingsResponse].self, from: data)
         guard let settings = response.first?.buildSettings else {
@@ -244,10 +244,36 @@ struct ReleasePlanner {
         }
 
         let pbxprojPath = "\((projectPath as NSString).expandingTildeInPath)/project.pbxproj"
-        let command = """
-        perl -0pi -e 's/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = \(marketingVersion);/g; s/CURRENT_PROJECT_VERSION = [^;]+;/CURRENT_PROJECT_VERSION = \(buildVersion);/g' '\(pbxprojPath)'
-        """
-        _ = try commandRunner.run(command, currentDirectory: URL(fileURLWithPath: pbxprojPath).deletingLastPathComponent().path, environment: [:])
+        let original = try String(contentsOfFile: pbxprojPath, encoding: .utf8)
+        let updatedMarketingVersion = try replacingProjectSetting(
+            "MARKETING_VERSION",
+            with: marketingVersion,
+            in: original
+        )
+        let updated = try replacingProjectSetting(
+            "CURRENT_PROJECT_VERSION",
+            with: buildVersion,
+            in: updatedMarketingVersion
+        )
+        try updated.write(toFile: pbxprojPath, atomically: true, encoding: .utf8)
+    }
+
+    private func replacingProjectSetting(_ key: String, with value: String, in text: String) throws -> String {
+        let pattern = "\(NSRegularExpression.escapedPattern(for: key)) = [^;]+;"
+        let regex = try NSRegularExpression(pattern: pattern)
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        guard !matches.isEmpty else {
+            return text
+        }
+
+        var result = text
+        for match in matches.reversed() {
+            guard let range = Range(match.range, in: result) else {
+                continue
+            }
+            result.replaceSubrange(range, with: "\(key) = \(value);")
+        }
+        return result
     }
 
     func restoreProjectVersionIfNeeded(_ plan: ReleasePlan?, xcode: XcodeBuildConfiguration?) throws {

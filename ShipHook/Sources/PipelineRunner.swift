@@ -47,6 +47,7 @@ private enum GitHubReleaseLookup {
 
 struct PipelineRunner {
     private let commandRunner = ShellCommandRunner()
+    private let processRunner = ProcessCommandRunner()
     private let releasePlanner = ReleasePlanner()
     private let signingInspector = SigningInspector()
 
@@ -388,19 +389,19 @@ struct PipelineRunner {
         try cleanShipHookVersionMutationIfNeeded(repository, checkoutPath: checkoutPath, onOutput: onOutput)
 
         let commands = [
-            ("Fetching origin/\(repository.branch)", "git -C '\(checkoutPath)' fetch origin '\(repository.branch)' --tags"),
-            ("Checking out branch \(repository.branch)", "git -C '\(checkoutPath)' checkout '\(repository.branch)'"),
-            ("Fast-forwarding branch \(repository.branch)", "git -C '\(checkoutPath)' pull --ff-only origin '\(repository.branch)'"),
-            ("Verifying local HEAD", "git -C '\(checkoutPath)' rev-parse HEAD"),
+            ("Fetching origin/\(repository.branch)", ["fetch", "origin", repository.branch, "--tags"]),
+            ("Checking out branch \(repository.branch)", ["checkout", repository.branch]),
+            ("Fast-forwarding branch \(repository.branch)", ["pull", "--ff-only", "origin", repository.branch]),
+            ("Verifying local HEAD", ["rev-parse", "HEAD"]),
         ]
 
         try commands.forEach { item in
             onStageChange?(.syncing(item.0))
-            _ = try commandRunner.run(item.1, currentDirectory: checkoutPath, environment: [:], onOutput: onOutput)
+            _ = try processRunner.run("git", arguments: item.1, currentDirectory: checkoutPath, onOutput: onOutput)
         }
 
-        let currentHead = try commandRunner
-            .run("git -C '\(checkoutPath)' rev-parse HEAD", currentDirectory: checkoutPath, environment: [:])
+        let currentHead = try processRunner
+            .run("git", arguments: ["rev-parse", "HEAD"], currentDirectory: checkoutPath)
             .output
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -421,13 +422,13 @@ struct PipelineRunner {
             return fallback
         }
 
-        let message = try commandRunner
-            .run("git -C '\(checkoutPath)' log -1 --format=%B '\(synchronizedSHA)'", currentDirectory: checkoutPath, environment: [:])
+        let message = try processRunner
+            .run("git", arguments: ["log", "-1", "--format=%B", synchronizedSHA], currentDirectory: checkoutPath)
             .output
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let committedAtRaw = try commandRunner
-            .run("git -C '\(checkoutPath)' log -1 --format=%cI '\(synchronizedSHA)'", currentDirectory: checkoutPath, environment: [:])
+        let committedAtRaw = try processRunner
+            .run("git", arguments: ["log", "-1", "--format=%cI", synchronizedSHA], currentDirectory: checkoutPath)
             .output
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -466,20 +467,25 @@ struct PipelineRunner {
             attributes: nil
         )
 
-        let targetFlag: String
+        var arguments: [String] = []
         if let workspacePath = xcode.sanitizedWorkspacePath?.expandingTildeInPath, !workspacePath.isEmpty {
-            targetFlag = "-workspace '\(workspacePath)'"
+            arguments += ["-workspace", workspacePath]
         } else if let projectPath = xcode.projectPath?.expandingTildeInPath, !projectPath.isEmpty {
-            targetFlag = "-project '\(projectPath)'"
+            arguments += ["-project", projectPath]
         } else {
             throw NSError(domain: "ShipHook", code: 2, userInfo: [NSLocalizedDescriptionKey: "Either workspacePath or projectPath must be set."])
         }
 
-        let archiveCommand = """
-        xcodebuild \(targetFlag) -scheme '\(xcode.scheme)' -configuration '\(xcode.configuration)' -derivedDataPath '\(derivedDataPath)' archive -archivePath '\(archivePath)'\(signingOverrides(for: repository))
-        """
+        arguments += [
+            "-scheme", xcode.scheme,
+            "-configuration", xcode.configuration,
+            "-derivedDataPath", derivedDataPath,
+            "archive",
+            "-archivePath", archivePath
+        ]
+        arguments += signingOverrideArguments(for: repository)
 
-        let archiveResult = try commandRunner.run(archiveCommand, currentDirectory: workingDirectory, environment: environment, onOutput: onOutput)
+        let archiveResult = try processRunner.run("xcodebuild", arguments: arguments, currentDirectory: workingDirectory, environment: environment, onOutput: onOutput)
         return (artifactPath, archiveResult.output)
     }
 
@@ -494,8 +500,8 @@ struct PipelineRunner {
             return
         }
 
-        let statusOutput = try commandRunner
-            .run("git -C '\(checkoutPath)' status --porcelain", currentDirectory: checkoutPath, environment: [:])
+        let statusOutput = try processRunner
+            .run("git", arguments: ["status", "--porcelain"], currentDirectory: checkoutPath)
             .output
 
         let changedPaths = statusOutput
@@ -517,8 +523,8 @@ struct PipelineRunner {
             return
         }
 
-        let diffOutput = try commandRunner
-            .run("git -C '\(checkoutPath)' diff -- '\(pbxprojPath)'", currentDirectory: checkoutPath, environment: [:])
+        let diffOutput = try processRunner
+            .run("git", arguments: ["diff", "--", pbxprojPath], currentDirectory: checkoutPath)
             .output
 
         let onlyVersionSettingsChanged = diffOutput
@@ -539,10 +545,10 @@ struct PipelineRunner {
         }
 
         onOutput?("Restoring ShipHook-managed version bump before syncing repository.\n")
-        _ = try commandRunner.run(
-            "git -C '\(checkoutPath)' restore '\(pbxprojPath)'",
+        _ = try processRunner.run(
+            "git",
+            arguments: ["restore", pbxprojPath],
             currentDirectory: checkoutPath,
-            environment: [:],
             onOutput: onOutput
         )
     }
@@ -551,8 +557,8 @@ struct PipelineRunner {
         checkoutPath: String,
         onOutput: ((String) -> Void)?
     ) throws {
-        let statusOutput = try commandRunner
-            .run("git -C '\(checkoutPath)' status --porcelain", currentDirectory: checkoutPath, environment: [:])
+        let statusOutput = try processRunner
+            .run("git", arguments: ["status", "--porcelain"], currentDirectory: checkoutPath)
             .output
 
         var trackedPathsToRestore: [String] = []
@@ -577,11 +583,10 @@ struct PipelineRunner {
 
         if !trackedPathsToRestore.isEmpty {
             onOutput?("Restoring ShipHook-managed appcast documentation before syncing repository.\n")
-            let quotedPaths = trackedPathsToRestore.map { "'\($0)'" }.joined(separator: " ")
-            _ = try commandRunner.run(
-                "git -C '\(checkoutPath)' restore -- \(quotedPaths)",
+            _ = try processRunner.run(
+                "git",
+                arguments: ["restore", "--"] + trackedPathsToRestore,
                 currentDirectory: checkoutPath,
-                environment: [:],
                 onOutput: onOutput
             )
         }
@@ -639,8 +644,8 @@ struct PipelineRunner {
     }
 
     private func isMergeCommit(at checkoutPath: String) throws -> Bool {
-        let parents = try commandRunner
-            .run("git -C '\(checkoutPath)' show -s --format=%P HEAD", currentDirectory: checkoutPath, environment: [:])
+        let parents = try processRunner
+            .run("git", arguments: ["show", "-s", "--format=%P", "HEAD"], currentDirectory: checkoutPath)
             .output
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .split(separator: " ")
@@ -651,8 +656,8 @@ struct PipelineRunner {
         for repository: RepositoryConfiguration,
         in checkoutPath: String
     ) throws -> ReleaseNotesSource? {
-        let output = try commandRunner
-            .run("git -C '\(checkoutPath)' log --no-merges -n 1 --format='%H%x1f%s%x1f%b' HEAD", currentDirectory: checkoutPath, environment: [:])
+        let output = try processRunner
+            .run("git", arguments: ["log", "--no-merges", "-n", "1", "--format=%H%x1f%s%x1f%b", "HEAD"], currentDirectory: checkoutPath)
             .output
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -963,12 +968,18 @@ struct PipelineRunner {
             return
         }
 
-        _ = try commandRunner.run(
-            """
-            /usr/bin/codesign --force --deep --sign '\(identity)' --timestamp --options runtime --preserve-metadata=identifier,entitlements,requirements,flags '\(artifactPath)'
-            """,
+        _ = try processRunner.run(
+            "/usr/bin/codesign",
+            arguments: [
+                "--force",
+                "--deep",
+                "--sign", identity,
+                "--timestamp",
+                "--options", "runtime",
+                "--preserve-metadata=identifier,entitlements,requirements,flags",
+                artifactPath
+            ],
             currentDirectory: checkoutPath,
-            environment: [:],
             onOutput: onOutput
         )
     }
@@ -999,16 +1010,16 @@ struct PipelineRunner {
         }
 
         onStageChange?(.notarizing)
-        _ = try commandRunner.run(
-            "ditto -c -k --sequesterRsrc --keepParent '\(artifactPath)' '\(uploadPath)'",
+        _ = try processRunner.run(
+            "ditto",
+            arguments: ["-c", "-k", "--sequesterRsrc", "--keepParent", artifactPath, uploadPath],
             currentDirectory: checkoutPath,
-            environment: [:],
             onOutput: onOutput
         )
-        let submitResult = try commandRunner.run(
-            "xcrun notarytool submit '\(uploadPath)' --keychain-profile '\(profile)' --wait --output-format json",
+        let submitResult = try processRunner.run(
+            "xcrun",
+            arguments: ["notarytool", "submit", uploadPath, "--keychain-profile", profile, "--wait", "--output-format", "json"],
             currentDirectory: checkoutPath,
-            environment: [:],
             onOutput: onOutput
         )
         try validateNotarizationSubmission(
@@ -1017,16 +1028,16 @@ struct PipelineRunner {
             checkoutPath: checkoutPath,
             onOutput: onOutput
         )
-        _ = try commandRunner.run(
-            "xcrun stapler staple '\(artifactPath)'",
+        _ = try processRunner.run(
+            "xcrun",
+            arguments: ["stapler", "staple", artifactPath],
             currentDirectory: checkoutPath,
-            environment: [:],
             onOutput: onOutput
         )
-        _ = try commandRunner.run(
-            "xcrun stapler validate '\(artifactPath)'",
+        _ = try processRunner.run(
+            "xcrun",
+            arguments: ["stapler", "validate", artifactPath],
             currentDirectory: checkoutPath,
-            environment: [:],
             onOutput: onOutput
         )
     }
@@ -1053,10 +1064,10 @@ struct PipelineRunner {
         var message = "Apple notarization failed with status \(status.isEmpty ? "Unknown" : status)."
 
         if !submissionID.isEmpty {
-            let logResult = try? commandRunner.run(
-                "xcrun notarytool log '\(submissionID)' --keychain-profile '\(profile)' --output-format json",
+            let logResult = try? processRunner.run(
+                "xcrun",
+                arguments: ["notarytool", "log", submissionID, "--keychain-profile", profile, "--output-format", "json"],
                 currentDirectory: checkoutPath,
-                environment: [:],
                 onOutput: onOutput
             )
             if let logOutput = logResult?.output,
@@ -1300,13 +1311,13 @@ struct PipelineRunner {
     }
 
     private func fetchBuildSettings(xcode: XcodeBuildConfiguration, checkoutPath: String) throws -> [String: String] {
-        let targetFlag: String
+        var arguments: [String] = []
         let commandDirectory: String
         if let workspacePath = xcode.sanitizedWorkspacePath?.expandingTildeInPath, !workspacePath.isEmpty {
-            targetFlag = "-workspace '\(workspacePath)'"
+            arguments += ["-workspace", workspacePath]
             commandDirectory = URL(fileURLWithPath: workspacePath).deletingLastPathComponent().path
         } else if let projectPath = xcode.projectPath?.expandingTildeInPath, !projectPath.isEmpty {
-            targetFlag = "-project '\(projectPath)'"
+            arguments += ["-project", projectPath]
             commandDirectory = URL(fileURLWithPath: projectPath).deletingLastPathComponent().path
         } else {
             throw NSError(
@@ -1316,8 +1327,8 @@ struct PipelineRunner {
             )
         }
 
-        let command = "xcodebuild \(targetFlag) -scheme '\(xcode.scheme)' -configuration '\(xcode.configuration)' -showBuildSettings -json"
-        let output = try commandRunner.run(command, currentDirectory: commandDirectory, environment: [:]).output
+        arguments += ["-scheme", xcode.scheme, "-configuration", xcode.configuration, "-showBuildSettings", "-json"]
+        let output = try processRunner.run("xcodebuild", arguments: arguments, currentDirectory: commandDirectory).output
         let data = try extractJSONData(from: output)
         let decoded = try JSONDecoder().decode([PipelineBuildSettingsResponse].self, from: data)
         return decoded.first?.buildSettings ?? [:]
@@ -1573,16 +1584,16 @@ struct PipelineRunner {
         guard commandExists("gh", currentDirectory: workingDirectory) else {
             return .unknown
         }
-        guard (try? commandRunner.run("gh auth status", currentDirectory: workingDirectory, environment: [:])) != nil else {
+        guard (try? processRunner.run("gh", arguments: ["auth", "status"], currentDirectory: workingDirectory)) != nil else {
             return .unknown
         }
 
         let tag = releaseTag(for: version, channel: releaseChannel)
         do {
-            _ = try commandRunner.run(
-                "gh release view '\(tag)' --repo '\(repository.owner)/\(repository.repo)' --json id",
+            _ = try processRunner.run(
+                "gh",
+                arguments: ["release", "view", tag, "--repo", "\(repository.owner)/\(repository.repo)", "--json", "id"],
                 currentDirectory: workingDirectory,
-                environment: [:]
             )
             return .exists
         } catch let CommandError.nonZeroExit(result) {
@@ -1598,29 +1609,29 @@ struct PipelineRunner {
 
     private func commandExists(_ command: String, currentDirectory: String) -> Bool {
         do {
-            _ = try commandRunner.run("command -v \(command)", currentDirectory: currentDirectory, environment: [:])
+            _ = try processRunner.run("/usr/bin/which", arguments: [command], currentDirectory: currentDirectory)
             return true
         } catch {
             return false
         }
     }
 
-    private func signingOverrides(for repository: RepositoryConfiguration) -> String {
+    private func signingOverrideArguments(for repository: RepositoryConfiguration) -> [String] {
         guard let signing = repository.signing else {
-            return ""
+            return []
         }
 
         var parts: [String] = []
-        parts.append(" CODE_SIGN_STYLE=\(signing.codeSignStyle.rawValue.capitalized)")
+        parts.append("CODE_SIGN_STYLE=\(signing.codeSignStyle.rawValue.capitalized)")
         if let team = signing.developmentTeam, !team.isEmpty {
-            parts.append(" DEVELOPMENT_TEAM='\(team)'")
+            parts.append("DEVELOPMENT_TEAM=\(team)")
         }
         if signing.codeSignStyle == .manual,
            let identity = signing.codeSignIdentity,
            !identity.isEmpty {
-            parts.append(" CODE_SIGN_IDENTITY='\(identity)'")
+            parts.append("CODE_SIGN_IDENTITY=\(identity)")
         }
-        return parts.joined()
+        return parts
     }
 
     private func makeVersion(for repository: RepositoryConfiguration, snapshot: GitHubBranchSnapshot) -> String {

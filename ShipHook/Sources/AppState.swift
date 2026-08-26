@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Security
 import ServiceManagement
 import SwiftUI
 
@@ -47,7 +48,7 @@ final class AppState: ObservableObject {
     private let projectInspector = ProjectInspector()
     private let releasePlanner = ReleasePlanner()
     private let signingInspector = SigningInspector()
-    private let commandRunner = ShellCommandRunner()
+    private let processRunner = ProcessCommandRunner()
     private let repositoryIconResolver = RepositoryIconResolver()
     private var buildHistoryByRepository: [String: [BuildRecord]] = [:]
     private var latestBuildByRepository: [String: BuildRecord] = [:]
@@ -124,13 +125,20 @@ final class AppState: ObservableObject {
         do {
             configuration = try configStore.loadConfiguration()
             normalizeConfiguration()
+            let migrationError: Error?
+            do {
+                try migrateInlineGitHubTokenToKeychainIfNeeded()
+                migrationError = nil
+            } catch {
+                migrationError = error
+            }
             configPath = configStore.configURL.path
             lastSavedConfiguration = configuration
             synchronizeRuntimeState()
             refreshDirtyState()
             refreshNotarizationProfiles()
             refreshPublishedVersions()
-            lastGlobalError = nil
+            lastGlobalError = migrationError.map { "Could not migrate inline GitHub token to Keychain: \($0.localizedDescription)" }
         } catch {
             lastGlobalError = error.localizedDescription
         }
@@ -139,6 +147,7 @@ final class AppState: ObservableObject {
     func saveConfiguration() {
         do {
             normalizeConfiguration()
+            try persistGlobalGitHubTokenIfNeeded()
             configuration.repositories = configuration.repositories.map { repository in
                 var repository = repository
                 if repository.buildMode == .xcodeArchive && repository.xcode == nil {
@@ -345,20 +354,16 @@ final class AppState: ObservableObject {
             )
         }
 
-        _ = try commandRunner.run(
-            """
-            xcrun notarytool store-credentials "$SHIPHOOK_NOTARY_PROFILE" \
-              --apple-id "$SHIPHOOK_NOTARY_APPLE_ID" \
-              --team-id "$SHIPHOOK_NOTARY_TEAM_ID" \
-              --password "$SHIPHOOK_NOTARY_PASSWORD"
-            """,
+        _ = try processRunner.run(
+            "xcrun",
+            arguments: [
+                "notarytool", "store-credentials", trimmedProfileName,
+                "--apple-id", trimmedAppleID,
+                "--team-id", trimmedTeamID,
+                "--password", trimmedPassword
+            ],
             currentDirectory: NSHomeDirectory(),
-            environment: [
-                "SHIPHOOK_NOTARY_PROFILE": trimmedProfileName,
-                "SHIPHOOK_NOTARY_APPLE_ID": trimmedAppleID,
-                "SHIPHOOK_NOTARY_TEAM_ID": trimmedTeamID,
-                "SHIPHOOK_NOTARY_PASSWORD": trimmedPassword,
-            ]
+            environment: [:]
         )
         registerNotarizationProfile(trimmedProfileName)
     }
@@ -977,10 +982,10 @@ final class AppState: ObservableObject {
             }
             try fileManager.createDirectory(at: parentURL, withIntermediateDirectories: true, attributes: nil)
 
-            let result = try commandRunner.run(
-                "git clone --branch \(shellSingleQuoted(repository.branch)) --single-branch \(shellSingleQuoted(remoteURL)) \(shellSingleQuoted(checkoutPath))",
-                currentDirectory: parentURL.path,
-                environment: [:]
+            let result = try processRunner.run(
+                "git",
+                arguments: ["clone", "--branch", repository.branch, "--single-branch", remoteURL, checkoutPath],
+                currentDirectory: parentURL.path
             )
 
             updateState(for: repositoryID) {
@@ -1036,21 +1041,31 @@ final class AppState: ObservableObject {
         }
 
         do {
-            let branch = shellSingleQuoted(repository.branch)
-            let result = try commandRunner.run(
-                "git fetch origin \(branch) && git checkout \(branch) && git pull --ff-only origin \(branch)",
-                currentDirectory: checkoutPath,
-                environment: [:]
-            )
-            let sha = try? commandRunner
-                .run("git rev-parse HEAD", currentDirectory: checkoutPath, environment: [:])
+            var combinedOutput = ""
+            combinedOutput += try processRunner.run(
+                "git",
+                arguments: ["fetch", "origin", repository.branch],
+                currentDirectory: checkoutPath
+            ).output
+            combinedOutput += try processRunner.run(
+                "git",
+                arguments: ["checkout", repository.branch],
+                currentDirectory: checkoutPath
+            ).output
+            combinedOutput += try processRunner.run(
+                "git",
+                arguments: ["pull", "--ff-only", "origin", repository.branch],
+                currentDirectory: checkoutPath
+            ).output
+            let sha = try? processRunner
+                .run("git", arguments: ["rev-parse", "HEAD"], currentDirectory: checkoutPath)
                 .output
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             updateState(for: repositoryID) {
                 $0.activity = .idle
                 $0.buildPhase = .idle
                 $0.buildDetail = nil
-                $0.lastLog = tailLines(from: result.output, limit: 120)
+                $0.lastLog = tailLines(from: combinedOutput, limit: 120)
                 $0.lastLogPath = "\(checkoutPath)/.shiphook/logs/\(repositoryID)-latest.log"
                 $0.lastError = nil
                 if let sha, !sha.isEmpty {
@@ -2181,8 +2196,8 @@ final class AppState: ObservableObject {
 
     private func resolvedRemoteURL(for repository: RepositoryConfiguration, checkoutPath: String) throws -> String {
         if FileManager.default.fileExists(atPath: checkoutPath + "/.git"),
-           let existing = try? commandRunner
-            .run("git -C \(shellSingleQuoted(checkoutPath)) remote get-url origin", currentDirectory: checkoutPath, environment: [:])
+           let existing = try? processRunner
+            .run("git", arguments: ["remote", "get-url", "origin"], currentDirectory: checkoutPath)
             .output
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !existing.isEmpty {
@@ -2201,11 +2216,13 @@ final class AppState: ObservableObject {
         return "https://github.com/\(repository.owner)/\(repository.repo).git"
     }
 
-    private func shellSingleQuoted(_ value: String) -> String {
-        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
-    }
-
     private func githubToken(for repository: RepositoryConfiguration) -> String? {
+        let keychainToken = (try? GlobalGitHubTokenStore.loadToken()) ?? nil
+        if let trimmedToken = keychainToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !trimmedToken.isEmpty {
+            return trimmedToken
+        }
+
         if let inlineToken = configuration.githubToken?.trimmingCharacters(in: .whitespacesAndNewlines),
            !inlineToken.isEmpty {
             return inlineToken
@@ -2213,6 +2230,28 @@ final class AppState: ObservableObject {
 
         let tokenEnvVar = repository.githubTokenEnvVar ?? configuration.githubTokenEnvVar
         return tokenEnvVar.flatMap { ProcessInfo.processInfo.environment[$0] }
+    }
+
+    private func migrateInlineGitHubTokenToKeychainIfNeeded() throws {
+        guard let inlineToken = configuration.githubToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !inlineToken.isEmpty else {
+            return
+        }
+        try GlobalGitHubTokenStore.storeToken(inlineToken)
+        configuration.githubToken = nil
+        try configStore.saveConfiguration(configuration)
+    }
+
+    private func persistGlobalGitHubTokenIfNeeded() throws {
+        guard let token = configuration.githubToken?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return
+        }
+        if token.isEmpty {
+            configuration.githubToken = nil
+            return
+        }
+        try GlobalGitHubTokenStore.storeToken(token)
+        configuration.githubToken = nil
     }
 
     private nonisolated static func performReleaseRollback(
@@ -2237,10 +2276,10 @@ final class AppState: ObservableObject {
             ? "\(docsRoot)/beta/release-notes/\(release.versionLabel).html"
             : "\(docsRoot)/release-notes/\(release.versionLabel).html"
 
-        let commandRunner = ShellCommandRunner()
-        _ = try commandRunner.run("git -C '\(checkoutPath)' fetch origin '\(repository.branch)' --tags", currentDirectory: checkoutPath, environment: [:])
-        _ = try commandRunner.run("git -C '\(checkoutPath)' checkout '\(repository.branch)'", currentDirectory: checkoutPath, environment: [:])
-        _ = try commandRunner.run("git -C '\(checkoutPath)' pull --ff-only origin '\(repository.branch)'", currentDirectory: checkoutPath, environment: [:])
+        let processRunner = ProcessCommandRunner()
+        _ = try processRunner.run("git", arguments: ["fetch", "origin", repository.branch, "--tags"], currentDirectory: checkoutPath)
+        _ = try processRunner.run("git", arguments: ["checkout", repository.branch], currentDirectory: checkoutPath)
+        _ = try processRunner.run("git", arguments: ["pull", "--ff-only", "origin", repository.branch], currentDirectory: checkoutPath)
 
         guard FileManager.default.fileExists(atPath: appcastPath) else {
             throw NSError(
@@ -2272,12 +2311,11 @@ final class AppState: ObservableObject {
 
         var gitTargets = [appcastPath]
         gitTargets.append(releaseNotesPath)
-        let quotedTargets = gitTargets.map { "'\($0)'" }.joined(separator: " ")
-        _ = try commandRunner.run("git -C '\(checkoutPath)' add -- \(quotedTargets)", currentDirectory: checkoutPath, environment: [:])
-        _ = try commandRunner.run("git -C '\(checkoutPath)' add -u -- \(quotedTargets)", currentDirectory: checkoutPath, environment: [:])
+        _ = try processRunner.run("git", arguments: ["add", "--"] + gitTargets, currentDirectory: checkoutPath)
+        _ = try processRunner.run("git", arguments: ["add", "-u", "--"] + gitTargets, currentDirectory: checkoutPath)
 
-        let staged = try commandRunner
-            .run("git -C '\(checkoutPath)' diff --cached --name-only -- \(quotedTargets)", currentDirectory: checkoutPath, environment: [:])
+        let staged = try processRunner
+            .run("git", arguments: ["diff", "--cached", "--name-only", "--"] + gitTargets, currentDirectory: checkoutPath)
             .output
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if staged.isEmpty {
@@ -2290,8 +2328,8 @@ final class AppState: ObservableObject {
 
         let channelPrefix = channel == .beta ? "beta " : ""
         let commitMessage = "chore(shiphook): rollback \(channelPrefix)release \(release.versionLabel) [shiphook skip]"
-        _ = try commandRunner.run("git -C '\(checkoutPath)' commit -m '\(commitMessage)'", currentDirectory: checkoutPath, environment: [:])
-        _ = try commandRunner.run("git -C '\(checkoutPath)' push origin '\(repository.branch)'", currentDirectory: checkoutPath, environment: [:])
+        _ = try processRunner.run("git", arguments: ["commit", "-m", commitMessage], currentDirectory: checkoutPath)
+        _ = try processRunner.run("git", arguments: ["push", "origin", repository.branch], currentDirectory: checkoutPath)
 
         try await githubAPI.deleteRelease(
             owner: repository.owner,
@@ -2688,5 +2726,54 @@ final class AppState: ObservableObject {
             return nil
         }
         return "data:image/png;base64,\(pngData.base64EncodedString())"
+    }
+}
+
+private enum GlobalGitHubTokenStore {
+    private static let service = "ShipHook.GlobalGitHubToken"
+    private static let account = "global"
+
+    static func storeToken(_ token: String) throws {
+        let data = Data(token.utf8)
+        let baseQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(baseQuery as CFDictionary)
+        var addQuery = baseQuery
+        addQuery[kSecValueData as String] = data
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        guard status == errSecSuccess else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 430,
+                userInfo: [NSLocalizedDescriptionKey: "Could not store GitHub token in Keychain."]
+            )
+        }
+    }
+
+    static func loadToken() throws -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound {
+            return nil
+        }
+        guard status == errSecSuccess, let data = result as? Data else {
+            throw NSError(
+                domain: "ShipHook",
+                code: 431,
+                userInfo: [NSLocalizedDescriptionKey: "Could not read GitHub token from Keychain."]
+            )
+        }
+        return String(data: data, encoding: .utf8)
     }
 }

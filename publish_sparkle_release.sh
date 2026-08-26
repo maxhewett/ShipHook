@@ -266,6 +266,11 @@ ARCHIVE_PATH="$(make_archive_if_needed "$ARTIFACT")"
 ASSET_NAME="$(basename "$ARCHIVE_PATH")"
 DOWNLOAD_URL="${DOWNLOAD_URL_BASE}/${ASSET_NAME}"
 
+if [[ ! -s "$ARCHIVE_PATH" ]]; then
+  echo "Release archive is empty and cannot be uploaded: $ARCHIVE_PATH" >&2
+  exit 1
+fi
+
 if [[ "$ARCHIVE_PATH" == *.zip ]]; then
   APP_INFO_PLIST_PATH="$(unzip -Z1 "$ARCHIVE_PATH" '*.app/Contents/Info.plist' 2>/dev/null | grep -E '^[^/]+\.app/Contents/Info\.plist$' | head -n 1 || true)"
   if [[ -z "${APP_INFO_PLIST_PATH:-}" ]]; then
@@ -442,7 +447,8 @@ publish_release_if_possible() {
   fi
 
   echo "Uploading ${ASSET_NAME} to GitHub Release ${TAG}..."
-  gh release upload "$TAG" "$ARCHIVE_PATH" --repo "${REPO_OWNER}/${REPO_NAME}" --clobber
+  # Supplying a label avoids gh versions that send an empty label query value.
+  gh release upload "$TAG" "${ARCHIVE_PATH}#${ASSET_NAME}" --repo "${REPO_OWNER}/${REPO_NAME}" --clobber
 }
 
 publish_release_if_possible
