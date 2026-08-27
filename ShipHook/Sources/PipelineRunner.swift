@@ -54,6 +54,7 @@ struct PipelineRunner {
     func run(
         repository: RepositoryConfiguration,
         snapshot: GitHubBranchSnapshot,
+        githubToken: String? = nil,
         onStageChange: ((PipelineStage) -> Void)? = nil,
         onVersionResolved: ((AppVersion) -> Void)? = nil,
         onOutput: ((String) -> Void)? = nil
@@ -175,6 +176,7 @@ struct PipelineRunner {
                 combinedLog += "Detected missing GitHub release for \(version); reconciling with \(URL(fileURLWithPath: reconcileArtifact).lastPathComponent).\n"
                 var publishEnvironment = baseEnvironment
                 publishEnvironment["SHIPHOOK_ARTIFACT_PATH"] = reconcileArtifact
+                addGitHubTokenIfNeeded(githubToken, to: &publishEnvironment)
                 onStageChange?(.publishing)
                 _ = try commandRunner.run(repository.publishCommand, currentDirectory: workingDirectory, environment: publishEnvironment, onOutput: appendOutput)
                 try verifyPublishedAppcast(
@@ -294,6 +296,7 @@ struct PipelineRunner {
 
         var publishEnvironment = baseEnvironment
         publishEnvironment["SHIPHOOK_ARTIFACT_PATH"] = artifactPath
+        addGitHubTokenIfNeeded(githubToken, to: &publishEnvironment)
         onStageChange?(.publishing)
         _ = try commandRunner.run(repository.publishCommand, currentDirectory: workingDirectory, environment: publishEnvironment, onOutput: appendOutput)
         try verifyPublishedAppcast(
@@ -324,6 +327,20 @@ struct PipelineRunner {
             summary: "Published \(version) from \(effectiveSnapshot.sha.prefix(7))",
             releaseChannel: releaseChannel
         )
+    }
+
+    private func addGitHubTokenIfNeeded(_ token: String?, to environment: inout [String: String]) {
+        guard let token = token?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else {
+            return
+        }
+
+        if environment["GH_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            environment["GH_TOKEN"] = token
+        }
+        if environment["GITHUB_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            environment["GITHUB_TOKEN"] = token
+        }
     }
 
     private func verifyPublishedAppcast(

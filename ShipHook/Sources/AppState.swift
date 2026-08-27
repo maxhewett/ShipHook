@@ -27,6 +27,7 @@ final class AppState: ObservableObject {
     @Published private(set) var lastSigningIdentityError: String?
     @Published private(set) var signingDiagnostics: SigningDiagnostics?
     @Published private(set) var hasUnsavedChanges = false
+    @Published private(set) var hasStoredGlobalGitHubToken = false
     @Published private(set) var buildHistory: [BuildRecord] = []
     @Published private(set) var buildCommitAuthors: [String: String] = [:]
     @Published private(set) var buildCommitAuthorAvatarURLs: [String: URL] = [:]
@@ -133,6 +134,7 @@ final class AppState: ObservableObject {
                 migrationError = error
             }
             configPath = configStore.configURL.path
+            refreshStoredGlobalGitHubTokenStatus()
             lastSavedConfiguration = configuration
             synchronizeRuntimeState()
             refreshDirtyState()
@@ -169,6 +171,7 @@ final class AppState: ObservableObject {
             }
             try configStore.saveConfiguration(configuration)
             lastSavedConfiguration = configuration
+            refreshStoredGlobalGitHubTokenStatus()
             synchronizeRuntimeState()
             refreshDirtyState()
             refreshNotarizationProfiles()
@@ -532,7 +535,8 @@ final class AppState: ObservableObject {
         switch command {
         case let .saveConfiguration(configuration):
             var nextConfiguration = configuration
-            if nextConfiguration.githubToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            if nextConfiguration.githubToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+                || Self.normalizedGitHubToken(nextConfiguration.githubToken) == nil {
                 nextConfiguration.githubToken = self.configuration.githubToken
             }
             self.configuration = nextConfiguration
@@ -1335,7 +1339,7 @@ final class AppState: ObservableObject {
             let runner = pipelineRunner
             Task.detached { [weak self] in
                 let result: Result<PipelineOutcome, Error> = Result {
-                    try runner.run(repository: repository, snapshot: snapshot, onStageChange: { stage in
+                    try runner.run(repository: repository, snapshot: snapshot, githubToken: token, onStageChange: { stage in
                         Task { @MainActor [weak self] in
                             self?.updateBuildStage(stage, for: repository.id, sha: snapshot.sha)
                         }
@@ -2218,23 +2222,26 @@ final class AppState: ObservableObject {
 
     private func githubToken(for repository: RepositoryConfiguration) -> String? {
         let keychainToken = (try? GlobalGitHubTokenStore.loadToken()) ?? nil
-        if let trimmedToken = keychainToken?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !trimmedToken.isEmpty {
-            return trimmedToken
+        if let normalizedToken = Self.normalizedGitHubToken(keychainToken) {
+            return normalizedToken
         }
 
-        if let inlineToken = configuration.githubToken?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !inlineToken.isEmpty {
+        if let inlineToken = Self.normalizedGitHubToken(configuration.githubToken) {
             return inlineToken
         }
 
         let tokenEnvVar = repository.githubTokenEnvVar ?? configuration.githubTokenEnvVar
-        return tokenEnvVar.flatMap { ProcessInfo.processInfo.environment[$0] }
+        return tokenEnvVar.flatMap { Self.normalizedGitHubToken(ProcessInfo.processInfo.environment[$0]) }
+    }
+
+    private func refreshStoredGlobalGitHubTokenStatus() {
+        let token = (try? GlobalGitHubTokenStore.loadToken()) ?? nil
+        hasStoredGlobalGitHubToken = Self.normalizedGitHubToken(token) != nil
     }
 
     private func migrateInlineGitHubTokenToKeychainIfNeeded() throws {
-        guard let inlineToken = configuration.githubToken?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !inlineToken.isEmpty else {
+        guard let inlineToken = Self.normalizedGitHubToken(configuration.githubToken) else {
+            configuration.githubToken = nil
             return
         }
         try GlobalGitHubTokenStore.storeToken(inlineToken)
@@ -2243,15 +2250,40 @@ final class AppState: ObservableObject {
     }
 
     private func persistGlobalGitHubTokenIfNeeded() throws {
-        guard let token = configuration.githubToken?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+        guard let rawToken = configuration.githubToken else {
             return
         }
-        if token.isEmpty {
+        guard let token = Self.normalizedGitHubToken(rawToken) else {
             configuration.githubToken = nil
             return
         }
         try GlobalGitHubTokenStore.storeToken(token)
         configuration.githubToken = nil
+    }
+
+    private static func normalizedGitHubToken(_ token: String?) -> String? {
+        guard var token = token?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else {
+            return nil
+        }
+
+        let lowercased = token.lowercased()
+        if lowercased.hasPrefix("bearer ") {
+            token.removeFirst("bearer ".count)
+        } else if lowercased.hasPrefix("token ") {
+            token.removeFirst("token ".count)
+        }
+
+        token.removeAll(where: { $0.isWhitespace || $0.isNewline })
+        guard !token.isEmpty, !isMaskedGitHubTokenPlaceholder(token) else {
+            return nil
+        }
+        return token
+    }
+
+    private static func isMaskedGitHubTokenPlaceholder(_ token: String) -> Bool {
+        let placeholderScalars = CharacterSet(charactersIn: "-*•●")
+        return token.count >= 6 && token.unicodeScalars.allSatisfy { placeholderScalars.contains($0) }
     }
 
     private nonisolated static func performReleaseRollback(
@@ -2618,6 +2650,7 @@ final class AppState: ObservableObject {
             global: WebDashboardSnapshot.Global(
                 pollIntervalSeconds: configuration.pollIntervalSeconds,
                 githubToken: nil,
+                githubTokenStored: hasStoredGlobalGitHubToken,
                 githubTokenEnvVar: configuration.githubTokenEnvVar,
                 generatedDataRetentionCount: configuration.generatedDataRetentionCount,
                 autoPauseFailureCount: configuration.autoPauseFailureCount,

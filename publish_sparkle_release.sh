@@ -25,6 +25,7 @@ Optional:
   --pages-base-url <url>          Override GitHub Pages base URL
   --working-dir <path>            Repository root for git/gh operations (default: cwd)
   --skip-appcast-commit           Update appcast locally but do not git commit/push it
+  --upload-only                   Upload the artifact to GitHub Releases without regenerating the appcast
 
 Notes:
   - Sparkle's generate_appcast must be available, or SPARKLE_GENERATE_APPCAST must be set.
@@ -48,6 +49,7 @@ DOWNLOAD_URL_BASE=""
 PAGES_BASE_URL=""
 WORKING_DIR="$(pwd)"
 SKIP_APPCAST_COMMIT=0
+UPLOAD_ONLY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -113,6 +115,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-appcast-commit)
       SKIP_APPCAST_COMMIT=1
+      shift
+      ;;
+    --upload-only)
+      UPLOAD_ONLY=1
       shift
       ;;
     --help|-h)
@@ -199,11 +205,14 @@ find_generate_appcast() {
   return 1
 }
 
-GENERATE_APPCAST="$(find_generate_appcast)"
-if [[ -z "${GENERATE_APPCAST:-}" || ! -x "$GENERATE_APPCAST" ]]; then
-  echo "Could not find Sparkle's generate_appcast tool." >&2
-  echo "Set SPARKLE_GENERATE_APPCAST to the full path after Xcode resolves the Sparkle package." >&2
-  exit 1
+GENERATE_APPCAST=""
+if [[ "$UPLOAD_ONLY" -eq 0 ]]; then
+  GENERATE_APPCAST="$(find_generate_appcast)"
+  if [[ -z "${GENERATE_APPCAST:-}" || ! -x "$GENERATE_APPCAST" ]]; then
+    echo "Could not find Sparkle's generate_appcast tool." >&2
+    echo "Set SPARKLE_GENERATE_APPCAST to the full path after Xcode resolves the Sparkle package." >&2
+    exit 1
+  fi
 fi
 
 if [[ -z "$REPO_OWNER" || -z "$REPO_NAME" ]]; then
@@ -371,59 +380,221 @@ destination.write_text(body + "\n", encoding="utf-8")
 PY
 }
 
-cp "$ARCHIVE_PATH" "$TMP_DIR/"
+urlencode() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+}
 
-if [[ -n "$RELEASE_NOTES_PATH" ]]; then
-  mkdir -p "$APPCAST_DIR/release-notes"
-  RELEASE_NOTES_BASENAME="${VERSION}.html"
-  cp "$RELEASE_NOTES_PATH" "$APPCAST_DIR/release-notes/$RELEASE_NOTES_BASENAME"
-  RELEASE_NOTES_URL="${CHANNEL_PAGES_BASE_URL}/release-notes/${RELEASE_NOTES_BASENAME}"
-fi
-
-if [[ -z "$GITHUB_RELEASE_NOTES_PATH" && -n "$RELEASE_NOTES_PATH" ]]; then
-  GITHUB_RELEASE_NOTES_PATH="$TMP_DIR/github-release-notes.md"
-  make_github_release_notes "$RELEASE_NOTES_PATH" "$GITHUB_RELEASE_NOTES_PATH"
-fi
-
-CMD=("$GENERATE_APPCAST" "$TMP_DIR")
-HELP_TEXT="$("$GENERATE_APPCAST" -h 2>&1 || true)"
-if [[ -n "${SPARKLE_PRIVATE_KEY_PATH:-}" ]]; then
-  if grep -q -- '--ed-key-file' <<<"$HELP_TEXT"; then
-    CMD+=("--ed-key-file" "$SPARKLE_PRIVATE_KEY_PATH")
+github_auth_token() {
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    printf '%s\n' "$GH_TOKEN" | normalize_github_token
+    return 0
   fi
-fi
-
-if [[ "${SHIPHOOK_SPARKLE_DELTA_UPDATES:-0}" == "1" ]]; then
-  if grep -q -- '--generate-deltas' <<<"$HELP_TEXT"; then
-    echo "Sparkle delta updates are enabled for this repository."
-    CMD+=("--generate-deltas")
-  else
-    echo "Sparkle delta updates requested, but this generate_appcast does not advertise --generate-deltas. Continuing with a full update."
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    printf '%s\n' "$GITHUB_TOKEN" | normalize_github_token
+    return 0
   fi
-fi
+  local gh_bin
+  gh_bin="$(find_gh)" || return 0
+  "$gh_bin" auth token 2>/dev/null | normalize_github_token || true
+}
 
-"${CMD[@]}"
+find_gh() {
+  if command -v gh >/dev/null 2>&1; then
+    command -v gh
+    return 0
+  fi
+  if [[ -x "/opt/homebrew/bin/gh" ]]; then
+    printf '%s\n' "/opt/homebrew/bin/gh"
+    return 0
+  fi
+  if [[ -x "/usr/local/bin/gh" ]]; then
+    printf '%s\n' "/usr/local/bin/gh"
+    return 0
+  fi
+  return 1
+}
 
-GENERATED_APPCAST="$(find "$TMP_DIR" -maxdepth 1 -type f -name '*.xml' | head -n 1)"
-if [[ -z "${GENERATED_APPCAST:-}" || ! -f "$GENERATED_APPCAST" ]]; then
-  echo "generate_appcast did not produce an XML file in $TMP_DIR" >&2
-  exit 1
-fi
+normalize_github_token() {
+  python3 -c 'import re, sys
+token = sys.stdin.read()
+token = token.strip()
+token = re.sub(r"^(?i:bearer|token)\s+", "", token)
+token = re.sub(r"\s+", "", token)
+if len(token) >= 6 and re.fullmatch(r"[-*•●]+", token):
+    token = ""
+print(token)
+'
+}
 
-cp "$GENERATED_APPCAST" "$APPCAST_PATH"
-perl -0pi -e 's#url="[^"]*'"$ASSET_NAME"'\"#url="'"$DOWNLOAD_URL"'"#g' "$APPCAST_PATH"
+write_github_headers() {
+  local token="$1"
+  local headers_file="$2"
+  {
+    printf 'Accept: application/vnd.github+json\n'
+    printf 'Authorization: Bearer %s\n' "$token"
+    printf 'X-GitHub-Api-Version: 2022-11-28\n'
+  } > "$headers_file"
+}
 
-if [[ -n "$RELEASE_NOTES_URL" ]]; then
-  perl -0pi -e 's#sparkle:releaseNotesLink="[^"]*"#sparkle:releaseNotesLink="'"$RELEASE_NOTES_URL"'"#g' "$APPCAST_PATH"
+github_request() {
+  local method="$1"
+  local url="$2"
+  local headers_file="$3"
+  shift 3
+
+  local curl_output
+  if ! curl_output="$(curl --fail-with-body --silent --show-error --location \
+    --request "$method" \
+    --header "@$headers_file" \
+    "$@" \
+    "$url" 2>&1)"; then
+    echo "$curl_output" >&2
+    return 1
+  fi
+  printf '%s' "$curl_output"
+}
+
+upload_release_asset() {
+  local token
+  token="$(github_auth_token)"
+  if [[ -z "${token:-}" ]]; then
+    echo "Could not resolve a GitHub token for release asset upload." >&2
+    exit 1
+  fi
+
+  local headers_file
+  headers_file="$TMP_DIR/github-upload-headers.txt"
+  write_github_headers "$token" "$headers_file"
+
+  local encoded_tag release_json release_id upload_template
+  encoded_tag="$(urlencode "$TAG")"
+  release_json="$(github_request GET "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/tags/${encoded_tag}" "$headers_file")"
+  release_id="$(printf '%s' "$release_json" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("id", ""))')"
+  upload_template="$(printf '%s' "$release_json" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("upload_url", ""))')"
+  if [[ -z "${release_id:-}" || "$release_id" == "null" || -z "${upload_template:-}" ]]; then
+    echo "Could not resolve GitHub Release upload URL for ${TAG}." >&2
+    exit 1
+  fi
+
+  local assets_json
+  assets_json="$(github_request GET "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/${release_id}/assets?per_page=100" "$headers_file")"
+  while IFS= read -r asset_id; do
+    [[ -n "$asset_id" ]] || continue
+    github_request DELETE "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/assets/${asset_id}" "$headers_file" >/dev/null
+  done < <(printf '%s' "$assets_json" | python3 -c 'import json, sys
+name = sys.argv[1]
+for asset in json.load(sys.stdin):
+    if asset.get("name") == name:
+        print(asset.get("id", ""))
+' "$ASSET_NAME")
+
+  local encoded_name upload_base upload_url
+  encoded_name="$(urlencode "$ASSET_NAME")"
+  upload_base="${upload_template%%\{*}"
+  upload_base="${upload_base%%\?*}"
+  upload_url="${upload_base}?name=${encoded_name}"
+
+  local upload_connect_timeout upload_max_time upload_limit_rate
+  upload_connect_timeout="${SHIPHOOK_GITHUB_UPLOAD_CONNECT_TIMEOUT:-30}"
+  upload_max_time="${SHIPHOOK_GITHUB_UPLOAD_MAX_TIME:-1800}"
+  upload_limit_rate="${SHIPHOOK_GITHUB_UPLOAD_LIMIT_RATE:-256k}"
+
+  local curl_output
+  if ! curl_output="$(curl --fail-with-body --silent --show-error --location \
+    --request POST \
+    --connect-timeout "$upload_connect_timeout" \
+    --max-time "$upload_max_time" \
+    --limit-rate "$upload_limit_rate" \
+    --header "@$headers_file" \
+    --header "Content-Type: application/octet-stream" \
+    --data-binary "@$ARCHIVE_PATH" \
+    "$upload_url" 2>&1)"; then
+    local gh_bin
+    if gh_bin="$(find_gh)"; then
+      echo "curl upload failed; retrying GitHub asset upload with gh api..." >&2
+      local gh_output
+      if gh_output="$("$gh_bin" api \
+        --method POST \
+        --header "Accept: application/vnd.github+json" \
+        --header "X-GitHub-Api-Version: 2022-11-28" \
+        --header "Content-Type: application/octet-stream" \
+        --input "$ARCHIVE_PATH" \
+        "$upload_url" 2>&1)"; then
+        return 0
+      fi
+      echo "$gh_output" >&2
+    fi
+    echo "$curl_output" >&2
+    exit 1
+  fi
+}
+
+if [[ "$UPLOAD_ONLY" -eq 0 ]]; then
+  cp "$ARCHIVE_PATH" "$TMP_DIR/"
+
+  if [[ -n "$RELEASE_NOTES_PATH" ]]; then
+    mkdir -p "$APPCAST_DIR/release-notes"
+    RELEASE_NOTES_BASENAME="${VERSION}.html"
+    cp "$RELEASE_NOTES_PATH" "$APPCAST_DIR/release-notes/$RELEASE_NOTES_BASENAME"
+    RELEASE_NOTES_URL="${CHANNEL_PAGES_BASE_URL}/release-notes/${RELEASE_NOTES_BASENAME}"
+  fi
+
+  if [[ -z "$GITHUB_RELEASE_NOTES_PATH" && -n "$RELEASE_NOTES_PATH" ]]; then
+    GITHUB_RELEASE_NOTES_PATH="$TMP_DIR/github-release-notes.md"
+    make_github_release_notes "$RELEASE_NOTES_PATH" "$GITHUB_RELEASE_NOTES_PATH"
+  fi
+
+  CMD=("$GENERATE_APPCAST" "$TMP_DIR")
+  HELP_TEXT="$("$GENERATE_APPCAST" -h 2>&1 || true)"
+  if [[ -n "${SPARKLE_PRIVATE_KEY_PATH:-}" ]]; then
+    if grep -q -- '--ed-key-file' <<<"$HELP_TEXT"; then
+      CMD+=("--ed-key-file" "$SPARKLE_PRIVATE_KEY_PATH")
+    fi
+  fi
+
+  if [[ "${SHIPHOOK_SPARKLE_DELTA_UPDATES:-0}" == "1" ]]; then
+    if grep -q -- '--generate-deltas' <<<"$HELP_TEXT"; then
+      echo "Sparkle delta updates are enabled for this repository."
+      CMD+=("--generate-deltas")
+    else
+      echo "Sparkle delta updates requested, but this generate_appcast does not advertise --generate-deltas. Continuing with a full update."
+    fi
+  fi
+
+  "${CMD[@]}"
+
+  GENERATED_APPCAST="$(find "$TMP_DIR" -maxdepth 1 -type f -name '*.xml' | head -n 1)"
+  if [[ -z "${GENERATED_APPCAST:-}" || ! -f "$GENERATED_APPCAST" ]]; then
+    echo "generate_appcast did not produce an XML file in $TMP_DIR" >&2
+    exit 1
+  fi
+
+  cp "$GENERATED_APPCAST" "$APPCAST_PATH"
+  perl -0pi -e 's#url="[^"]*'"$ASSET_NAME"'\"#url="'"$DOWNLOAD_URL"'"#g' "$APPCAST_PATH"
+
+  if [[ -n "$RELEASE_NOTES_URL" ]]; then
+    perl -0pi -e 's#sparkle:releaseNotesLink="[^"]*"#sparkle:releaseNotesLink="'"$RELEASE_NOTES_URL"'"#g' "$APPCAST_PATH"
+  fi
+else
+  SKIP_APPCAST_COMMIT=1
+  echo "Upload-only mode enabled; skipping appcast generation and commit."
 fi
 
 publish_release_if_possible() {
-  if ! command -v gh >/dev/null 2>&1; then
+  if [[ "$UPLOAD_ONLY" -eq 1 ]]; then
+    echo "Uploading asset to existing GitHub Release ${TAG}..."
+    echo "Uploading ${ASSET_NAME} to GitHub Release ${TAG}..."
+    upload_release_asset
+    return 0
+  fi
+
+  local gh_bin
+  if ! gh_bin="$(find_gh)"; then
     echo "Skipping GitHub Release publish: gh is not installed."
     return 0
   fi
 
-  if ! gh auth status >/dev/null 2>&1; then
+  if ! "$gh_bin" auth status >/dev/null 2>&1; then
     echo "Skipping GitHub Release publish: gh is not authenticated."
     return 0
   fi
@@ -435,20 +606,19 @@ publish_release_if_possible() {
     notes_args=(--notes "$RELEASE_TITLE")
   fi
 
-  if gh release view "$TAG" --repo "${REPO_OWNER}/${REPO_NAME}" >/dev/null 2>&1; then
+  if "$gh_bin" release view "$TAG" --repo "${REPO_OWNER}/${REPO_NAME}" >/dev/null 2>&1; then
     echo "Uploading asset to existing GitHub Release ${TAG}..."
   else
     echo "Creating GitHub Release ${TAG}..."
     if [[ "$CHANNEL" == "beta" ]]; then
-      gh release create "$TAG" --repo "${REPO_OWNER}/${REPO_NAME}" --title "$RELEASE_TITLE" "${notes_args[@]}" --prerelease
+      "$gh_bin" release create "$TAG" --repo "${REPO_OWNER}/${REPO_NAME}" --title "$RELEASE_TITLE" "${notes_args[@]}" --prerelease
     else
-      gh release create "$TAG" --repo "${REPO_OWNER}/${REPO_NAME}" --title "$RELEASE_TITLE" "${notes_args[@]}"
+      "$gh_bin" release create "$TAG" --repo "${REPO_OWNER}/${REPO_NAME}" --title "$RELEASE_TITLE" "${notes_args[@]}"
     fi
   fi
 
   echo "Uploading ${ASSET_NAME} to GitHub Release ${TAG}..."
-  # Supplying a label avoids gh versions that send an empty label query value.
-  gh release upload "$TAG" "${ARCHIVE_PATH}#${ASSET_NAME}" --repo "${REPO_OWNER}/${REPO_NAME}" --clobber
+  upload_release_asset
 }
 
 publish_release_if_possible
@@ -499,7 +669,9 @@ publish_appcast_commit_if_possible() {
 
 publish_appcast_commit_if_possible
 
-echo "Updated appcast: $APPCAST_PATH"
+if [[ "$UPLOAD_ONLY" -eq 0 ]]; then
+  echo "Updated appcast: $APPCAST_PATH"
+fi
 echo "Archive: $ARCHIVE_PATH"
 echo "Release asset URL: $DOWNLOAD_URL"
 echo "Release channel: $CHANNEL"

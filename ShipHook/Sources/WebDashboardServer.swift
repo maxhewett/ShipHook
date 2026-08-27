@@ -12,6 +12,7 @@ struct WebDashboardSnapshot: Codable {
     struct Global: Codable {
         var pollIntervalSeconds: Double
         var githubToken: String?
+        var githubTokenStored: Bool
         var githubTokenEnvVar: String?
         var generatedDataRetentionCount: Int
         var autoPauseFailureCount: Int
@@ -33,6 +34,7 @@ struct WebDashboardSnapshot: Codable {
         static let empty = Global(
             pollIntervalSeconds: 300,
             githubToken: nil,
+            githubTokenStored: false,
             githubTokenEnvVar: "GITHUB_TOKEN",
             generatedDataRetentionCount: 3,
             autoPauseFailureCount: 3,
@@ -4449,22 +4451,26 @@ final class WebDashboardServer {
                 ${textInput('Auto Pause After Fails', 'global.autoPauseFailureCount', config.autoPauseFailureCount, 'number')}
                 ${textInput('GitHub Token', 'global.githubToken', config.githubToken, 'password')}
               </div>
-              <p class="settings-note">This is the main agent token for polling, cloning, and publishing. The field is write-only in the webUI: leave it blank to keep the existing token, or enter a new token to replace it.</p>
+              <p class="settings-note">This is the main agent token for polling, cloning, and publishing. The field is write-only: leave it blank to keep the existing Keychain token, or enter a new token to replace it.</p>
               <div class="toolbar">
                 <button class="button primary" data-action="save">${icon('save')}<span>Save Configuration</span></button>
                 <button class="button" data-action="reload">${icon('refresh')}<span>Reload From Disk</span></button>
               </div>
             </div>
-            <div class="settings-stack">
-              <div class="settings-card">
-                ${sectionTitle('overview', 'Config File')}
-                <div class="summary-list">
-                  <div class="summary-row">
-                    <div class="summary-row-label">Location</div>
-                    <div class="summary-row-value">${escapeHtml(snapshot.global.configPath || 'Unknown')}</div>
-                  </div>
-                </div>
-              </div>
+	            <div class="settings-stack">
+	              <div class="settings-card">
+	                ${sectionTitle('overview', 'Config File')}
+	                <div class="summary-list">
+	                  <div class="summary-row">
+	                    <div class="summary-row-label">GitHub Token</div>
+	                    <div class="summary-row-value">${snapshot.global.githubTokenStored ? 'Stored in Keychain' : 'No Keychain token stored'}</div>
+	                  </div>
+	                  <div class="summary-row">
+	                    <div class="summary-row-label">Location</div>
+	                    <div class="summary-row-value">${escapeHtml(snapshot.global.configPath || 'Unknown')}</div>
+	                  </div>
+	                </div>
+	              </div>
             </div>
           </div>
         `,

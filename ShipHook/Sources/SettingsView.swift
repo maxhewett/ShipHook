@@ -123,7 +123,7 @@ struct SettingsView: View {
                 }
                 Spacer()
             }
-            Text("ShipHook stores this token in your local config file. Leave it empty to fall back to environment-variable token lookup.")
+            Text("ShipHook stores this token in Keychain. The field is write-only: after saving, leave it blank to keep the stored token or enter a new token to replace it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -327,13 +327,19 @@ struct SettingsView: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             SecureField(
-                "ghp_...",
+                appState.hasStoredGlobalGitHubToken ? "Stored in Keychain" : "github_pat_...",
                 text: Binding(
                     get: { appState.configuration.githubToken ?? "" },
                     set: { appState.configuration.githubToken = $0.isEmpty ? nil : $0 }
                 )
             )
             .textFieldStyle(.roundedBorder)
+            Label(
+                appState.hasStoredGlobalGitHubToken ? "Token stored in Keychain" : "No token stored",
+                systemImage: appState.hasStoredGlobalGitHubToken ? "checkmark.seal.fill" : "key.slash"
+            )
+            .font(.caption)
+            .foregroundStyle(appState.hasStoredGlobalGitHubToken ? .green : .secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
