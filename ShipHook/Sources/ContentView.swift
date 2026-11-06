@@ -108,7 +108,6 @@ struct ContentView: View {
                 .padding(.top, 12)
                 .padding(.bottom, 10)
             }
-            .scrollClipDisabled()
 
             Button {
                 showingAddRepositoryWizard = true
