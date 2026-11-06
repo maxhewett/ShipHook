@@ -3,12 +3,12 @@
     <channel>
         <title>ShipHook</title>
         <item>
-            <title>1.2.81</title>
-            <pubDate>Thu, 27 Aug 2026 20:50:48 +1200</pubDate>
-            <sparkle:version>1281</sparkle:version>
-            <sparkle:shortVersionString>1.2.81</sparkle:shortVersionString>
+            <title>1.2.82</title>
+            <pubDate>Fri, 06 Nov 2026 20:38:11 +1300</pubDate>
+            <sparkle:version>1282</sparkle:version>
+            <sparkle:shortVersionString>1.2.82</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/maxhewett/ShipHook/releases/download/v1.2.81/ShipHook-1.2.81.zip" length="7643838" type="application/octet-stream" sparkle:edSignature="awvWwnUEDI/lx/2KiSJdV9uKRnnHoNoaX7S1D4BcEk5wLrgkUbQPrstMjnqSxligM1TBh0hmd2JBVyJhtac6Dg=="/>
+            <enclosure url="https://github.com/maxhewett/ShipHook/releases/download/v1.2.82/ShipHook-1.2.82.zip" length="7643189" type="application/octet-stream" sparkle:edSignature="cFzjCnX/EnoO8A6GCRXgO8Q1YnWFNR+l9qk80Qv3oOBuANKk16w+4DNhKW6cqJo2Pz9I+lUhRwOeu7rN/rbQDQ=="/>
         </item>
     </channel>
 </rss>
